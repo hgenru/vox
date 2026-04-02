@@ -9,6 +9,7 @@ members = [
     "crates/client",
     "crates/app",
     "crates/bootstrap-test",
+    "crates/shader-builder",
 ]
 # These crates are compiled to SPIR-V by spirv-builder, not native
 exclude = ["crates/shaders", "crates/bootstrap-shader"]
