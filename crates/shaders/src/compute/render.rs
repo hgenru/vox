@@ -111,14 +111,14 @@ fn pack_bgra(r: u32, g: u32, b: u32, a: u32) -> u32 {
 /// Returns (r, g, b) as floats in [0, 1].
 fn material_color(material_id: u32) -> Vec3 {
     if material_id == 0 {
-        // Stone: gray
-        Vec3::new(0.5, 0.5, 0.5)
+        // Stone: warm gray
+        Vec3::new(0.55, 0.52, 0.5)
     } else if material_id == 1 {
-        // Water: blue
-        Vec3::new(0.2, 0.4, 0.9)
+        // Water: brighter blue
+        Vec3::new(0.15, 0.4, 0.95)
     } else if material_id == 2 {
-        // Lava: orange
-        Vec3::new(1.0, 0.3, 0.0)
+        // Lava: orange-red base (emissive added in shading)
+        Vec3::new(1.0, 0.3, 0.05)
     } else {
         // Unknown: magenta
         Vec3::new(1.0, 0.0, 1.0)
@@ -185,7 +185,7 @@ pub fn render_pixel(
     } else if eye.x < 0.0 || eye.x > grid {
         // Ray parallel to X slab and outside
         let pixel_idx = (py * width + px) as usize;
-        output[pixel_idx] = pack_bgra(15, 15, 25, 255);
+        output[pixel_idx] = pack_bgra(18, 18, 40, 255);
         return;
     }
 
@@ -198,7 +198,7 @@ pub fn render_pixel(
         t_max = if tb < t_max { tb } else { t_max };
     } else if eye.y < 0.0 || eye.y > grid {
         let pixel_idx = (py * width + px) as usize;
-        output[pixel_idx] = pack_bgra(15, 15, 25, 255);
+        output[pixel_idx] = pack_bgra(18, 18, 40, 255);
         return;
     }
 
@@ -211,13 +211,13 @@ pub fn render_pixel(
         t_max = if tb < t_max { tb } else { t_max };
     } else if eye.z < 0.0 || eye.z > grid {
         let pixel_idx = (py * width + px) as usize;
-        output[pixel_idx] = pack_bgra(15, 15, 25, 255);
+        output[pixel_idx] = pack_bgra(18, 18, 40, 255);
         return;
     }
 
     if t_min > t_max || t_max < 0.0 {
         let pixel_idx = (py * width + px) as usize;
-        output[pixel_idx] = pack_bgra(15, 15, 25, 255);
+        output[pixel_idx] = pack_bgra(18, 18, 40, 255);
         return;
     }
 
@@ -329,15 +329,37 @@ pub fn render_pixel(
         let base_color = material_color(hit_material);
         let lit_color = apply_lighting(base_color, normal);
 
+        // Add emissive glow for lava (material_id == 2)
+        let final_color = if hit_material == 2 {
+            let emissive = Vec3::new(1.0, 0.6, 0.1) * 0.8;
+            Vec3::new(
+                lit_color.x + emissive.x,
+                lit_color.y + emissive.y,
+                lit_color.z + emissive.z,
+            )
+        } else {
+            lit_color
+        };
+
         // Clamp and convert to u8
-        let r = ((lit_color.x * 255.0) as u32).min(255);
-        let g = ((lit_color.y * 255.0) as u32).min(255);
-        let b = ((lit_color.z * 255.0) as u32).min(255);
+        let r = ((final_color.x * 255.0) as u32).min(255);
+        let g = ((final_color.y * 255.0) as u32).min(255);
+        let b = ((final_color.z * 255.0) as u32).min(255);
 
         output[pixel_idx] = pack_bgra(r, g, b, 255);
     } else {
-        // Dark sky background
-        output[pixel_idx] = pack_bgra(15, 15, 25, 255);
+        // Sky gradient based on ray direction Y
+        let t = (ray_dir.y * 0.5 + 0.5).clamp(0.0, 1.0);
+        // Lerp from dark navy (bottom) to slightly lighter (top)
+        let sky = Vec3::new(
+            0.05 + (0.1 - 0.05) * t,
+            0.05 + (0.1 - 0.05) * t,
+            0.12 + (0.2 - 0.12) * t,
+        );
+        let r = ((sky.x * 255.0) as u32).min(255);
+        let g = ((sky.y * 255.0) as u32).min(255);
+        let b = ((sky.z * 255.0) as u32).min(255);
+        output[pixel_idx] = pack_bgra(r, g, b, 255);
     }
 }
 

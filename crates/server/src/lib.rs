@@ -493,7 +493,14 @@ impl GpuSimulation {
     /// Ray-marches through the voxel grid and writes pixel data to the
     /// render output buffer. The command buffer must be in recording state.
     /// Call this after `step()` (which populates the voxel buffer).
-    pub fn render(&self, cmd: vk::CommandBuffer, width: u32, height: u32) {
+    pub fn render(
+        &self,
+        cmd: vk::CommandBuffer,
+        width: u32,
+        height: u32,
+        eye: [f32; 3],
+        target: [f32; 3],
+    ) {
         // Barrier: ensure voxelize writes are visible to render shader reads
         Self::barrier(cmd, &self.device);
 
@@ -502,8 +509,8 @@ impl GpuSimulation {
             height,
             grid_size: GRID_SIZE,
             _pad: 0,
-            eye: glam::Vec4::new(48.0, 32.0, 48.0, 0.0),
-            target: glam::Vec4::new(16.0, 8.0, 16.0, 0.0),
+            eye: glam::Vec4::new(eye[0], eye[1], eye[2], 0.0),
+            target: glam::Vec4::new(target[0], target[1], target[2], 0.0),
         };
 
         let wg_x = (width + 7) / 8;

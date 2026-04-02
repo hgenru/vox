@@ -225,9 +225,11 @@ fn run_headless(args: &Args) -> Result<()> {
         }
     }
 
-    // Render final frame
+    // Render final frame with default camera position
+    let eye = [48.0_f32, 24.0, 48.0];
+    let target = [16.0_f32, 8.0, 16.0];
     ctx.execute_one_shot(|cmd| {
-        sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT);
+        sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye, target);
     })?;
 
     // Readback render output buffer
@@ -481,11 +483,19 @@ impl ApplicationHandler for App {
                 {
                     // Run simulation substeps + render to buffer
                     let substeps = self.substeps;
+                    let eye = self.camera.eye();
+                    let target = self.camera.target();
                     if let Err(e) = ctx.execute_one_shot(|cmd| {
                         for _ in 0..substeps {
                             sim.step(cmd);
                         }
-                        sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT);
+                        sim.render(
+                            cmd,
+                            RENDER_WIDTH,
+                            RENDER_HEIGHT,
+                            [eye.x, eye.y, eye.z],
+                            [target.x, target.y, target.z],
+                        );
                     }) {
                         tracing::error!("Simulation/render error: {}", e);
                     }
