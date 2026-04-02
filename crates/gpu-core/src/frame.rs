@@ -7,9 +7,11 @@
 use ash::vk;
 use shared::FRAMES_IN_FLIGHT;
 
-use crate::context::VulkanContext;
-use crate::error::{GpuError, Result};
-use crate::swapchain::Swapchain;
+use crate::{
+    context::VulkanContext,
+    error::{GpuError, Result},
+    swapchain::Swapchain,
+};
 
 /// Per-frame synchronization and command recording state.
 pub struct PerFrameData {
@@ -56,8 +58,7 @@ impl FrameManager {
         let pool_ci = vk::CommandPoolCreateInfo::default()
             .queue_family_index(ctx.queue_families.graphics)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-        let command_pool =
-            unsafe { ctx.device.create_command_pool(&pool_ci, None)? };
+        let command_pool = unsafe { ctx.device.create_command_pool(&pool_ci, None)? };
         ctx.set_debug_name(command_pool, "frame-cmd-pool");
 
         // Allocate command buffers
@@ -65,35 +66,22 @@ impl FrameManager {
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(n as u32);
-        let command_buffers =
-            unsafe { ctx.device.allocate_command_buffers(&cmd_alloc)? };
+        let command_buffers = unsafe { ctx.device.allocate_command_buffers(&cmd_alloc)? };
 
         // Create per-frame sync objects
         let mut frames = Vec::with_capacity(n);
         for i in 0..n {
-            let fence_ci = vk::FenceCreateInfo::default()
-                .flags(vk::FenceCreateFlags::SIGNALED);
+            let fence_ci = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
             let fence = unsafe { ctx.device.create_fence(&fence_ci, None)? };
 
             let sem_ci = vk::SemaphoreCreateInfo::default();
-            let image_available =
-                unsafe { ctx.device.create_semaphore(&sem_ci, None)? };
-            let render_finished =
-                unsafe { ctx.device.create_semaphore(&sem_ci, None)? };
+            let image_available = unsafe { ctx.device.create_semaphore(&sem_ci, None)? };
+            let render_finished = unsafe { ctx.device.create_semaphore(&sem_ci, None)? };
 
             ctx.set_debug_name(fence, &format!("frame-fence-{}", i));
-            ctx.set_debug_name(
-                image_available,
-                &format!("image-available-{}", i),
-            );
-            ctx.set_debug_name(
-                render_finished,
-                &format!("render-finished-{}", i),
-            );
-            ctx.set_debug_name(
-                command_buffers[i],
-                &format!("frame-cmd-{}", i),
-            );
+            ctx.set_debug_name(image_available, &format!("image-available-{}", i));
+            ctx.set_debug_name(render_finished, &format!("render-finished-{}", i));
+            ctx.set_debug_name(command_buffers[i], &format!("frame-cmd-{}", i));
 
             frames.push(PerFrameData {
                 fence,
@@ -125,18 +113,16 @@ impl FrameManager {
 
         // Wait for this frame's previous work to finish
         unsafe {
-            ctx.device
-                .wait_for_fences(&[frame.fence], true, u64::MAX)?;
+            ctx.device.wait_for_fences(&[frame.fence], true, u64::MAX)?;
         }
 
         // Acquire next swapchain image
-        let (image_index, suboptimal) = match swapchain
-            .acquire_next_image(frame.image_available, u64::MAX)
-        {
-            Ok((idx, sub)) => (idx, sub),
-            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => return Ok(None),
-            Err(e) => return Err(GpuError::Vulkan(e)),
-        };
+        let (image_index, suboptimal) =
+            match swapchain.acquire_next_image(frame.image_available, u64::MAX) {
+                Ok((idx, sub)) => (idx, sub),
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => return Ok(None),
+                Err(e) => return Err(GpuError::Vulkan(e)),
+            };
 
         if suboptimal {
             return Ok(None);
@@ -149,10 +135,8 @@ impl FrameManager {
 
         // Reset and begin command buffer
         unsafe {
-            ctx.device.reset_command_buffer(
-                frame.command_buffer,
-                vk::CommandBufferResetFlags::empty(),
-            )?;
+            ctx.device
+                .reset_command_buffer(frame.command_buffer, vk::CommandBufferResetFlags::empty())?;
             ctx.device.begin_command_buffer(
                 frame.command_buffer,
                 &vk::CommandBufferBeginInfo::default()
@@ -196,11 +180,8 @@ impl FrameManager {
             .signal_semaphores(&signal_semaphores);
 
         unsafe {
-            ctx.device.queue_submit(
-                ctx.graphics_queue,
-                &[submit],
-                frame.fence,
-            )?;
+            ctx.device
+                .queue_submit(ctx.graphics_queue, &[submit], frame.fence)?;
         }
 
         // Present
@@ -215,8 +196,7 @@ impl FrameManager {
         };
 
         // Advance frame index
-        self.current_frame =
-            (self.current_frame + 1) % FRAMES_IN_FLIGHT as usize;
+        self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT as usize;
 
         Ok(present_ok)
     }
@@ -228,10 +208,8 @@ impl FrameManager {
 
             for frame in &self.frames {
                 ctx.device.destroy_fence(frame.fence, None);
-                ctx.device
-                    .destroy_semaphore(frame.image_available, None);
-                ctx.device
-                    .destroy_semaphore(frame.render_finished, None);
+                ctx.device.destroy_semaphore(frame.image_available, None);
+                ctx.device.destroy_semaphore(frame.render_finished, None);
             }
 
             ctx.device.destroy_command_pool(self.command_pool, None);

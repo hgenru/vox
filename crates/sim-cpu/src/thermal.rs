@@ -24,11 +24,7 @@ use crate::grid::{bspline_weight, grid_index};
 /// - `particles`: mutable particle slice
 /// - `materials`: material parameter table
 /// - `dt`: timestep
-pub fn diffuse_temperature(
-    particles: &mut [Particle],
-    materials: &[MaterialParams],
-    dt: f32,
-) {
+pub fn diffuse_temperature(particles: &mut [Particle], materials: &[MaterialParams], dt: f32) {
     let gs = GRID_SIZE as f32;
 
     // First, accumulate temperature onto grid (weighted average)
@@ -56,9 +52,8 @@ pub fn diffuse_temperature(
                         None => continue,
                     };
                     let dist = grid_pos - Vec3::new(ix as f32, iy as f32, iz as f32);
-                    let w = bspline_weight(dist.x)
-                        * bspline_weight(dist.y)
-                        * bspline_weight(dist.z);
+                    let w =
+                        bspline_weight(dist.x) * bspline_weight(dist.y) * bspline_weight(dist.z);
 
                     grid_temp[idx] += w * mass * temp;
                     grid_mass[idx] += w * mass;
@@ -107,9 +102,8 @@ pub fn diffuse_temperature(
                         None => continue,
                     };
                     let dist = grid_pos - Vec3::new(ix as f32, iy as f32, iz as f32);
-                    let w = bspline_weight(dist.x)
-                        * bspline_weight(dist.y)
-                        * bspline_weight(dist.z);
+                    let w =
+                        bspline_weight(dist.x) * bspline_weight(dist.y) * bspline_weight(dist.z);
 
                     t_avg += w * grid_temp[idx];
                     w_total += w;
@@ -143,10 +137,11 @@ pub fn apply_phase_transitions(particles: &mut [Particle]) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use shared::material::{
-        default_material_table, MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_LIQUID, PHASE_SOLID,
+        MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_LIQUID, PHASE_SOLID, default_material_table,
     };
+
+    use super::*;
 
     #[test]
     fn temperature_diffusion_equalizes() {
@@ -160,15 +155,13 @@ mod tests {
             },
             // Cold particle nearby
             {
-                let mut p =
-                    Particle::new(Vec3::new(0.52, 0.5, 0.5), 1.0, MAT_STONE, PHASE_SOLID);
+                let mut p = Particle::new(Vec3::new(0.52, 0.5, 0.5), 1.0, MAT_STONE, PHASE_SOLID);
                 p.set_temperature(100.0);
                 p
             },
         ];
 
-        let initial_diff =
-            (particles[0].temperature() - particles[1].temperature()).abs();
+        let initial_diff = (particles[0].temperature() - particles[1].temperature()).abs();
 
         for _ in 0..100 {
             diffuse_temperature(&mut particles, &table, 0.01);
@@ -222,8 +215,7 @@ mod tests {
             },
             // Cold stone nearby (acts as heat sink)
             {
-                let mut p =
-                    Particle::new(Vec3::new(0.52, 0.5, 0.5), 10.0, MAT_STONE, PHASE_SOLID);
+                let mut p = Particle::new(Vec3::new(0.52, 0.5, 0.5), 10.0, MAT_STONE, PHASE_SOLID);
                 p.set_temperature(20.0);
                 p
             },

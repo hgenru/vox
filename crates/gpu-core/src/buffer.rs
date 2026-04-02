@@ -6,11 +6,15 @@
 
 use ash::vk;
 use bytemuck::Pod;
-use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
-use gpu_allocator::MemoryLocation;
+use gpu_allocator::{
+    MemoryLocation,
+    vulkan::{Allocation, AllocationCreateDesc, AllocationScheme},
+};
 
-use crate::context::VulkanContext;
-use crate::error::{GpuError, Result};
+use crate::{
+    context::VulkanContext,
+    error::{GpuError, Result},
+};
 
 /// A GPU buffer with its associated memory allocation.
 ///
@@ -112,10 +116,7 @@ fn create_buffer_internal(
     let requirements = unsafe { ctx.device.get_buffer_memory_requirements(buffer) };
 
     let allocation = {
-        let mut allocator = ctx
-            .allocator
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut allocator = ctx.allocator.lock().unwrap_or_else(|e| e.into_inner());
         allocator.allocate(&AllocationCreateDesc {
             name,
             requirements,
@@ -149,9 +150,7 @@ pub fn upload<T: Pod>(ctx: &VulkanContext, data: &[T], dst: &GpuBuffer) -> Resul
 
     // Copy data into staging buffer
     {
-        let mapped = staging
-            .mapped_slice_mut()
-            .ok_or(GpuError::MappingFailed)?;
+        let mapped = staging.mapped_slice_mut().ok_or(GpuError::MappingFailed)?;
         let src_bytes = bytemuck::cast_slice::<T, u8>(data);
         mapped[..src_bytes.len()].copy_from_slice(src_bytes);
     }
@@ -173,11 +172,7 @@ pub fn upload<T: Pod>(ctx: &VulkanContext, data: &[T], dst: &GpuBuffer) -> Resul
 ///
 /// Creates a temporary staging buffer, copies from `src` on GPU, maps the
 /// staging buffer, and returns the data as a `Vec<T>`.
-pub fn readback<T: Pod>(
-    ctx: &VulkanContext,
-    src: &GpuBuffer,
-    count: usize,
-) -> Result<Vec<T>> {
+pub fn readback<T: Pod>(ctx: &VulkanContext, src: &GpuBuffer, count: usize) -> Result<Vec<T>> {
     let byte_size = (count * std::mem::size_of::<T>()) as vk::DeviceSize;
     let staging = create_readback_staging_buffer(ctx, byte_size, "readback-staging")?;
 
@@ -192,9 +187,7 @@ pub fn readback<T: Pod>(
 
     // Read from mapped staging buffer
     let result = {
-        let mapped = staging
-            .mapped_slice()
-            .ok_or(GpuError::MappingFailed)?;
+        let mapped = staging.mapped_slice().ok_or(GpuError::MappingFailed)?;
         let typed: &[T] = bytemuck::cast_slice(&mapped[..byte_size as usize]);
         typed.to_vec()
     };
@@ -209,10 +202,7 @@ pub fn destroy_buffer(ctx: &VulkanContext, mut buf: GpuBuffer) {
         ctx.device.destroy_buffer(buf.buffer, None);
     }
     if let Some(allocation) = buf.allocation.take() {
-        let mut allocator = ctx
-            .allocator
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut allocator = ctx.allocator.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(e) = allocator.free(allocation) {
             tracing::error!("Failed to free buffer allocation: {}", e);
         }
@@ -237,9 +227,8 @@ mod tests {
         assert_ne!(device_buf.buffer, vk::Buffer::null());
         assert_eq!(device_buf.size, 1024);
 
-        let staging_buf =
-            create_upload_staging_buffer(&ctx, 1024, "test-staging-buf")
-                .expect("Failed to create staging buffer");
+        let staging_buf = create_upload_staging_buffer(&ctx, 1024, "test-staging-buf")
+            .expect("Failed to create staging buffer");
         assert_ne!(staging_buf.buffer, vk::Buffer::null());
         assert!(staging_buf.mapped_ptr().is_some());
 
@@ -261,8 +250,7 @@ mod tests {
         .expect("Failed to create buffer");
 
         upload(&ctx, &data, &buf).expect("Upload failed");
-        let result: Vec<u32> =
-            readback(&ctx, &buf, data.len()).expect("Readback failed");
+        let result: Vec<u32> = readback(&ctx, &buf, data.len()).expect("Readback failed");
 
         assert_eq!(data, result);
 

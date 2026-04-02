@@ -6,7 +6,7 @@
 use glam::Vec3;
 use shared::{
     constants::{DT, GRID_CELL_COUNT, GRID_SIZE},
-    material::{default_material_table, MaterialParams, MATERIAL_COUNT},
+    material::{MATERIAL_COUNT, MaterialParams, default_material_table},
     particle::{GridCell, Particle},
 };
 use thiserror::Error;
@@ -241,14 +241,13 @@ pub fn create_particle_block(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use shared::material::{MAT_WATER, PHASE_LIQUID};
+
+    use super::*;
 
     #[test]
     fn simulation_step_runs() {
-        let particles = vec![
-            Particle::new(Vec3::new(0.5, 0.5, 0.5), 1.0, MAT_WATER, 1),
-        ];
+        let particles = vec![Particle::new(Vec3::new(0.5, 0.5, 0.5), 1.0, MAT_WATER, 1)];
         let mut sim = Simulation::new(particles);
         sim.step(DT).unwrap();
         assert_eq!(sim.step_count, 1);
@@ -257,9 +256,7 @@ mod tests {
 
     #[test]
     fn simulation_run_multiple_steps() {
-        let particles = vec![
-            Particle::new(Vec3::new(0.5, 0.5, 0.5), 1.0, MAT_WATER, 1),
-        ];
+        let particles = vec![Particle::new(Vec3::new(0.5, 0.5, 0.5), 1.0, MAT_WATER, 1)];
         let mut sim = Simulation::new(particles);
         sim.run(100).unwrap();
         assert_eq!(sim.step_count, 100);
@@ -356,9 +353,7 @@ mod tests {
 
     #[test]
     fn kinetic_energy_increases_under_gravity() {
-        let particles = vec![
-            Particle::new(Vec3::new(0.5, 0.8, 0.5), 1.0, MAT_WATER, 1),
-        ];
+        let particles = vec![Particle::new(Vec3::new(0.5, 0.8, 0.5), 1.0, MAT_WATER, 1)];
         let mut sim = Simulation::new(particles);
         let ke_initial = sim.kinetic_energy();
         sim.run(20).unwrap();
@@ -372,9 +367,7 @@ mod tests {
 
     #[test]
     fn validate_catches_bad_material() {
-        let particles = vec![
-            Particle::new(Vec3::new(0.5, 0.5, 0.5), 1.0, 99, 0),
-        ];
+        let particles = vec![Particle::new(Vec3::new(0.5, 0.5, 0.5), 1.0, 99, 0)];
         let mut sim = Simulation::new(particles);
         let result = sim.step(DT);
         assert!(result.is_err());

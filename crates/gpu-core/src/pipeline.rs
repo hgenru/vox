@@ -4,11 +4,14 @@
 //! pipeline layouts, compute pipelines, descriptor pools, and updating
 //! descriptor sets with buffer bindings.
 
-use ash::vk;
 use std::ffi::CStr;
 
-use crate::context::VulkanContext;
-use crate::error::{GpuError, Result};
+use ash::vk;
+
+use crate::{
+    context::VulkanContext,
+    error::{GpuError, Result},
+};
 
 /// Description of a single descriptor binding.
 #[derive(Debug, Clone, Copy)]
@@ -44,7 +47,11 @@ pub fn create_shader_module(
     let module = unsafe { ctx.device.create_shader_module(&shader_ci, None)? };
 
     ctx.set_debug_name(module, name);
-    tracing::debug!("Created shader module '{}' ({} bytes)", name, spv_bytes.len());
+    tracing::debug!(
+        "Created shader module '{}' ({} bytes)",
+        name,
+        spv_bytes.len()
+    );
 
     Ok(module)
 }
@@ -66,12 +73,8 @@ pub fn create_descriptor_set_layout(
         })
         .collect();
 
-    let layout_ci =
-        vk::DescriptorSetLayoutCreateInfo::default().bindings(&vk_bindings);
-    let layout = unsafe {
-        ctx.device
-            .create_descriptor_set_layout(&layout_ci, None)?
-    };
+    let layout_ci = vk::DescriptorSetLayoutCreateInfo::default().bindings(&vk_bindings);
+    let layout = unsafe { ctx.device.create_descriptor_set_layout(&layout_ci, None)? };
 
     ctx.set_debug_name(layout, name);
     Ok(layout)
@@ -123,11 +126,7 @@ pub fn create_compute_pipeline(
 
     let pipeline = unsafe {
         ctx.device
-            .create_compute_pipelines(
-                vk::PipelineCache::null(),
-                &[pipeline_ci],
-                None,
-            )
+            .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_ci], None)
             .map_err(|e| e.1)?[0]
     };
 
@@ -231,10 +230,7 @@ pub fn destroy_pipeline_layout(ctx: &VulkanContext, layout: vk::PipelineLayout) 
 }
 
 /// Destroy a descriptor set layout.
-pub fn destroy_descriptor_set_layout(
-    ctx: &VulkanContext,
-    layout: vk::DescriptorSetLayout,
-) {
+pub fn destroy_descriptor_set_layout(ctx: &VulkanContext, layout: vk::DescriptorSetLayout) {
     unsafe {
         ctx.device.destroy_descriptor_set_layout(layout, None);
     }
@@ -288,13 +284,11 @@ mod tests {
             stage_flags: vk::ShaderStageFlags::COMPUTE,
         }];
 
-        let ds_layout =
-            create_descriptor_set_layout(&ctx, &bindings, "test-ds-layout")
-                .expect("Failed to create descriptor set layout");
+        let ds_layout = create_descriptor_set_layout(&ctx, &bindings, "test-ds-layout")
+            .expect("Failed to create descriptor set layout");
 
-        let pipe_layout =
-            create_pipeline_layout(&ctx, &[ds_layout], 16, "test-pipe-layout")
-                .expect("Failed to create pipeline layout");
+        let pipe_layout = create_pipeline_layout(&ctx, &[ds_layout], 16, "test-pipe-layout")
+            .expect("Failed to create pipeline layout");
         assert_ne!(pipe_layout, vk::PipelineLayout::null());
 
         destroy_pipeline_layout(&ctx, pipe_layout);
@@ -327,9 +321,8 @@ mod tests {
             stage_flags: vk::ShaderStageFlags::COMPUTE,
         }];
 
-        let ds_layout =
-            create_descriptor_set_layout(&ctx, &bindings, "test-ds-layout")
-                .expect("Failed to create descriptor set layout");
+        let ds_layout = create_descriptor_set_layout(&ctx, &bindings, "test-ds-layout")
+            .expect("Failed to create descriptor set layout");
 
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
@@ -339,9 +332,8 @@ mod tests {
         let pool = create_descriptor_pool(&ctx, &pool_sizes, 4, "test-pool")
             .expect("Failed to create descriptor pool");
 
-        let sets =
-            allocate_descriptor_sets(&ctx, pool, &[ds_layout, ds_layout])
-                .expect("Failed to allocate descriptor sets");
+        let sets = allocate_descriptor_sets(&ctx, pool, &[ds_layout, ds_layout])
+            .expect("Failed to allocate descriptor sets");
         assert_eq!(sets.len(), 2);
 
         destroy_descriptor_pool(&ctx, pool);

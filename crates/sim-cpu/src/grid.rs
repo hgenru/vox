@@ -136,11 +136,7 @@ pub fn p2g(particles: &[Particle], grid: &mut [GridCell], materials: &[MaterialP
                     };
 
                     // Grid node position in world space
-                    let xi = Vec3::new(
-                        ix as f32 / gs,
-                        iy as f32 / gs,
-                        iz as f32 / gs,
-                    );
+                    let xi = Vec3::new(ix as f32 / gs, iy as f32 / gs, iz as f32 / gs);
 
                     // Distances in grid units
                     let dist = grid_pos - Vec3::new(ix as f32, iy as f32, iz as f32);
@@ -280,11 +276,7 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], dt: f32) {
                         None => continue,
                     };
 
-                    let xi = Vec3::new(
-                        ix as f32 / gs,
-                        iy as f32 / gs,
-                        iz as f32 / gs,
-                    );
+                    let xi = Vec3::new(ix as f32 / gs, iy as f32 / gs, iz as f32 / gs);
 
                     let dist = grid_pos - Vec3::new(ix as f32, iy as f32, iz as f32);
 
@@ -354,11 +346,12 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], dt: f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use shared::{
         constants::GRID_CELL_COUNT,
-        material::{default_material_table, MAT_WATER},
+        material::{MAT_WATER, default_material_table},
     };
+
+    use super::*;
 
     fn make_grid() -> Vec<GridCell> {
         vec![
@@ -378,9 +371,7 @@ mod tests {
         // distances to nodes base+0, base+1, base+2 are xp-base, xp-base-1, xp-base-2
         for xp in [5.0, 5.1, 5.25, 5.5, 5.75, 5.99] {
             let base = (xp - 0.5_f32).floor() as i32;
-            let sum: f32 = (0..3)
-                .map(|i| bspline_weight(xp - (base + i) as f32))
-                .sum();
+            let sum: f32 = (0..3).map(|i| bspline_weight(xp - (base + i) as f32)).sum();
             assert!(
                 (sum - 1.0).abs() < 1e-6,
                 "B-spline weights don't sum to 1 for xp={xp}: sum={sum}"
@@ -465,9 +456,12 @@ mod tests {
     fn water_falls_downward() {
         let table = default_material_table();
         let initial_y = 0.6;
-        let mut particles = vec![
-            Particle::new(Vec3::new(0.5, initial_y, 0.5), 1.0, MAT_WATER, 1),
-        ];
+        let mut particles = vec![Particle::new(
+            Vec3::new(0.5, initial_y, 0.5),
+            1.0,
+            MAT_WATER,
+            1,
+        )];
 
         let dt = 0.001;
         let steps = 50;

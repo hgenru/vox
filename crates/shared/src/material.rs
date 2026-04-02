@@ -43,32 +43,32 @@ pub fn default_material_table() -> [MaterialParams; MATERIAL_COUNT] {
         // Stone (solid)
         MaterialParams {
             elastic: Vec4::new(
-                1e6,  // youngs_modulus
-                0.3,  // poissons_ratio
-                1e4,  // yield_stress
-                0.0,  // viscosity (solid — not used)
+                1e6, // youngs_modulus
+                0.3, // poissons_ratio
+                1e4, // yield_stress
+                0.0, // viscosity (solid — not used)
             ),
             thermal: Vec4::new(
-                1500.0, // melting_point → becomes lava
+                1500.0,   // melting_point → becomes lava
                 f32::MAX, // boiling_point (stone doesn't boil)
-                1.0,    // heat_conductivity
-                800.0,  // specific_heat
+                1.0,      // heat_conductivity
+                800.0,    // specific_heat
             ),
             visual: Vec4::new(
-                2700.0, // density (kg/m³)
+                2700.0,   // density (kg/m³)
                 f32::MAX, // emissive_temp (stone doesn't glow)
-                1.0,    // opacity
-                0.0,    // pad
+                1.0,      // opacity
+                0.0,      // pad
             ),
             color: Vec4::new(0.5, 0.5, 0.5, 0.0), // gray
         },
         // Water (liquid)
         MaterialParams {
             elastic: Vec4::new(
-                0.0,    // youngs_modulus (liquid — not used)
-                0.0,    // poissons_ratio
-                0.0,    // yield_stress
-                1e-3,   // viscosity
+                0.0,  // youngs_modulus (liquid — not used)
+                0.0,  // poissons_ratio
+                0.0,  // yield_stress
+                1e-3, // viscosity
             ),
             thermal: Vec4::new(
                 0.0,    // melting_point (water freezes at 0)
@@ -77,9 +77,9 @@ pub fn default_material_table() -> [MaterialParams; MATERIAL_COUNT] {
                 4186.0, // specific_heat
             ),
             visual: Vec4::new(
-                1000.0, // density
+                1000.0,   // density
                 f32::MAX, // emissive_temp
-                0.3,    // opacity (translucent)
+                0.3,      // opacity (translucent)
                 0.0,
             ),
             color: Vec4::new(0.2, 0.4, 0.9, 0.0), // blue
@@ -87,16 +87,16 @@ pub fn default_material_table() -> [MaterialParams; MATERIAL_COUNT] {
         // Lava (liquid, hot)
         MaterialParams {
             elastic: Vec4::new(
-                0.0,    // youngs_modulus
-                0.0,    // poissons_ratio
-                0.0,    // yield_stress
-                100.0,  // viscosity (very viscous)
+                0.0,   // youngs_modulus
+                0.0,   // poissons_ratio
+                0.0,   // yield_stress
+                100.0, // viscosity (very viscous)
             ),
             thermal: Vec4::new(
-                1500.0, // melting_point (below this → stone)
+                1500.0,   // melting_point (below this → stone)
                 f32::MAX, // boiling_point
-                1.5,    // heat_conductivity
-                1000.0, // specific_heat
+                1.5,      // heat_conductivity
+                1000.0,   // specific_heat
             ),
             visual: Vec4::new(
                 2500.0, // density
@@ -111,8 +111,9 @@ pub fn default_material_table() -> [MaterialParams; MATERIAL_COUNT] {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::mem::offset_of;
+
+    use super::*;
 
     #[test]
     fn material_params_struct_layout() {
@@ -150,7 +151,7 @@ mod tests {
     fn water_is_material_one() {
         let table = default_material_table();
         assert!(table[MAT_WATER as usize].elastic.w > 0.0); // has viscosity
-        assert!(table[MAT_WATER as usize].visual.z < 1.0);  // translucent
+        assert!(table[MAT_WATER as usize].visual.z < 1.0); // translucent
     }
 
     #[test]

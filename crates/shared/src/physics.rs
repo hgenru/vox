@@ -7,9 +7,7 @@
 
 use glam::Mat3;
 
-use crate::material::MaterialParams;
-use crate::particle::Particle;
-use crate::svd::polar_decomposition;
+use crate::{material::MaterialParams, particle::Particle, svd::polar_decomposition};
 
 /// Small epsilon to prevent division by zero.
 const STRESS_EPSILON: f32 = 1e-10;
@@ -76,9 +74,7 @@ fn solid_stress(particle: &Particle, material: &MaterialParams) -> Mat3 {
 
     // Fixed corotated: Piola-Kirchhoff stress P = 2*mu*(F - R) + lambda*(J - 1)*J*F^{-T}
     // Kirchhoff stress tau = P * F^T = 2*mu*(F - R)*F^T + lambda*(J - 1)*J*I
-    let tau = 2.0 * mu * (f - r) * f.transpose() + lambda * (j - 1.0) * j * Mat3::IDENTITY;
-
-    tau
+    2.0 * mu * (f - r) * f.transpose() + lambda * (j - 1.0) * j * Mat3::IDENTITY
 }
 
 /// Equation-of-state + viscous stress for liquid particles.
@@ -108,9 +104,7 @@ fn liquid_stress(particle: &Particle, material: &MaterialParams) -> Mat3 {
 
     // Kirchhoff stress: tau = -p*J*I + 2*eta*J*D'
     // (multiply by J to get Kirchhoff from Cauchy)
-    let tau = -pressure * j * Mat3::IDENTITY + 2.0 * viscosity * j * deviatoric_d;
-
-    tau
+    -pressure * j * Mat3::IDENTITY + 2.0 * viscosity * j * deviatoric_d
 }
 
 /// Gas constitutive model: weak EOS with minimal viscosity.
@@ -125,9 +119,10 @@ fn gas_stress(particle: &Particle, material: &MaterialParams) -> Mat3 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::material::{default_material_table, MAT_STONE, MAT_WATER};
     use glam::Vec3;
+
+    use super::*;
+    use crate::material::{MAT_STONE, MAT_WATER, default_material_table};
 
     #[test]
     fn lame_from_youngs_poissons() {

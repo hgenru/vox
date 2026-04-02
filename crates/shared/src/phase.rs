@@ -8,8 +8,10 @@
 //!
 //! On transition: reset F = Identity, damage = 0, update phase.
 
-use crate::material::{MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_GAS, PHASE_LIQUID, PHASE_SOLID};
-use crate::particle::Particle;
+use crate::{
+    material::{MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_GAS, PHASE_LIQUID, PHASE_SOLID},
+    particle::Particle,
+};
 
 /// Result of checking a phase transition for a particle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,8 +91,9 @@ pub fn apply_phase_transition(particle: &mut Particle, transition: PhaseTransiti
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use glam::Vec3;
+
+    use super::*;
 
     #[test]
     fn stone_melts_to_lava() {

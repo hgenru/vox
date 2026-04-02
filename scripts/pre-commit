@@ -1,0 +1,10 @@
+#!/bin/bash
+set -e
+
+echo "==> Running cargo fmt check..."
+cargo fmt --all -- --check
+
+echo "==> Running clippy on CPU crates..."
+cargo clippy -p shared -p sim-cpu -p protocol -- -D warnings
+
+echo "==> Pre-commit checks passed."
