@@ -5,3 +5,4 @@
 //! Implements: Grid operations, P2G, grid update, G2P, simulation orchestrator.
 
 pub mod grid;
+pub mod world;
