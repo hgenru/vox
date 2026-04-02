@@ -78,101 +78,62 @@ fn parse_args() -> Args {
 
 /// Create the initial set of particles for the MVP demo.
 ///
-/// Scene: stone basin (floor + walls) containing a water pool,
-/// with a lava cube dropping from above. Demonstrates water-lava
-/// reaction (stone + steam), temperature, and phase transitions.
+/// Scene: hollow ellipsoidal cave carved from a stone block,
+/// with a water lake at the bottom and a lava stream dripping
+/// from a ceiling crack. Demonstrates water-lava reaction
+/// (stone + steam), temperature, and phase transitions.
 fn create_initial_particles() -> Vec<Particle> {
     let mut particles = Vec::new();
+    let center = Vec3::new(16.0, 12.0, 16.0);
+    let radii = Vec3::new(10.0, 8.0, 10.0); // ellipsoid radii
 
-    // Stone floor: y=2..4, full grid width
+    // 1. Stone shell: fill solid block, skip interior of ellipsoid (= cave)
     for x in 2..30 {
         for z in 2..30 {
-            for y in 2..4 {
-                particles.push(Particle::new(
-                    Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-                    1.0,
-                    MAT_STONE,
-                    PHASE_SOLID,
-                ));
+            for y in 2..28 {
+                let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                let d = (pos - center) / radii;
+                let dist_sq = d.x * d.x + d.y * d.y + d.z * d.z;
+
+                if dist_sq > 1.0 {
+                    // Outside ellipsoid = stone wall
+                    particles.push(Particle::new(pos, 1.0, MAT_STONE, PHASE_SOLID));
+                }
             }
         }
     }
 
-    // Stone walls: 2-cell thick walls around the edges, y=4..10
-    for y in 4..10 {
-        // Front wall (low z)
-        for x in 2..30 {
-            for z in 2..4 {
-                particles.push(Particle::new(
-                    Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-                    1.0,
-                    MAT_STONE,
-                    PHASE_SOLID,
-                ));
-            }
-        }
-        // Back wall (high z)
-        for x in 2..30 {
-            for z in 28..30 {
-                particles.push(Particle::new(
-                    Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-                    1.0,
-                    MAT_STONE,
-                    PHASE_SOLID,
-                ));
-            }
-        }
-        // Left wall (low x)
-        for z in 4..28 {
-            for x in 2..4 {
-                particles.push(Particle::new(
-                    Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-                    1.0,
-                    MAT_STONE,
-                    PHASE_SOLID,
-                ));
-            }
-        }
-        // Right wall (high x)
-        for z in 4..28 {
-            for x in 28..30 {
-                particles.push(Particle::new(
-                    Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-                    1.0,
-                    MAT_STONE,
-                    PHASE_SOLID,
-                ));
-            }
-        }
-    }
-
-    // Water pool inside the basin: y=4..7
-    for x in 4..28 {
-        for z in 4..28 {
+    // 2. Water lake at bottom of cave
+    for x in 7..25 {
+        for z in 7..25 {
             for y in 4..7 {
-                particles.push(Particle::new(
-                    Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-                    1.0,
-                    MAT_WATER,
-                    PHASE_LIQUID,
-                ));
+                let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                let d = (pos - center) / radii;
+                let dist_sq = d.x * d.x + d.y * d.y + d.z * d.z;
+
+                if dist_sq < 1.0 {
+                    // Inside cave = water
+                    particles.push(Particle::new(pos, 1.0, MAT_WATER, PHASE_LIQUID));
+                }
             }
         }
     }
 
-    // Lava cube dropping from above: y=20..23, centered
-    for x in 13..19 {
-        for z in 13..19 {
-            for y in 20..23 {
-                let mut p = Particle::new(
-                    Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-                    1.0,
-                    MAT_LAVA,
-                    PHASE_LIQUID,
-                );
-                // Set lava temperature to 2000K (above melting point, stays liquid and glows)
-                p.vel_temp = glam::Vec4::new(0.0, 0.0, 0.0, 2000.0);
-                particles.push(p);
+    // 3. Lava stream from ceiling crack
+    for x in 14..18 {
+        for z in 14..18 {
+            for y in 18..26 {
+                let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                let d = (pos - center) / radii;
+                let dist_sq = d.x * d.x + d.y * d.y + d.z * d.z;
+
+                // Only place lava where there's no stone (inside cave or near surface)
+                if dist_sq < 1.2 {
+                    let mut p = Particle::new(pos, 1.0, MAT_LAVA, PHASE_LIQUID);
+                    // Set lava temperature to 2000K (above melting point, stays liquid and glows)
+                    p.vel_temp = glam::Vec4::new(0.0, 0.0, 0.0, 2000.0);
+                    particles.push(p);
+                }
             }
         }
     }
@@ -225,9 +186,9 @@ fn run_headless(args: &Args) -> Result<()> {
         }
     }
 
-    // Render final frame with default camera position (matching windowed mode)
-    let eye = [40.0_f32, 28.0, 40.0];
-    let target = [16.0_f32, 6.0, 16.0];
+    // Render final frame with camera inside the cave
+    let eye = [16.0_f32, 10.0, 26.0];
+    let target = [16.0_f32, 8.0, 16.0];
     ctx.execute_one_shot(|cmd| {
         sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye, target);
     })?;
@@ -284,10 +245,10 @@ impl App {
         let particles = create_initial_particles();
         tracing::info!("Created {} initial particles", particles.len());
 
-        // Camera looking toward basin center from above-corner
+        // Camera inside the cave, looking toward the center/water lake
         let camera = Camera::look_at(
-            Vec3::new(40.0, 28.0, 40.0),  // eye: closer, higher for better view
-            Vec3::new(16.0, 6.0, 16.0),   // target: basin center
+            Vec3::new(16.0, 10.0, 26.0),  // inside cave, near wall
+            Vec3::new(16.0, 8.0, 16.0),   // looking at center/water
         );
 
         Self {
