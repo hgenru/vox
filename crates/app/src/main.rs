@@ -4,14 +4,15 @@
 //!
 //! Creates a window, initializes Vulkan with surface support,
 //! sets up the renderer, and runs the main event loop.
-//! For the MVP, renders a proof-of-life cycling clear color.
-//! Simulation compute dispatches will be added once the server crate is ready.
+//! For the MVP, renders a proof-of-life cycling clear color while
+//! running the GPU MPM simulation each frame.
 
 use std::sync::Arc;
 
 use anyhow::Result;
 use client::{Renderer, renderer::required_instance_extensions};
 use gpu_core::VulkanContext;
+use server::GpuSimulation;
 use shared::{
     MAT_STONE, MAT_WATER, PHASE_LIQUID, PHASE_SOLID, Particle, RENDER_HEIGHT, RENDER_WIDTH,
 };
@@ -70,8 +71,10 @@ struct App {
     ctx: Option<VulkanContext>,
     /// Renderer (surface + swapchain + frame management).
     renderer: Option<Renderer>,
+    /// GPU simulation (created on resume, after particles are uploaded).
+    sim: Option<GpuSimulation>,
     /// Initial particles (stored until GPU simulation is ready).
-    _particles: Vec<Particle>,
+    particles: Vec<Particle>,
 }
 
 impl App {
@@ -83,7 +86,8 @@ impl App {
             window: None,
             ctx: None,
             renderer: None,
-            _particles: particles,
+            sim: None,
+            particles,
         }
     }
 }
@@ -115,15 +119,15 @@ impl ApplicationHandler for App {
         );
 
         // Create Vulkan context with surface extensions
-        let ctx = match VulkanContext::new_with_instance_extensions(required_instance_extensions())
-        {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Failed to create VulkanContext: {}", e);
-                event_loop.exit();
-                return;
-            }
-        };
+        let ctx =
+            match VulkanContext::new_with_instance_extensions(required_instance_extensions()) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!("Failed to create VulkanContext: {}", e);
+                    event_loop.exit();
+                    return;
+                }
+            };
 
         // Create renderer (surface + swapchain)
         let renderer = match Renderer::new(&ctx, &window) {
@@ -135,9 +139,31 @@ impl ApplicationHandler for App {
             }
         };
 
+        // Create GPU simulation and upload initial particles
+        let mut sim = match GpuSimulation::new(&ctx) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Failed to create GpuSimulation: {}", e);
+                event_loop.exit();
+                return;
+            }
+        };
+
+        if let Err(e) = sim.init_particles(&ctx, &self.particles) {
+            tracing::error!("Failed to upload particles: {}", e);
+            event_loop.exit();
+            return;
+        }
+
+        tracing::info!(
+            "GpuSimulation initialized with {} particles",
+            self.particles.len()
+        );
+
         self.window = Some(window);
         self.ctx = Some(ctx);
         self.renderer = Some(renderer);
+        self.sim = Some(sim);
     }
 
     fn window_event(
@@ -149,9 +175,13 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 tracing::info!("Close requested, shutting down");
-                // Clean up before exit
-                if let (Some(renderer), Some(ctx)) = (self.renderer.as_mut(), self.ctx.as_ref()) {
-                    renderer.destroy(ctx);
+                if let Some(ctx) = self.ctx.as_ref() {
+                    if let Some(sim) = self.sim.as_mut() {
+                        sim.destroy(ctx);
+                    }
+                    if let Some(renderer) = self.renderer.as_mut() {
+                        renderer.destroy(ctx);
+                    }
                 }
                 event_loop.exit();
             }
@@ -163,7 +193,17 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
-                if let (Some(renderer), Some(ctx)) = (self.renderer.as_mut(), self.ctx.as_ref()) {
+                if let (Some(renderer), Some(ctx), Some(sim)) =
+                    (self.renderer.as_mut(), self.ctx.as_ref(), self.sim.as_ref())
+                {
+                    // Run simulation step (separate command buffer submission)
+                    if let Err(e) = ctx.execute_one_shot(|cmd| {
+                        sim.step(cmd);
+                    }) {
+                        tracing::error!("Simulation step error: {}", e);
+                    }
+
+                    // Render frame (acquire, record clear, submit, present)
                     match renderer.draw_frame(ctx) {
                         Ok(_) => {}
                         Err(e) => {
