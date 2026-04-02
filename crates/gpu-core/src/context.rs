@@ -15,18 +15,28 @@ use crate::error::{GpuError, Result};
 
 /// All required device extensions for the VOX engine.
 const REQUIRED_DEVICE_EXTENSIONS: &[&CStr] = &[
+    // RT ray tracing: BLAS/TLAS for voxel bricks
     ash::khr::acceleration_structure::NAME,
+    // RT ray tracing: ray queries from fragment shader
     ash::khr::ray_query::NAME,
+    // Renderpass-less rendering (Vulkan 1.3 promoted but extension still needed for feature enable)
     ash::khr::dynamic_rendering::NAME,
+    // Pipeline barriers v2, required by the engine's sync model
     ash::khr::synchronization2::NAME,
+    // Bindless descriptors for material/texture arrays
     ash::ext::descriptor_indexing::NAME,
+    // Avoid vec3 padding in storage buffers (see CLAUDE.md trap #1)
     ash::ext::scalar_block_layout::NAME,
+    // GPU pointer access for acceleration structure builds
     ash::khr::buffer_device_address::NAME,
+    // SPIR-V 1.4 features used by rust-gpu output
     ash::khr::spirv_1_4::NAME,
-    // Required by acceleration_structure
+    // Required by VK_KHR_acceleration_structure
     ash::khr::deferred_host_operations::NAME,
-    // Required by spirv_1_4
+    // Required by VK_KHR_spirv_1_4
     ash::khr::shader_float_controls::NAME,
+    // P2G shader uses spirv_std::arch::atomic_f_add() for scatter accumulation
+    ash::ext::shader_atomic_float::NAME,
 ];
 
 /// Indices of the queue families used by the engine.
@@ -428,6 +438,10 @@ impl VulkanContext {
                 .acceleration_structure(true);
         let mut ray_query_features =
             vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
+        let mut atomic_float_features =
+            vk::PhysicalDeviceShaderAtomicFloatFeaturesEXT::default()
+                .shader_buffer_float32_atomics(true)
+                .shader_buffer_float32_atomic_add(true);
 
         let device_ci = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_cis)
@@ -435,7 +449,8 @@ impl VulkanContext {
             .push_next(&mut features_1_2)
             .push_next(&mut features_1_3)
             .push_next(&mut accel_features)
-            .push_next(&mut ray_query_features);
+            .push_next(&mut ray_query_features)
+            .push_next(&mut atomic_float_features);
 
         let device = unsafe {
             instance.create_device(physical_device, &device_ci, None)?
