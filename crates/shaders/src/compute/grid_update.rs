@@ -70,6 +70,15 @@ pub fn update_cell(
         vz = 0.0;
     }
 
+    // Solid boundary conditions: zero velocity at cells occupied by solid particles.
+    // The solid flag is written by P2G into force_pad.w (the pad slot).
+    // This prevents fluid from leaking through solid walls/floors.
+    if cell.force_pad.w > 0.5 {
+        vx = 0.0;
+        vy = 0.0;
+        vz = 0.0;
+    }
+
     cell.velocity_mass = Vec4::new(vx, vy, vz, mass);
 }
 

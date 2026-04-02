@@ -210,6 +210,15 @@ pub fn scatter_particle(
                         grid_atomic_add(grid, base + 5, stress_force.y);
                         grid_atomic_add(grid, base + 6, stress_force.z);
                     }
+
+                    // Mark cells with solid particle contribution (phase == 0)
+                    // so grid_update can enforce solid boundary conditions.
+                    // Uses the pad slot (index 7) as a solid flag.
+                    if particle.ids.y == 0 {
+                        unsafe {
+                            grid_atomic_add(grid, base + 7, 1.0);
+                        }
+                    }
                 }
                 dk += 1;
             }
