@@ -18,7 +18,9 @@ use gpu_core::{
     buffer::{self, GpuBuffer},
     pipeline,
 };
-use shared::{GRID_CELL_COUNT, GRID_SIZE, GridCell, MAX_PARTICLES, Particle};
+use shared::{
+    GRID_CELL_COUNT, GRID_SIZE, GridCell, MAX_PARTICLES, Particle, RENDER_HEIGHT, RENDER_WIDTH,
+};
 
 /// Compiled SPIR-V shader module bytes, included at compile time.
 const SHADER_BYTES: &[u8] = include_bytes!(env!("SHADERS_SPV_PATH"));
@@ -83,6 +85,24 @@ pub struct VoxelizePushConstants {
     pub _pad1: u32,
 }
 
+/// Push constants for the render shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct RenderPushConstants {
+    /// Render target width in pixels.
+    pub width: u32,
+    /// Render target height in pixels.
+    pub height: u32,
+    /// Grid dimension (cells per axis).
+    pub grid_size: u32,
+    /// Padding.
+    pub _pad: u32,
+    /// Camera eye position (xyz) + padding (w).
+    pub eye: glam::Vec4,
+    /// Camera target position (xyz) + padding (w).
+    pub target: glam::Vec4,
+}
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -127,6 +147,7 @@ pub struct GpuSimulation {
     particle_buffer: GpuBuffer,
     grid_buffer: GpuBuffer,
     voxel_buffer: GpuBuffer,
+    render_output_buffer: GpuBuffer,
 
     // Compute passes
     clear_grid_pass: ComputePass,
@@ -135,6 +156,7 @@ pub struct GpuSimulation {
     g2p_pass: ComputePass,
     clear_voxels_pass: ComputePass,
     voxelize_pass: ComputePass,
+    render_pass: ComputePass,
 
     // Shader module (kept alive for pipeline lifetime)
     shader_module: vk::ShaderModule,
@@ -193,14 +215,25 @@ impl GpuSimulation {
             "voxel-buffer",
         )?;
 
+        // Render output buffer: RGBA u32 per pixel, needs TRANSFER_SRC for copy to swapchain
+        let render_output_size =
+            (RENDER_WIDTH as usize * RENDER_HEIGHT as usize * mem::size_of::<u32>())
+                as vk::DeviceSize;
+        let render_output_buffer = buffer::create_device_local_buffer(
+            ctx,
+            render_output_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC,
+            "render-output-buffer",
+        )?;
+
         // -- Descriptor pool --
-        // 6 passes, max 2 bindings each = up to 12 storage buffer descriptors
+        // 7 passes, max 2 bindings each = up to 14 storage buffer descriptors
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 12,
+            descriptor_count: 14,
         }];
         let descriptor_pool =
-            pipeline::create_descriptor_pool(ctx, &pool_sizes, 6, "sim-descriptor-pool")?;
+            pipeline::create_descriptor_pool(ctx, &pool_sizes, 7, "sim-descriptor-pool")?;
 
         // -- Create each compute pass --
         // Entry point names are fully qualified module paths in rust-gpu SPIR-V.
@@ -264,18 +297,30 @@ impl GpuSimulation {
             "voxelize",
         )?;
 
+        let render_pass = Self::create_pass(
+            ctx,
+            shader_module,
+            c"compute::render::render_voxels",
+            &[&voxel_buffer, &render_output_buffer],
+            mem::size_of::<RenderPushConstants>() as u32,
+            descriptor_pool,
+            "render",
+        )?;
+
         tracing::info!("GpuSimulation created successfully");
 
         Ok(Self {
             particle_buffer,
             grid_buffer,
             voxel_buffer,
+            render_output_buffer,
             clear_grid_pass,
             p2g_pass,
             grid_update_pass,
             g2p_pass,
             clear_voxels_pass,
             voxelize_pass,
+            render_pass,
             shader_module,
             descriptor_pool,
             num_particles: 0,
@@ -428,6 +473,60 @@ impl GpuSimulation {
         &self.voxel_buffer
     }
 
+    /// Returns the Vulkan buffer handle for the render output.
+    ///
+    /// The buffer contains packed BGRA u32 pixels, sized `width * height`.
+    pub fn render_output_buffer(&self) -> vk::Buffer {
+        self.render_output_buffer.buffer
+    }
+
+    /// Record a render dispatch into the given command buffer.
+    ///
+    /// Ray-marches through the voxel grid and writes pixel data to the
+    /// render output buffer. The command buffer must be in recording state.
+    /// Call this after `step()` (which populates the voxel buffer).
+    pub fn render(&self, cmd: vk::CommandBuffer, width: u32, height: u32) {
+        // Barrier: ensure voxelize writes are visible to render shader reads
+        Self::barrier(cmd, &self.device);
+
+        let push = RenderPushConstants {
+            width,
+            height,
+            grid_size: GRID_SIZE,
+            _pad: 0,
+            eye: glam::Vec4::new(48.0, 32.0, 48.0, 0.0),
+            target: glam::Vec4::new(16.0, 8.0, 16.0, 0.0),
+        };
+
+        let wg_x = (width + 7) / 8;
+        let wg_y = (height + 7) / 8;
+
+        self.dispatch(
+            cmd,
+            &self.render_pass,
+            wg_x,
+            wg_y,
+            1,
+            bytemuck::bytes_of(&push),
+        );
+
+        // Barrier: ensure render writes are complete before buffer-to-image copy
+        let memory_barrier = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[memory_barrier],
+                &[],
+                &[],
+            );
+        }
+    }
+
     // -- Internal helpers --
 
     /// Create a single compute pass: descriptor set layout, pipeline layout,
@@ -568,6 +667,7 @@ impl GpuSimulation {
             &self.g2p_pass,
             &self.clear_voxels_pass,
             &self.voxelize_pass,
+            &self.render_pass,
         ];
         for pass in passes {
             pipeline::destroy_pipeline(ctx, pass.pipeline);
@@ -607,9 +707,18 @@ impl GpuSimulation {
                 size: 0,
             },
         );
+        let render_output_buf = std::mem::replace(
+            &mut self.render_output_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
         buffer::destroy_buffer(ctx, particle_buf);
         buffer::destroy_buffer(ctx, grid_buf);
         buffer::destroy_buffer(ctx, voxel_buf);
+        buffer::destroy_buffer(ctx, render_output_buf);
     }
 }
 
@@ -629,6 +738,8 @@ mod tests {
         assert_eq!(mem::size_of::<GridUpdatePushConstants>(), 16);
         assert_eq!(mem::size_of::<G2pPushConstants>(), 16);
         assert_eq!(mem::size_of::<VoxelizePushConstants>(), 16);
+        // RenderPushConstants: 4 u32s (16 bytes) + 2 Vec4s (32 bytes) = 48 bytes
+        assert_eq!(mem::size_of::<RenderPushConstants>(), 48);
     }
 
     #[test]

@@ -219,6 +219,133 @@ impl Renderer {
         Ok(true)
     }
 
+    /// Render one frame by copying a pre-rendered pixel buffer to the swapchain.
+    ///
+    /// The `render_buffer` must contain `width * height` packed BGRA u32 pixels
+    /// and must have `TRANSFER_SRC` usage. Returns `Ok(true)` on success,
+    /// `Ok(false)` if skipped, or an error.
+    pub fn draw_frame_with_buffer(
+        &mut self,
+        ctx: &VulkanContext,
+        render_buffer: vk::Buffer,
+        width: u32,
+        height: u32,
+    ) -> Result<bool> {
+        if self.needs_resize {
+            self.recreate_swapchain(ctx)?;
+            self.needs_resize = false;
+        }
+
+        // Skip if minimized
+        if self.width == 0 || self.height == 0 {
+            return Ok(false);
+        }
+
+        // Begin frame (acquire swapchain image)
+        let frame_ctx = match self.frame_manager.begin_frame(ctx, &self.swapchain)? {
+            Some(fc) => fc,
+            None => {
+                self.recreate_swapchain(ctx)?;
+                return Ok(false);
+            }
+        };
+
+        let cmd = frame_ctx.command_buffer;
+        let image = self.swapchain.images[frame_ctx.image_index as usize];
+
+        // Transition image: UNDEFINED -> TRANSFER_DST_OPTIMAL
+        let barrier_to_dst = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::empty())
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(image)
+            .subresource_range(full_color_range());
+
+        unsafe {
+            ctx.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier_to_dst],
+            );
+        }
+
+        // Copy buffer to image
+        // The buffer has width*height packed u32 pixels.
+        // The swapchain image may be a different size, so we copy the min extent.
+        let copy_width = width.min(self.swapchain.extent.width);
+        let copy_height = height.min(self.swapchain.extent.height);
+
+        let region = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(width) // stride in pixels (our buffer row length)
+            .buffer_image_height(height)
+            .image_subresource(
+                vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .mip_level(0)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            )
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(vk::Extent3D {
+                width: copy_width,
+                height: copy_height,
+                depth: 1,
+            });
+
+        unsafe {
+            ctx.device.cmd_copy_buffer_to_image(
+                cmd,
+                render_buffer,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[region],
+            );
+        }
+
+        // Transition image: TRANSFER_DST_OPTIMAL -> PRESENT_SRC_KHR
+        let barrier_to_present = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::empty())
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(image)
+            .subresource_range(full_color_range());
+
+        unsafe {
+            ctx.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier_to_present],
+            );
+        }
+
+        // End frame (submit + present)
+        let present_ok = self
+            .frame_manager
+            .end_frame(ctx, &self.swapchain, frame_ctx)?;
+
+        if !present_ok {
+            self.needs_resize = true;
+        }
+
+        self.frame_number += 1;
+        Ok(true)
+    }
+
     /// Recreate the swapchain (e.g., after a window resize).
     fn recreate_swapchain(&mut self, ctx: &VulkanContext) -> Result<()> {
         unsafe {

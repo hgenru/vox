@@ -196,15 +196,21 @@ impl ApplicationHandler for App {
                 if let (Some(renderer), Some(ctx), Some(sim)) =
                     (self.renderer.as_mut(), self.ctx.as_ref(), self.sim.as_ref())
                 {
-                    // Run simulation step (separate command buffer submission)
+                    // Run simulation step + render to buffer (separate submission)
                     if let Err(e) = ctx.execute_one_shot(|cmd| {
                         sim.step(cmd);
+                        sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT);
                     }) {
-                        tracing::error!("Simulation step error: {}", e);
+                        tracing::error!("Simulation/render error: {}", e);
                     }
 
-                    // Render frame (acquire, record clear, submit, present)
-                    match renderer.draw_frame(ctx) {
+                    // Copy render output buffer to swapchain and present
+                    match renderer.draw_frame_with_buffer(
+                        ctx,
+                        sim.render_output_buffer(),
+                        RENDER_WIDTH,
+                        RENDER_HEIGHT,
+                    ) {
                         Ok(_) => {}
                         Err(e) => {
                             tracing::error!("Frame error: {}", e);
