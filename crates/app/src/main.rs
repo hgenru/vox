@@ -32,6 +32,9 @@ use winit::{
     window::{CursorGrabMode, Window, WindowAttributes, WindowId},
 };
 
+/// Default number of simulation substeps per frame.
+const DEFAULT_SUBSTEPS: u32 = 16;
+
 /// Command-line arguments for the app.
 struct Args {
     /// Run in headless mode (no window, render to PNG).
@@ -40,6 +43,8 @@ struct Args {
     frames: u32,
     /// Output file path for the screenshot (headless mode).
     output: Option<String>,
+    /// Number of simulation substeps per frame.
+    substeps: u32,
 }
 
 /// Parse command-line arguments from `std::env::args`.
@@ -56,10 +61,17 @@ fn parse_args() -> Args {
         .iter()
         .position(|a| a == "--output")
         .and_then(|i| args.get(i + 1).cloned());
+    let substeps = args
+        .iter()
+        .position(|a| a == "--substeps")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_SUBSTEPS);
     Args {
         headless,
         frames,
         output,
+        substeps,
     }
 }
 
@@ -104,8 +116,9 @@ fn create_initial_particles() -> Vec<Particle> {
 /// Run the engine in headless mode: simulate, render, and save a PNG.
 fn run_headless(args: &Args) -> Result<()> {
     tracing::info!(
-        "Headless mode: {} frames, output: {}",
+        "Headless mode: {} frames, {} substeps/frame, output: {}",
         args.frames,
+        args.substeps,
         args.output.as_deref().unwrap_or("screenshot.png")
     );
 
@@ -116,10 +129,12 @@ fn run_headless(args: &Args) -> Result<()> {
     tracing::info!("Created {} initial particles", particles.len());
     sim.init_particles(&ctx, &particles)?;
 
-    // Run simulation frames
+    // Run simulation frames (multiple substeps per frame for faster sim)
     for i in 0..args.frames {
         ctx.execute_one_shot(|cmd| {
-            sim.step(cmd);
+            for _ in 0..args.substeps {
+                sim.step(cmd);
+            }
         })?;
         if i % 10 == 0 {
             tracing::info!("Frame {}/{}", i, args.frames);
@@ -174,10 +189,12 @@ struct App {
     cursor_captured: bool,
     /// Timestamp of the last frame for delta-time calculation.
     last_frame_time: Instant,
+    /// Number of simulation substeps per frame.
+    substeps: u32,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(substeps: u32) -> Self {
         let particles = create_initial_particles();
         tracing::info!("Created {} initial particles", particles.len());
 
@@ -198,6 +215,7 @@ impl App {
             pressed_keys: HashSet::new(),
             cursor_captured: false,
             last_frame_time: Instant::now(),
+            substeps,
         }
     }
 
@@ -377,9 +395,12 @@ impl ApplicationHandler for App {
                 if let (Some(renderer), Some(ctx), Some(sim)) =
                     (self.renderer.as_mut(), self.ctx.as_ref(), self.sim.as_ref())
                 {
-                    // Run simulation step + render to buffer (separate submission)
+                    // Run simulation substeps + render to buffer
+                    let substeps = self.substeps;
                     if let Err(e) = ctx.execute_one_shot(|cmd| {
-                        sim.step(cmd);
+                        for _ in 0..substeps {
+                            sim.step(cmd);
+                        }
                         sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT);
                     }) {
                         tracing::error!("Simulation/render error: {}", e);
@@ -441,7 +462,7 @@ fn main() -> Result<()> {
     }
 
     let event_loop = EventLoop::new()?;
-    let mut app = App::new();
+    let mut app = App::new(args.substeps);
     event_loop.run_app(&mut app)?;
 
     tracing::info!("VOX Engine shut down");
