@@ -22,7 +22,8 @@ use glam::Vec3;
 use gpu_core::VulkanContext;
 use server::GpuSimulation;
 use shared::{
-    MAT_STONE, MAT_WATER, PHASE_LIQUID, PHASE_SOLID, Particle, RENDER_HEIGHT, RENDER_WIDTH,
+    MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_LIQUID, PHASE_SOLID, Particle, RENDER_HEIGHT,
+    RENDER_WIDTH,
 };
 use winit::{
     application::ApplicationHandler,
@@ -77,17 +78,18 @@ fn parse_args() -> Args {
 
 /// Create the initial set of particles for the MVP demo.
 ///
-/// Stone floor at y=2..4 across the grid, and a water cube
-/// floating at y=15..20 in the center.
+/// Scene: stone basin (floor + walls) containing a water pool,
+/// with a lava cube dropping from above. Demonstrates water-lava
+/// reaction (stone + steam), temperature, and phase transitions.
 fn create_initial_particles() -> Vec<Particle> {
     let mut particles = Vec::new();
 
-    // Stone floor
+    // Stone floor: y=2..4, full grid width
     for x in 2..30 {
         for z in 2..30 {
             for y in 2..4 {
                 particles.push(Particle::new(
-                    Vec3::new(x as f32, y as f32, z as f32),
+                    Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
                     1.0,
                     MAT_STONE,
                     PHASE_SOLID,
@@ -96,10 +98,58 @@ fn create_initial_particles() -> Vec<Particle> {
         }
     }
 
-    // Water cube
-    for x in 12..20 {
-        for z in 12..20 {
-            for y in 15..20 {
+    // Stone walls: 2-cell thick walls around the edges, y=4..10
+    for y in 4..10 {
+        // Front wall (low z)
+        for x in 2..30 {
+            for z in 2..4 {
+                particles.push(Particle::new(
+                    Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
+                    1.0,
+                    MAT_STONE,
+                    PHASE_SOLID,
+                ));
+            }
+        }
+        // Back wall (high z)
+        for x in 2..30 {
+            for z in 28..30 {
+                particles.push(Particle::new(
+                    Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
+                    1.0,
+                    MAT_STONE,
+                    PHASE_SOLID,
+                ));
+            }
+        }
+        // Left wall (low x)
+        for z in 4..28 {
+            for x in 2..4 {
+                particles.push(Particle::new(
+                    Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
+                    1.0,
+                    MAT_STONE,
+                    PHASE_SOLID,
+                ));
+            }
+        }
+        // Right wall (high x)
+        for z in 4..28 {
+            for x in 28..30 {
+                particles.push(Particle::new(
+                    Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
+                    1.0,
+                    MAT_STONE,
+                    PHASE_SOLID,
+                ));
+            }
+        }
+    }
+
+    // Water pool inside the basin: y=4..7
+    for x in 4..28 {
+        for z in 4..28 {
+            for y in 4..7 {
                 particles.push(Particle::new(
                     Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
                     1.0,
@@ -109,6 +159,40 @@ fn create_initial_particles() -> Vec<Particle> {
             }
         }
     }
+
+    // Lava cube dropping from above: y=20..23, centered
+    for x in 13..19 {
+        for z in 13..19 {
+            for y in 20..23 {
+                let mut p = Particle::new(
+                    Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
+                    1.0,
+                    MAT_LAVA,
+                    PHASE_LIQUID,
+                );
+                // Set lava temperature to 2000K (above melting point, stays liquid and glows)
+                p.vel_temp = glam::Vec4::new(0.0, 0.0, 0.0, 2000.0);
+                particles.push(p);
+            }
+        }
+    }
+
+    tracing::info!(
+        "Scene: {} stone + {} water + {} lava = {} total",
+        particles
+            .iter()
+            .filter(|p| p.material_id() == MAT_STONE)
+            .count(),
+        particles
+            .iter()
+            .filter(|p| p.material_id() == MAT_WATER)
+            .count(),
+        particles
+            .iter()
+            .filter(|p| p.material_id() == MAT_LAVA)
+            .count(),
+        particles.len(),
+    );
 
     particles
 }
