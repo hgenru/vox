@@ -151,7 +151,23 @@ pub fn gather_particle(
     new_pos.y = new_pos.y.clamp(margin, upper);
     new_pos.z = new_pos.z.clamp(margin, upper);
 
-    // Write back to particle
+    // Phase constant: solid = 0
+    let phase = particle.ids.y;
+
+    // Solids: update F and C for stress computation but skip position/velocity advection.
+    // This prevents stone floor particles from drifting toward grid cell boundaries (#45).
+    if phase == 0 {
+        particle.f_col0 = new_f0.extend(0.0);
+        particle.f_col1 = new_f1.extend(0.0);
+        particle.f_col2 = new_f2.extend(0.0);
+        particle.c_col0 = c_col0.extend(0.0);
+        particle.c_col1 = c_col1.extend(0.0);
+        particle.c_col2 = c_col2.extend(0.0);
+        apply_phase_transitions(particle);
+        return;
+    }
+
+    // Write back to particle (liquids and gases only)
     particle.pos_mass = Vec4::new(new_pos.x, new_pos.y, new_pos.z, particle.pos_mass.w);
     particle.vel_temp = Vec4::new(new_vel.x, new_vel.y, new_vel.z, particle.vel_temp.w);
     particle.f_col0 = new_f0.extend(0.0);
