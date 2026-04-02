@@ -37,6 +37,8 @@ const REQUIRED_DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::khr::shader_float_controls::NAME,
     // P2G shader uses spirv_std::arch::atomic_f_add() for scatter accumulation
     ash::ext::shader_atomic_float::NAME,
+    // Swapchain presentation to window surface
+    ash::khr::swapchain::NAME,
 ];
 
 /// Indices of the queue families used by the engine.
