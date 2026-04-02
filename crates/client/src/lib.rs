@@ -6,6 +6,8 @@
 //! and frame loop. For the MVP, renders a proof-of-life clear color
 //! that changes each frame. Voxel ray tracing comes later.
 
+pub mod camera;
 pub mod renderer;
 
+pub use camera::Camera;
 pub use renderer::Renderer;
