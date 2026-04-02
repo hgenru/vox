@@ -7,10 +7,13 @@
 //! For the MVP, renders a proof-of-life cycling clear color while
 //! running the GPU MPM simulation each frame.
 
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
-use client::{Renderer, renderer::required_instance_extensions};
+use client::{Camera, Renderer, renderer::required_instance_extensions};
+use glam::Vec3;
 use gpu_core::VulkanContext;
 use server::GpuSimulation;
 use shared::{
@@ -18,9 +21,10 @@ use shared::{
 };
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
-    window::{Window, WindowAttributes, WindowId},
+    keyboard::PhysicalKey,
+    window::{CursorGrabMode, Window, WindowAttributes, WindowId},
 };
 
 /// Create the initial set of particles for the MVP demo.
@@ -28,8 +32,6 @@ use winit::{
 /// Stone floor at y=2..4 across the grid, and a water cube
 /// floating at y=15..20 in the center.
 fn create_initial_particles() -> Vec<Particle> {
-    use glam::Vec3;
-
     let mut particles = Vec::new();
 
     // Stone floor
@@ -75,6 +77,14 @@ struct App {
     sim: Option<GpuSimulation>,
     /// Initial particles (stored until GPU simulation is ready).
     particles: Vec<Particle>,
+    /// FPS camera for WASD + mouse look.
+    camera: Camera,
+    /// Set of currently pressed physical keys for continuous movement.
+    pressed_keys: HashSet<PhysicalKey>,
+    /// Whether the mouse cursor is captured for camera look.
+    cursor_captured: bool,
+    /// Timestamp of the last frame for delta-time calculation.
+    last_frame_time: Instant,
 }
 
 impl App {
@@ -82,12 +92,51 @@ impl App {
         let particles = create_initial_particles();
         tracing::info!("Created {} initial particles", particles.len());
 
+        // Camera looking toward grid center from corner
+        let camera = Camera::new(
+            Vec3::new(48.0, 24.0, 48.0),
+            -2.35, // yaw: looking toward origin
+            -0.3,  // pitch: slightly downward
+        );
+
         Self {
             window: None,
             ctx: None,
             renderer: None,
             sim: None,
             particles,
+            camera,
+            pressed_keys: HashSet::new(),
+            cursor_captured: false,
+            last_frame_time: Instant::now(),
+        }
+    }
+
+    /// Capture the mouse cursor for camera look control.
+    fn capture_cursor(&mut self) {
+        if let Some(window) = &self.window {
+            window.set_cursor_visible(false);
+            let _ = window.set_cursor_grab(CursorGrabMode::Confined);
+            self.cursor_captured = true;
+        }
+    }
+
+    /// Release the mouse cursor.
+    fn release_cursor(&mut self) {
+        if let Some(window) = &self.window {
+            window.set_cursor_visible(true);
+            let _ = window.set_cursor_grab(CursorGrabMode::None);
+            self.cursor_captured = false;
+        }
+    }
+
+    /// Process continuous key movement based on currently pressed keys.
+    fn update_movement(&mut self, dt: f32) {
+        let keys: Vec<PhysicalKey> = self.pressed_keys.iter().copied().collect();
+        for key in keys {
+            if let PhysicalKey::Code(code) = key {
+                self.camera.process_keyboard(code, dt);
+            }
         }
     }
 }
@@ -117,6 +166,10 @@ impl ApplicationHandler for App {
             window.inner_size().width,
             window.inner_size().height
         );
+
+        // Update camera aspect from actual window size
+        let size = window.inner_size();
+        self.camera.update_aspect(size.width, size.height);
 
         // Create Vulkan context with surface extensions
         let ctx =
@@ -190,9 +243,48 @@ impl ApplicationHandler for App {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.notify_resized(new_size.width, new_size.height);
                 }
+                self.camera.update_aspect(new_size.width, new_size.height);
+            }
+
+            WindowEvent::KeyboardInput { event, .. } => {
+                match event.state {
+                    ElementState::Pressed => {
+                        self.pressed_keys.insert(event.physical_key);
+                    }
+                    ElementState::Released => {
+                        self.pressed_keys.remove(&event.physical_key);
+                    }
+                }
+
+                // Escape releases cursor
+                if event.state == ElementState::Pressed {
+                    if let PhysicalKey::Code(winit::keyboard::KeyCode::Escape) =
+                        event.physical_key
+                    {
+                        self.release_cursor();
+                    }
+                }
+            }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if !self.cursor_captured {
+                    self.capture_cursor();
+                }
             }
 
             WindowEvent::RedrawRequested => {
+                // Calculate delta time
+                let now = Instant::now();
+                let dt = now.duration_since(self.last_frame_time).as_secs_f32();
+                self.last_frame_time = now;
+
+                // Process continuous movement from held keys
+                self.update_movement(dt);
+
                 if let (Some(renderer), Some(ctx), Some(sim)) =
                     (self.renderer.as_mut(), self.ctx.as_ref(), self.sim.as_ref())
                 {
@@ -220,6 +312,19 @@ impl ApplicationHandler for App {
             }
 
             _ => {}
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
+            if self.cursor_captured {
+                self.camera.process_mouse(dx as f32, dy as f32);
+            }
         }
     }
 
