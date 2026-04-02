@@ -122,6 +122,25 @@ impl Camera {
             self.aspect = width as f32 / height as f32;
         }
     }
+
+    /// Convert a screen pixel coordinate to a world-space ray (origin, direction).
+    ///
+    /// `px` and `py` are pixel coordinates (top-left origin).
+    /// `width` and `height` are the viewport dimensions in pixels.
+    /// Returns `(origin, direction)` where `direction` is normalized.
+    pub fn screen_to_ray(&self, px: f32, py: f32, width: f32, height: f32) -> (Vec3, Vec3) {
+        let forward = self.forward();
+        let right = forward.cross(Vec3::Y).normalize();
+        let up = right.cross(forward);
+
+        let fov_tan = (self.fov * 0.5).tan();
+
+        let ndc_x = (2.0 * px / width - 1.0) * self.aspect * fov_tan;
+        let ndc_y = (1.0 - 2.0 * py / height) * fov_tan;
+
+        let dir = (forward + right * ndc_x + up * ndc_y).normalize();
+        (self.eye(), dir)
+    }
 }
 
 #[cfg(test)]
@@ -245,5 +264,34 @@ mod tests {
     fn test_eye() {
         let cam = Camera::new(Vec3::new(5.0, 6.0, 7.0), 0.0, 0.0);
         assert_eq!(cam.eye(), cam.position);
+    }
+
+    #[test]
+    fn test_screen_to_ray_center() {
+        let cam = Camera::new(Vec3::new(0.0, 0.0, 5.0), 0.0, 0.0);
+        let (origin, dir) = cam.screen_to_ray(640.0, 360.0, 1280.0, 720.0);
+        assert_eq!(origin, cam.eye());
+        // Center of screen should point along forward direction (-Z)
+        let fwd = cam.forward();
+        assert!(
+            (dir - fwd).length() < 1e-4,
+            "center ray should match forward: dir={:?}, fwd={:?}",
+            dir,
+            fwd
+        );
+    }
+
+    #[test]
+    fn test_screen_to_ray_corners_diverge() {
+        let cam = Camera::new(Vec3::ZERO, 0.0, 0.0);
+        let (_, dir_tl) = cam.screen_to_ray(0.0, 0.0, 1280.0, 720.0);
+        let (_, dir_br) = cam.screen_to_ray(1280.0, 720.0, 1280.0, 720.0);
+        // Corners should point in different directions
+        let dot = dir_tl.dot(dir_br);
+        assert!(
+            dot < 0.99,
+            "corner rays should diverge, got dot={}",
+            dot
+        );
     }
 }

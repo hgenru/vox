@@ -36,6 +36,12 @@ use winit::{
 /// Default number of simulation substeps per frame.
 const DEFAULT_SUBSTEPS: u32 = 4;
 
+/// Distance from camera eye at which particles are spawned.
+const SPAWN_DISTANCE: f32 = 8.0;
+
+/// Radius for particle removal (middle click).
+const REMOVE_RADIUS: f32 = 2.0;
+
 /// Command-line arguments for the app.
 struct Args {
     /// Run in headless mode (no window, render to PNG).
@@ -259,6 +265,8 @@ struct App {
     pressed_keys: HashSet<PhysicalKey>,
     /// Whether the mouse cursor is captured for camera look.
     cursor_captured: bool,
+    /// Last known cursor position in pixels (for spawn ray calculation).
+    cursor_position: (f32, f32),
     /// Timestamp of the last frame for delta-time calculation.
     last_frame_time: Instant,
     /// Number of simulation substeps per frame.
@@ -285,6 +293,7 @@ impl App {
             camera,
             pressed_keys: HashSet::new(),
             cursor_captured: false,
+            cursor_position: (0.0, 0.0),
             last_frame_time: Instant::now(),
             substeps,
         }
@@ -305,6 +314,66 @@ impl App {
             window.set_cursor_visible(true);
             let _ = window.set_cursor_grab(CursorGrabMode::None);
             self.cursor_captured = false;
+        }
+    }
+
+    /// Spawn a small cube of particles at the camera's aim point.
+    ///
+    /// Creates a 2x2x2 block of particles at `camera.eye() + forward * SPAWN_DISTANCE`.
+    /// `mat` and `phase` define the material type. `temperature` sets initial temperature.
+    fn spawn_particles(&mut self, mat: u32, phase: u32, temperature: f32) {
+        let (ctx, sim) = match (self.ctx.as_ref(), self.sim.as_mut()) {
+            (Some(c), Some(s)) => (c, s),
+            _ => return,
+        };
+
+        let center = self.camera.eye() + self.camera.forward() * SPAWN_DISTANCE;
+        let mut new_particles = Vec::new();
+        spawn_cell(&mut new_particles, center.x - 0.5, center.y - 0.5, center.z - 0.5, 0.125, mat, phase);
+
+        // Set temperature on all spawned particles
+        if temperature != 0.0 {
+            for p in &mut new_particles {
+                p.vel_temp = glam::Vec4::new(0.0, 0.0, 0.0, temperature);
+            }
+        }
+
+        if let Err(e) = sim.add_particles(ctx, &new_particles) {
+            tracing::warn!("Failed to spawn particles: {}", e);
+        }
+    }
+
+    /// Remove particles near the camera's aim point within [`REMOVE_RADIUS`].
+    ///
+    /// Reads back all particles, filters out those within the radius of the
+    /// aim point, and re-uploads. Expensive but acceptable for MVP.
+    fn remove_particles(&mut self) {
+        let (ctx, sim) = match (self.ctx.as_ref(), self.sim.as_mut()) {
+            (Some(c), Some(s)) => (c, s),
+            _ => return,
+        };
+
+        let center = self.camera.eye() + self.camera.forward() * SPAWN_DISTANCE;
+        let radius_sq = REMOVE_RADIUS * REMOVE_RADIUS;
+
+        match sim.readback_particles(ctx) {
+            Ok(particles) => {
+                let filtered: Vec<Particle> = particles
+                    .into_iter()
+                    .filter(|p| (p.position() - center).length_squared() > radius_sq)
+                    .collect();
+                let removed = sim.num_particles() as usize - filtered.len();
+                if removed > 0 {
+                    if let Err(e) = sim.init_particles(ctx, &filtered) {
+                        tracing::warn!("Failed to re-upload after remove: {}", e);
+                    } else {
+                        tracing::info!("Removed {} particles", removed);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to readback for remove: {}", e);
+            }
         }
     }
 
@@ -444,13 +513,32 @@ impl ApplicationHandler for App {
                 }
             }
 
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_position = (position.x as f32, position.y as f32);
+            }
+
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
-                button: MouseButton::Left,
+                button,
                 ..
             } => {
                 if !self.cursor_captured {
+                    // First click captures the cursor
                     self.capture_cursor();
+                } else {
+                    // While captured, clicks spawn or remove material
+                    match button {
+                        MouseButton::Left => {
+                            self.spawn_particles(MAT_WATER, PHASE_LIQUID, 0.0);
+                        }
+                        MouseButton::Right => {
+                            self.spawn_particles(MAT_LAVA, PHASE_LIQUID, 2000.0);
+                        }
+                        MouseButton::Middle => {
+                            self.remove_particles();
+                        }
+                        _ => {}
+                    }
                 }
             }
 
