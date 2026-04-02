@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/shared",
+    "crates/protocol",
+    "crates/sim-cpu",
+    "crates/gpu-core",
+    "crates/server",
+    "crates/client",
+    "crates/app",
+    "crates/bootstrap-test",
+]
+# These crates are compiled to SPIR-V by spirv-builder, not native
+exclude = ["crates/shaders", "crates/bootstrap-shader"]
+
+[workspace.dependencies]
+# Math
+glam = { version = "0.32", features = ["bytemuck"] }
+# Byte casting for GPU structs
+bytemuck = { version = "1", features = ["derive"] }
+# Vulkan
+ash = "0.38"
+ash-window = "0.13"
+gpu-allocator = { version = "0.28", features = ["vulkan"] }
+# Windowing
+winit = "0.30"
+# Shaders (rust-gpu)
+spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu.git", branch = "main" }
+spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu.git", branch = "main" }
+# Serialization
+serde = { version = "1", features = ["derive"] }
+ron = "0.8"
+bitcode = "0.6"
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Errors
+thiserror = "2"
+anyhow = "1"
+# Testing
+proptest = "1"
+approx = "0.5"
+
+# Internal crates
+shared = { path = "crates/shared", default-features = false }
+protocol = { path = "crates/protocol" }
+sim-cpu = { path = "crates/sim-cpu" }
+gpu-core = { path = "crates/gpu-core" }
+server = { path = "crates/server" }
+client = { path = "crates/client" }
+
+[profile.dev.build-override]
+opt-level = 3

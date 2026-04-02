@@ -1,0 +1,16 @@
+[package]
+name = "shared"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+glam = { workspace = true }
+bytemuck = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+approx = { workspace = true }

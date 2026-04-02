@@ -1,0 +1,20 @@
+# Rust
+/target/
+**/target/
+Cargo.lock
+
+# SPIR-V compiled shaders (generated at build time)
+*.spv
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env

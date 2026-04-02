@@ -1,0 +1,15 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+shared = { workspace = true, features = ["std"] }
+protocol = { workspace = true }
+gpu-core = { workspace = true }
+ash = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+winit = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

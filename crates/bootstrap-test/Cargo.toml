@@ -1,0 +1,12 @@
+[package]
+name = "bootstrap-test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ash = "0.38"
+anyhow = "1"
+bytemuck = { version = "1", features = ["derive"] }
+
+[build-dependencies]
+spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu.git", branch = "main" }

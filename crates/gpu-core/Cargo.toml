@@ -1,0 +1,15 @@
+[package]
+name = "gpu-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ash = { workspace = true }
+ash-window = { workspace = true }
+gpu-allocator = { workspace = true }
+shared = { workspace = true, features = ["std"] }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }

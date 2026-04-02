@@ -1,0 +1,15 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+server = { workspace = true }
+client = { workspace = true }
+shared = { workspace = true, features = ["std"] }
+protocol = { workspace = true }
+winit = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+ron = { workspace = true }
