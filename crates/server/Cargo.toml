@@ -9,5 +9,13 @@ protocol = { workspace = true }
 sim-cpu = { workspace = true }
 gpu-core = { workspace = true }
 glam = { workspace = true }
+ash = { workspace = true }
+bytemuck = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+
+[build-dependencies]
+spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu.git", branch = "main" }

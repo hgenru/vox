@@ -82,6 +82,15 @@ Both layouts must be kept in sync manually — same `#[repr(C)]` field order and
 `GRID_SIZE`, `DT`, `GRAVITY` are defined in both `shared::constants` and `shaders::types`.
 Changes to one must be mirrored in the other. TODO: add compile-time assert in shader-builder.
 
+### 13. rust-gpu SPIR-V entry point names are fully qualified module paths
+Entry points in the compiled SPIR-V module use the full Rust module path, not just the function name.
+For example, `clear_grid` in `shaders/src/compute/clear_grid.rs` becomes `"compute::clear_grid::clear_grid"`.
+When creating compute pipelines, use the full path as the entry point name (e.g., `c"compute::p2g::p2g"`).
+
+### 14. GPU tests must run single-threaded
+Multiple tests creating separate `VulkanContext` + `GpuSimulation` instances will fail with `ERROR_UNKNOWN`
+when run in parallel. Use `cargo test -p server -- --test-threads=1` for GPU-heavy test suites.
+
 ---
 
 ## Code Patterns
