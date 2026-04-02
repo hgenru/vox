@@ -12,6 +12,7 @@ pub mod clear_grid;
 pub mod g2p;
 pub mod grid_update;
 pub mod p2g;
+pub mod react;
 pub mod render;
 pub mod voxelize;
 

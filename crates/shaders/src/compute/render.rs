@@ -326,7 +326,16 @@ pub fn render_pixel(
             Vec3::new(0.0, 0.0, -(step_z as f32))
         };
 
-        let base_color = material_color(hit_material);
+        // Read phase from voxel data (.y component)
+        let hit_idx = (vz as u32 * grid_size * grid_size + vy as u32 * grid_size + vx as u32) as usize;
+        let hit_phase = voxels[hit_idx].y;
+
+        // Override color for gas/steam (phase == 2): white-ish wispy appearance
+        let base_color = if hit_phase == 2 {
+            Vec3::new(0.9, 0.9, 0.95)
+        } else {
+            material_color(hit_material)
+        };
         let lit_color = apply_lighting(base_color, normal);
 
         // Add emissive glow for lava (material_id == 2)

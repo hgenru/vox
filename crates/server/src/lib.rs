@@ -4,7 +4,7 @@
 //!
 //! Owns [`GpuSimulation`], which manages GPU buffers, compute pipelines,
 //! and the dispatch chain for the MPM simulation:
-//! `clear_grid -> P2G -> grid_update -> G2P -> (clear_voxels -> voxelize)`.
+//! `clear_grid -> P2G -> grid_update -> G2P -> clear_voxels -> voxelize -> react`.
 //!
 //! All shaders are compiled to a single SPIR-V module at build time via
 //! `spirv-builder` in `build.rs`.
@@ -75,6 +75,20 @@ pub struct G2pPushConstants {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
 pub struct VoxelizePushConstants {
+    /// Grid dimension (cells per axis).
+    pub grid_size: u32,
+    /// Total number of active particles.
+    pub num_particles: u32,
+    /// Padding.
+    pub _pad0: u32,
+    /// Padding.
+    pub _pad1: u32,
+}
+
+/// Push constants for the react shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct ReactPushConstants {
     /// Grid dimension (cells per axis).
     pub grid_size: u32,
     /// Total number of active particles.
@@ -156,6 +170,7 @@ pub struct GpuSimulation {
     g2p_pass: ComputePass,
     clear_voxels_pass: ComputePass,
     voxelize_pass: ComputePass,
+    react_pass: ComputePass,
     render_pass: ComputePass,
 
     // Shader module (kept alive for pipeline lifetime)
@@ -227,13 +242,13 @@ impl GpuSimulation {
         )?;
 
         // -- Descriptor pool --
-        // 7 passes, max 2 bindings each = up to 14 storage buffer descriptors
+        // 8 passes, max 2 bindings each = up to 16 storage buffer descriptors
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 14,
+            descriptor_count: 16,
         }];
         let descriptor_pool =
-            pipeline::create_descriptor_pool(ctx, &pool_sizes, 7, "sim-descriptor-pool")?;
+            pipeline::create_descriptor_pool(ctx, &pool_sizes, 8, "sim-descriptor-pool")?;
 
         // -- Create each compute pass --
         // Entry point names are fully qualified module paths in rust-gpu SPIR-V.
@@ -297,6 +312,16 @@ impl GpuSimulation {
             "voxelize",
         )?;
 
+        let react_pass = Self::create_pass(
+            ctx,
+            shader_module,
+            c"compute::react::react",
+            &[&particle_buffer, &voxel_buffer],
+            mem::size_of::<ReactPushConstants>() as u32,
+            descriptor_pool,
+            "react",
+        )?;
+
         let render_pass = Self::create_pass(
             ctx,
             shader_module,
@@ -320,6 +345,7 @@ impl GpuSimulation {
             g2p_pass,
             clear_voxels_pass,
             voxelize_pass,
+            react_pass,
             render_pass,
             shader_module,
             descriptor_pool,
@@ -345,7 +371,7 @@ impl GpuSimulation {
     ///
     /// The command buffer must already be in the recording state.
     /// The dispatch chain is:
-    /// `clear_grid -> P2G -> grid_update -> G2P -> clear_voxels -> voxelize`.
+    /// `clear_grid -> P2G -> grid_update -> G2P -> clear_voxels -> voxelize -> react`.
     ///
     /// Memory barriers are inserted between each dispatch to ensure
     /// correct ordering of shader reads and writes.
@@ -440,6 +466,23 @@ impl GpuSimulation {
             1,
             1,
             bytemuck::bytes_of(&vox_pc),
+        );
+        Self::barrier(cmd, &self.device);
+
+        // 7. React (chemical reactions via voxel neighbor lookup)
+        let react_pc = ReactPushConstants {
+            grid_size,
+            num_particles,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        self.dispatch(
+            cmd,
+            &self.react_pass,
+            particle_wg,
+            1,
+            1,
+            bytemuck::bytes_of(&react_pc),
         );
     }
 
@@ -682,6 +725,7 @@ impl GpuSimulation {
             &self.g2p_pass,
             &self.clear_voxels_pass,
             &self.voxelize_pass,
+            &self.react_pass,
             &self.render_pass,
         ];
         for pass in passes {
@@ -753,6 +797,7 @@ mod tests {
         assert_eq!(mem::size_of::<GridUpdatePushConstants>(), 16);
         assert_eq!(mem::size_of::<G2pPushConstants>(), 16);
         assert_eq!(mem::size_of::<VoxelizePushConstants>(), 16);
+        assert_eq!(mem::size_of::<ReactPushConstants>(), 16);
         // RenderPushConstants: 4 u32s (16 bytes) + 2 Vec4s (32 bytes) = 48 bytes
         assert_eq!(mem::size_of::<RenderPushConstants>(), 48);
     }
