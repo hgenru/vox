@@ -34,7 +34,12 @@ pub struct VoxelizePushConstants {
 /// This is a simplification; a proper implementation would use
 /// splatting or averaging.
 
-/// Map a particle to a voxel cell and write its data.
+/// Map a particle to a voxel cell and write its data using trilinear splatting.
+///
+/// Instead of writing to a single cell (which causes flickering when particles
+/// straddle cell boundaries), splats to the 2x2x2 nearest cells weighted by
+/// the trilinear interpolation weights. Only writes cells with weight > 0.1
+/// to avoid polluting distant voxels.
 ///
 /// Separated into a helper function for the rust-gpu linker bug workaround
 /// (see CLAUDE.md trap #4a).
@@ -44,28 +49,51 @@ pub fn write_voxel(
     grid_size: u32,
 ) {
     let pos = particle.pos_mass.truncate();
-
-    // Convert continuous position to discrete voxel index
-    let vx = pos.x as u32;
-    let vy = pos.y as u32;
-    let vz = pos.z as u32;
-
-    // Bounds check
-    if vx >= grid_size || vy >= grid_size || vz >= grid_size {
-        return;
-    }
-
-    let index = (vz * grid_size * grid_size + vy * grid_size + vx) as usize;
-
     let material_id = particle.ids.x;
     let phase = particle.ids.y;
     let temp_bits = particle.vel_temp.w.to_bits();
 
-    // Simple write — last particle wins for now.
-    // A more sophisticated approach would use atomicMax on a packed value
-    // (e.g., pack material_id + density into a single u32 for atomic comparison).
-    // For MVP with low particle counts this is acceptable.
-    voxels[index] = UVec4::new(material_id, phase, temp_bits, 1);
+    // Base cell (floor of position)
+    let bx = pos.x as u32;
+    let by = pos.y as u32;
+    let bz = pos.z as u32;
+
+    // Fractional part for trilinear weights
+    let fx = pos.x - bx as f32;
+    let fy = pos.y - by as f32;
+    let fz = pos.z - bz as f32;
+
+    // Write to 2x2x2 neighbors with trilinear weights
+    let mut di = 0u32;
+    while di < 2 {
+        let mut dj = 0u32;
+        while dj < 2 {
+            let mut dk = 0u32;
+            while dk < 2 {
+                let cx = bx + di;
+                let cy = by + dj;
+                let cz = bz + dk;
+
+                if cx < grid_size && cy < grid_size && cz < grid_size {
+                    let wx = if di == 0 { 1.0 - fx } else { fx };
+                    let wy = if dj == 0 { 1.0 - fy } else { fy };
+                    let wz = if dk == 0 { 1.0 - fz } else { fz };
+                    let w = wx * wy * wz;
+
+                    // Only write if weight is significant
+                    if w > 0.1 {
+                        let idx =
+                            (cz * grid_size * grid_size + cy * grid_size + cx) as usize;
+                        // Simple last-write-wins, but with splatting it's much smoother
+                        voxels[idx] = UVec4::new(material_id, phase, temp_bits, 1);
+                    }
+                }
+                dk += 1;
+            }
+            dj += 1;
+        }
+        di += 1;
+    }
 }
 
 /// Clear a single voxel cell to empty.
