@@ -73,6 +73,15 @@ Create staging buffer with HOST_VISIBLE memory, vkCmdCopyBuffer from device-loca
 ### 10. VK_EXT_scalar_block_layout
 Enable when creating device. Without it — vec3 in storage buffers gets padding.
 
+### 11. shared crate cannot be used in shaders directly
+The `shared` crate depends on `glam` from crates.io which does NOT compile for `spirv-unknown-vulkan1.3`.
+Shader crate must define its own `Particle`/`GridCell` types using `spirv_std::glam`.
+Both layouts must be kept in sync manually — same `#[repr(C)]` field order and sizes.
+
+### 12. Constants must be synced between shared and shaders
+`GRID_SIZE`, `DT`, `GRAVITY` are defined in both `shared::constants` and `shaders::types`.
+Changes to one must be mirrored in the other. TODO: add compile-time assert in shader-builder.
+
 ---
 
 ## Code Patterns
@@ -235,6 +244,29 @@ Graphics: [Primary Rays + Shading] → [Shadow Rays] → [Tonemap → Swapchain]
 3. Agent picks issue → implements → tests → commit → PR → references issue
 4. Lead reviews, merges into main
 5. After merge: lead runs integration tests
+
+### Branch naming
+Agents MUST use meaningful branch names:
+- `feat/gpu-core` — NOT `worktree-agent-a2a16ea7`
+- `feat/shaders` — NOT auto-generated IDs
+- `feat/sim-cpu`, `feat/protocol`, etc.
+
+### PR workflow (mandatory)
+All work goes through Pull Requests. Direct commits to main are prohibited.
+1. Agent creates branch with meaningful name
+2. Agent commits, pushes, creates PR with `gh pr create`
+3. PR body must reference closed issues (`Closes #N`)
+4. Lead reviews PR — lists issues found
+5. **Lead delegates fixes back to agents** — lead does NOT fix code directly
+6. After fixes: lead merges via `gh pr merge`
+7. After merging multiple PRs: lead runs full integration test (`cargo build && cargo test`)
+
+### Lead Agent rules
+- Lead is a **tech lead / manager** — reviews, delegates, coordinates, merges
+- Lead does NOT write code in agent-owned crates (see Crate Ownership table)
+- Lead only codes in: server/, client/, app/ (own crates)
+- When review finds issues: create a list, send back to the agent for fixing
+- After merging: verify combined state builds and passes tests
 
 ### Worktree setup (lead creates these)
 ```bash
