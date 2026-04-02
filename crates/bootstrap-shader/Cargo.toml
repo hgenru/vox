@@ -3,5 +3,7 @@ name = "bootstrap-shader"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+
 [dependencies]
 spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu.git", branch = "main" }
