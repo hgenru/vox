@@ -11,6 +11,7 @@
 pub mod constants;
 pub mod material;
 pub mod particle;
+pub mod physics;
 pub mod svd;
 
 pub use constants::*;
