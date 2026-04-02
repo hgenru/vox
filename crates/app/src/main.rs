@@ -225,9 +225,9 @@ fn run_headless(args: &Args) -> Result<()> {
         }
     }
 
-    // Render final frame with default camera position
-    let eye = [48.0_f32, 24.0, 48.0];
-    let target = [16.0_f32, 8.0, 16.0];
+    // Render final frame with default camera position (matching windowed mode)
+    let eye = [40.0_f32, 28.0, 40.0];
+    let target = [16.0_f32, 6.0, 16.0];
     ctx.execute_one_shot(|cmd| {
         sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye, target);
     })?;
@@ -284,11 +284,10 @@ impl App {
         let particles = create_initial_particles();
         tracing::info!("Created {} initial particles", particles.len());
 
-        // Camera looking toward grid center from corner
-        let camera = Camera::new(
-            Vec3::new(48.0, 24.0, 48.0),
-            -2.35, // yaw: looking toward origin
-            -0.3,  // pitch: slightly downward
+        // Camera looking toward basin center from above-corner
+        let camera = Camera::look_at(
+            Vec3::new(40.0, 28.0, 40.0),  // eye: closer, higher for better view
+            Vec3::new(16.0, 6.0, 16.0),   // target: basin center
         );
 
         Self {

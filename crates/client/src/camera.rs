@@ -45,6 +45,17 @@ impl Camera {
         }
     }
 
+    /// Create a new FPS camera positioned at `eye` looking toward `target`.
+    ///
+    /// Computes yaw and pitch from the eye-to-target direction vector.
+    /// Uses default values for FOV, speed, sensitivity, and aspect ratio.
+    pub fn look_at(eye: Vec3, target: Vec3) -> Self {
+        let dir = (target - eye).normalize();
+        let yaw = dir.x.atan2(-dir.z);
+        let pitch = dir.y.asin();
+        Self::new(eye, yaw, pitch)
+    }
+
     /// Return the forward direction vector (unit length) based on yaw and pitch.
     pub fn forward(&self) -> Vec3 {
         Vec3::new(
@@ -198,6 +209,36 @@ mod tests {
         cam.process_keyboard(KeyCode::KeyW, 1.0);
         // Should have moved along forward (-Z)
         assert!(cam.position.z < pos_before.z);
+    }
+
+    #[test]
+    fn test_look_at_direction() {
+        let eye = Vec3::new(40.0, 28.0, 40.0);
+        let target = Vec3::new(16.0, 6.0, 16.0);
+        let cam = Camera::look_at(eye, target);
+
+        // Camera target should point toward the specified target
+        let actual_target = cam.target();
+        let to_target = (target - eye).normalize();
+        let actual_dir = (actual_target - cam.position).normalize();
+        assert!(
+            (actual_dir - to_target).length() < 1e-4,
+            "look_at direction mismatch: expected {:?}, got {:?}",
+            to_target,
+            actual_dir
+        );
+    }
+
+    #[test]
+    fn test_look_at_along_negative_z() {
+        let cam = Camera::look_at(Vec3::new(0.0, 0.0, 10.0), Vec3::new(0.0, 0.0, 0.0));
+        // Should be looking along -Z, so yaw ≈ 0
+        assert!(cam.yaw.abs() < 1e-4, "yaw should be ~0, got {}", cam.yaw);
+        assert!(
+            cam.pitch.abs() < 1e-4,
+            "pitch should be ~0, got {}",
+            cam.pitch
+        );
     }
 
     #[test]
