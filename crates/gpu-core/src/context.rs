@@ -412,7 +412,6 @@ impl VulkanContext {
         }
 
         // Enable required features via chained structs
-        let mut features_1_1 = vk::PhysicalDeviceVulkan11Features::default();
         let mut features_1_2 = vk::PhysicalDeviceVulkan12Features::default()
             .buffer_device_address(true)
             .descriptor_indexing(true)
@@ -433,7 +432,6 @@ impl VulkanContext {
         let device_ci = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_cis)
             .enabled_extension_names(&extension_names)
-            .push_next(&mut features_1_1)
             .push_next(&mut features_1_2)
             .push_next(&mut features_1_3)
             .push_next(&mut accel_features)

@@ -6,7 +6,7 @@ use ash::vk;
 use std::ffi::CStr;
 
 use crate::context::VulkanContext;
-use crate::error::Result;
+use crate::error::{GpuError, Result};
 
 /// Swapchain wrapper with image views and format info.
 pub struct Swapchain {
@@ -68,6 +68,9 @@ impl Swapchain {
         };
 
         // Choose format: prefer B8G8R8A8_SRGB
+        if surface_formats.is_empty() {
+            return Err(GpuError::NoSuitableDevice);
+        }
         let format = surface_formats
             .iter()
             .find(|f| {

@@ -8,7 +8,7 @@ use ash::vk;
 use shared::FRAMES_IN_FLIGHT;
 
 use crate::context::VulkanContext;
-use crate::error::Result;
+use crate::error::{GpuError, Result};
 use crate::swapchain::Swapchain;
 
 /// Per-frame synchronization and command recording state.
@@ -238,8 +238,6 @@ impl FrameManager {
         }
     }
 }
-
-use crate::error::GpuError;
 
 #[cfg(test)]
 mod tests {

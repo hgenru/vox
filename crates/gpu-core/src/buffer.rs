@@ -61,10 +61,10 @@ pub fn create_device_local_buffer(
     )
 }
 
-/// Create a staging buffer (CPU-visible and coherent).
+/// Create a staging buffer for uploading data to the GPU (CPU→GPU).
 ///
-/// Used for uploading data to the GPU or reading data back from the GPU.
-pub fn create_staging_buffer(
+/// Uses `CpuToGpu` memory location for optimal upload performance.
+pub fn create_upload_staging_buffer(
     ctx: &VulkanContext,
     size: vk::DeviceSize,
     name: &str,
@@ -74,6 +74,23 @@ pub fn create_staging_buffer(
         size,
         vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST,
         MemoryLocation::CpuToGpu,
+        name,
+    )
+}
+
+/// Create a staging buffer for reading data back from the GPU (GPU→CPU).
+///
+/// Uses `GpuToCpu` memory location for optimal readback performance.
+pub fn create_readback_staging_buffer(
+    ctx: &VulkanContext,
+    size: vk::DeviceSize,
+    name: &str,
+) -> Result<GpuBuffer> {
+    create_buffer_internal(
+        ctx,
+        size,
+        vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST,
+        MemoryLocation::GpuToCpu,
         name,
     )
 }
@@ -128,7 +145,7 @@ fn create_buffer_internal(
 /// a GPU copy command from staging to `dst`.
 pub fn upload<T: Pod>(ctx: &VulkanContext, data: &[T], dst: &GpuBuffer) -> Result<()> {
     let byte_size = std::mem::size_of_val(data) as vk::DeviceSize;
-    let mut staging = create_staging_buffer(ctx, byte_size, "upload-staging")?;
+    let mut staging = create_upload_staging_buffer(ctx, byte_size, "upload-staging")?;
 
     // Copy data into staging buffer
     {
@@ -162,7 +179,7 @@ pub fn readback<T: Pod>(
     count: usize,
 ) -> Result<Vec<T>> {
     let byte_size = (count * std::mem::size_of::<T>()) as vk::DeviceSize;
-    let staging = create_staging_buffer(ctx, byte_size, "readback-staging")?;
+    let staging = create_readback_staging_buffer(ctx, byte_size, "readback-staging")?;
 
     // GPU copy: device -> staging
     ctx.execute_one_shot(|cmd| {
@@ -221,7 +238,7 @@ mod tests {
         assert_eq!(device_buf.size, 1024);
 
         let staging_buf =
-            create_staging_buffer(&ctx, 1024, "test-staging-buf")
+            create_upload_staging_buffer(&ctx, 1024, "test-staging-buf")
                 .expect("Failed to create staging buffer");
         assert_ne!(staging_buf.buffer, vk::Buffer::null());
         assert!(staging_buf.mapped_ptr().is_some());
