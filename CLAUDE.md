@@ -4,7 +4,7 @@
 
 ## Tech Stack
 
-- **Language:** Rust (nightly-2025-06-23, pinned for rust-gpu)
+- **Language:** Rust (nightly-2026-04-02, pinned for rust-gpu)
 - **GPU API:** ash 0.38+ (raw Vulkan 1.3 bindings)
 - **GPU Memory:** gpu-allocator 0.28+
 - **Shaders:** rust-gpu (spirv-std + spirv-builder from git main) → SPIR-V
@@ -124,4 +124,154 @@ cargo test -p shared                  # Test shared types
 cargo test -p sim-cpu                 # Test CPU simulation
 cargo test -p shared -p sim-cpu -p protocol  # All sim-agent tests
 cargo test                            # All tests
+cargo run -p bootstrap-test           # Verify rust-gpu + ash pipeline works
 ```
+
+---
+
+## MVP Scope
+
+### What we're building
+- Stone floor and walls
+- Water cube falls and spreads
+- Lava flows, glows, melts stone
+- Reaction: water + lava = stone + steam
+- Mouse spawns/removes materials
+- RT lighting: sun shadows + emissive from hot materials
+- FPS camera (WASD + mouse)
+
+### What we're NOT building (anti-scope)
+Multiplayer, sound, save/load, procedural generation, ECS, DLSS/FSR,
+async compute, egui, old GPU support.
+
+---
+
+## Physics: MPM (Material Point Method)
+
+Everything is one unified system. No separate rigid body / fluid / sand subsystems.
+Each voxel is an MPM particle. Behavior determined by constitutive model + material_id + phase.
+
+### Constitutive Models
+- **Solid (phase=0):** Fixed corotated elasticity. Needs polar decomposition (SVD McAdams 2011).
+- **Liquid (phase=1):** Equation of state + viscosity.
+- **Gas (phase=2):** Weak EOS, very low viscosity.
+
+### Phase Transitions
+- Stone T > 1500 → Liquid (lava)
+- Water T > 100 → Gas (steam)
+- Water T < 0 → Solid (ice)
+- Lava T < 1500 → Solid (stone)
+- On phase change: **reset F = Identity, damage = 0**
+
+### Chemical Reactions (checked at grid contact)
+- Water + Lava → Stone + Steam (instant)
+- Wood + Fire → Fire + Ash (T > 300, spreading)
+
+### Temperature
+Heat diffusion via grid: `T += conductivity * (T_avg_neighbors - T) * dt`
+
+### SVD / Polar Decomposition (GPU)
+McAdams et al. 2011: no branches, no trig, only +, *, rsqrt. 4-5 Jacobi sweeps.
+Write as `no_std` Rust on glam types → test on CPU → compile on GPU via rust-gpu.
+
+---
+
+## Rendering: Hardware Ray Tracing
+
+- World divided into 8³ bricks. Each non-empty brick → one AABB in BLAS.
+- TLAS contains one instance (whole world).
+- Ray query (VK_KHR_ray_query) from fragment shader.
+- On AABB hit → DDA ray march inside 8³ brick (max 24 steps).
+- Shadow rays via ray query with TerminateOnFirstHit.
+- Dynamic rebuild: PREFER_FAST_BUILD_BIT_KHR. Budget ≤2ms per frame.
+
+### Render pipeline per frame
+```
+Compute: [Clear Grid] → [P2G] → [Grid Update] → [G2P] → [Voxelize] → [BLAS Update]
+Graphics: [Primary Rays + Shading] → [Shadow Rays] → [Tonemap → Swapchain]
+```
+
+---
+
+## GPU Data Layout
+
+### Key numbers (MVP)
+- Grid: 32³ (iteration-0), then 64³
+- Particles: ~5K-10K start, up to 50K demo
+- Bricks: 8³ voxels/brick → max 4³=64 bricks for 32³ grid
+- dt: 0.001 (fixed)
+- Render: 1280×720
+- Physics: 60Hz fixed timestep
+- Frames in flight: 2
+
+### Struct sizes (verified by tests)
+- `Particle`: 144 bytes, align 16
+- `GridCell`: 32 bytes, align 16
+- `MaterialParams`: 64 bytes, align 16
+
+---
+
+## Shader Crate Rules
+
+- Shader crates use `#![cfg_attr(target_arch = "spirv", no_std)]`
+- Do NOT set `crate-type = ["dylib"]` in Cargo.toml — spirv-builder adds it automatically
+- Use `spirv_std::glam` for math (not direct glam dependency in shader crates)
+- Entry points MUST call at least one helper function (see trap #4a)
+- spirv-std and spirv-builder from git: `{ git = "https://github.com/Rust-GPU/rust-gpu.git", branch = "main" }`
+
+---
+
+## Agent Workflow
+
+### Roles
+- **Lead Agent** — creates issues, reviews PRs, merges, runs integration tests, coordinates
+- **Sim Agent** — owns shared/, sim-cpu/, protocol/
+- **GPU Agent** — owns gpu-core/
+- **Render Agent** — owns shaders/, client/
+
+### How agents work
+1. Lead creates GitHub Issues with labels (`sim`, `gpu`, `render`, `integration`)
+2. Each agent: `gh issue list --label <my-label> --state open`
+3. Agent picks issue → implements → tests → commit → PR → references issue
+4. Lead reviews, merges into main
+5. After merge: lead runs integration tests
+
+### Worktree setup (lead creates these)
+```bash
+git worktree add ../voxel-sim   feat/sim
+git worktree add ../voxel-gpu   feat/gpu
+git worktree add ../voxel-render feat/render
+```
+Each worktree uses separate CARGO_TARGET_DIR for build isolation.
+
+### Blocker handling
+If an agent is blocked by another crate:
+1. Create Issue with label `blocker`
+2. Describe what's needed and from whom
+3. Continue other tasks
+4. Lead reprioritizes
+
+---
+
+## Updating CLAUDE.md
+
+**All agents MUST update this file** when they discover:
+- New critical traps or gotchas (add to CRITICAL TRAPS section)
+- New code patterns that should be followed project-wide
+- API changes or version incompatibilities
+- Performance discoveries that affect architecture
+
+Format: add a new numbered item under the relevant section with a clear title and explanation.
+Commit the CLAUDE.md update together with the code that triggered the discovery.
+
+---
+
+## Reference Projects
+
+When stuck, agents should study these:
+- **wgsparkl** (Dimforge): GPU MPM on WebGPU/WGSL — P2G architecture, atomics
+- **PB-MPM** (EA SEED): Position-Based MPM, open WebGPU code
+- **hatoo/ash-raytracing-example**: ash + rust-gpu + KHR ray tracing
+- **Kajiya** (Embark): ash-based renderer with render graph
+- **McAdams SVD GLSL**: GPU SVD implementation (alexsr gist)
+- **Rust-GPU VulkanShaderExamples**: Sascha Willems examples ported to rust-gpu
