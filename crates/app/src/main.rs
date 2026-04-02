@@ -34,7 +34,7 @@ use winit::{
 };
 
 /// Default number of simulation substeps per frame.
-const DEFAULT_SUBSTEPS: u32 = 16;
+const DEFAULT_SUBSTEPS: u32 = 4;
 
 /// Command-line arguments for the app.
 struct Args {
