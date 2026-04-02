@@ -80,6 +80,67 @@ impl Particle {
         self.ids.y
     }
 
+    /// Get damage (0.0 = undamaged, 1.0 = fully damaged).
+    /// Stored in `c_col2.w` (padding field).
+    #[inline]
+    pub fn damage(&self) -> f32 {
+        self.c_col2.w
+    }
+
+    /// Set damage value.
+    #[inline]
+    pub fn set_damage(&mut self, damage: f32) {
+        self.c_col2.w = damage;
+    }
+
+    /// Set temperature.
+    #[inline]
+    pub fn set_temperature(&mut self, temp: f32) {
+        self.vel_temp.w = temp;
+    }
+
+    /// Set phase.
+    #[inline]
+    pub fn set_phase(&mut self, phase: u32) {
+        self.ids.y = phase;
+    }
+
+    /// Set velocity.
+    #[inline]
+    pub fn set_velocity(&mut self, vel: Vec3) {
+        self.vel_temp.x = vel.x;
+        self.vel_temp.y = vel.y;
+        self.vel_temp.z = vel.z;
+    }
+
+    /// Set position.
+    #[inline]
+    pub fn set_position(&mut self, pos: Vec3) {
+        self.pos_mass.x = pos.x;
+        self.pos_mass.y = pos.y;
+        self.pos_mass.z = pos.z;
+    }
+
+    /// Extract APIC affine momentum matrix C as Mat3.
+    #[inline]
+    pub fn affine_momentum(&self) -> Mat3 {
+        Mat3::from_cols(
+            self.c_col0.truncate(),
+            self.c_col1.truncate(),
+            self.c_col2.truncate(),
+        )
+    }
+
+    /// Set APIC affine momentum matrix C from Mat3.
+    /// Preserves `c_col2.w` (damage).
+    #[inline]
+    pub fn set_affine_momentum(&mut self, c: Mat3) {
+        self.c_col0 = c.col(0).extend(0.0);
+        self.c_col1 = c.col(1).extend(0.0);
+        let damage = self.c_col2.w;
+        self.c_col2 = c.col(2).extend(damage);
+    }
+
     /// Extract deformation gradient F as Mat3.
     #[inline]
     pub fn deformation_gradient(&self) -> Mat3 {
