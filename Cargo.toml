@@ -38,6 +38,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Errors
 thiserror = "2"
 anyhow = "1"
+# Image
+image = { version = "0.25", default-features = false, features = ["png"] }
 # Testing
 proptest = "1"
 approx = "0.5"

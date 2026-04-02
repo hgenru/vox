@@ -480,6 +480,14 @@ impl GpuSimulation {
         self.render_output_buffer.buffer
     }
 
+    /// Returns a reference to the render output [`GpuBuffer`].
+    ///
+    /// Useful for readback operations (e.g., headless screenshot).
+    /// The buffer contains packed BGRA u32 pixels, sized `width * height`.
+    pub fn render_output_gpu_buffer(&self) -> &GpuBuffer {
+        &self.render_output_buffer
+    }
+
     /// Record a render dispatch into the given command buffer.
     ///
     /// Ray-marches through the voxel grid and writes pixel data to the

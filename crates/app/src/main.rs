@@ -6,6 +6,11 @@
 //! sets up the renderer, and runs the main event loop.
 //! For the MVP, renders a proof-of-life cycling clear color while
 //! running the GPU MPM simulation each frame.
+//!
+//! Supports headless mode for automated visual testing:
+//! ```bash
+//! cargo run -p app -- --headless --frames 100 --output screenshot.png
+//! ```
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -26,6 +31,37 @@ use winit::{
     keyboard::PhysicalKey,
     window::{CursorGrabMode, Window, WindowAttributes, WindowId},
 };
+
+/// Command-line arguments for the app.
+struct Args {
+    /// Run in headless mode (no window, render to PNG).
+    headless: bool,
+    /// Number of simulation frames to run in headless mode.
+    frames: u32,
+    /// Output file path for the screenshot (headless mode).
+    output: Option<String>,
+}
+
+/// Parse command-line arguments from `std::env::args`.
+fn parse_args() -> Args {
+    let args: Vec<String> = std::env::args().collect();
+    let headless = args.contains(&"--headless".to_string());
+    let frames = args
+        .iter()
+        .position(|a| a == "--frames")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100);
+    let output = args
+        .iter()
+        .position(|a| a == "--output")
+        .and_then(|i| args.get(i + 1).cloned());
+    Args {
+        headless,
+        frames,
+        output,
+    }
+}
 
 /// Create the initial set of particles for the MVP demo.
 ///
@@ -63,6 +99,59 @@ fn create_initial_particles() -> Vec<Particle> {
     }
 
     particles
+}
+
+/// Run the engine in headless mode: simulate, render, and save a PNG.
+fn run_headless(args: &Args) -> Result<()> {
+    tracing::info!(
+        "Headless mode: {} frames, output: {}",
+        args.frames,
+        args.output.as_deref().unwrap_or("screenshot.png")
+    );
+
+    let ctx = VulkanContext::new()?;
+    let mut sim = GpuSimulation::new(&ctx)?;
+
+    let particles = create_initial_particles();
+    tracing::info!("Created {} initial particles", particles.len());
+    sim.init_particles(&ctx, &particles)?;
+
+    // Run simulation frames
+    for i in 0..args.frames {
+        ctx.execute_one_shot(|cmd| {
+            sim.step(cmd);
+        })?;
+        if i % 10 == 0 {
+            tracing::info!("Frame {}/{}", i, args.frames);
+        }
+    }
+
+    // Render final frame
+    ctx.execute_one_shot(|cmd| {
+        sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT);
+    })?;
+
+    // Readback render output buffer
+    let pixel_count = (RENDER_WIDTH as usize) * (RENDER_HEIGHT as usize) * 4;
+    let pixels: Vec<u8> =
+        gpu_core::buffer::readback::<u8>(&ctx, sim.render_output_gpu_buffer(), pixel_count)?;
+
+    // Convert BGRA to RGBA for PNG
+    let mut rgba = pixels;
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel.swap(0, 2); // swap B and R
+    }
+
+    // Save PNG
+    let output_path = args.output.as_deref().unwrap_or("screenshot.png");
+    let img = image::RgbaImage::from_raw(RENDER_WIDTH, RENDER_HEIGHT, rgba)
+        .ok_or_else(|| anyhow::anyhow!("Failed to create image from pixel data"))?;
+    img.save(output_path)?;
+
+    tracing::info!("Screenshot saved to {}", output_path);
+
+    sim.destroy(&ctx);
+    Ok(())
 }
 
 /// Application state for the winit event loop.
@@ -345,6 +434,11 @@ fn main() -> Result<()> {
         .init();
 
     tracing::info!("VOX Engine starting");
+
+    let args = parse_args();
+    if args.headless {
+        return run_headless(&args);
+    }
 
     let event_loop = EventLoop::new()?;
     let mut app = App::new();
