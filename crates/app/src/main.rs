@@ -76,12 +76,35 @@ fn parse_args() -> Args {
     }
 }
 
+/// Spawn 8 particles (2x2x2 sub-grid) within a single cell.
+///
+/// Distributes particles at quarter-cell offsets for smoother fluid behavior.
+/// This eliminates grid-seam artifacts caused by particles clustering at
+/// grid nodes when using only 1 particle per cell.
+fn spawn_cell(particles: &mut Vec<Particle>, x: f32, y: f32, z: f32, mass_per_particle: f32, mat: u32, phase: u32) {
+    for dx in 0..2u32 {
+        for dy in 0..2u32 {
+            for dz in 0..2u32 {
+                let pos = Vec3::new(
+                    x + 0.25 + dx as f32 * 0.5,
+                    y + 0.25 + dy as f32 * 0.5,
+                    z + 0.25 + dz as f32 * 0.5,
+                );
+                particles.push(Particle::new(pos, mass_per_particle, mat, phase));
+            }
+        }
+    }
+}
+
 /// Create the initial set of particles for the MVP demo.
 ///
 /// Scene: hollow ellipsoidal cave carved from a stone block,
 /// with a water lake at the bottom and a lava stream dripping
 /// from a ceiling crack. Demonstrates water-lava reaction
 /// (stone + steam), temperature, and phase transitions.
+///
+/// Stone uses 1 particle per cell (solid, pinned). Water and lava use
+/// 8 particles per cell (2x2x2 sub-grid) for smoother fluid behavior.
 fn create_initial_particles() -> Vec<Particle> {
     let mut particles = Vec::new();
     let center = Vec3::new(16.0, 12.0, 16.0);
@@ -103,7 +126,7 @@ fn create_initial_particles() -> Vec<Particle> {
         }
     }
 
-    // 2. Water lake at bottom of cave
+    // 2. Water lake at bottom of cave (8 PPC for smooth fluid)
     for x in 7..25 {
         for z in 7..25 {
             for y in 4..7 {
@@ -112,14 +135,14 @@ fn create_initial_particles() -> Vec<Particle> {
                 let dist_sq = d.x * d.x + d.y * d.y + d.z * d.z;
 
                 if dist_sq < 1.0 {
-                    // Inside cave = water
-                    particles.push(Particle::new(pos, 1.0, MAT_WATER, PHASE_LIQUID));
+                    // Inside cave = water, 8 particles per cell
+                    spawn_cell(&mut particles, x as f32, y as f32, z as f32, 0.125, MAT_WATER, PHASE_LIQUID);
                 }
             }
         }
     }
 
-    // 3. Lava stream from ceiling crack
+    // 3. Lava stream from ceiling crack (8 PPC for smooth fluid)
     for x in 14..18 {
         for z in 14..18 {
             for y in 18..26 {
@@ -129,10 +152,12 @@ fn create_initial_particles() -> Vec<Particle> {
 
                 // Only place lava where there's no stone (inside cave or near surface)
                 if dist_sq < 1.2 {
-                    let mut p = Particle::new(pos, 1.0, MAT_LAVA, PHASE_LIQUID);
+                    let start = particles.len();
+                    spawn_cell(&mut particles, x as f32, y as f32, z as f32, 0.125, MAT_LAVA, PHASE_LIQUID);
                     // Set lava temperature to 2000K (above melting point, stays liquid and glows)
-                    p.vel_temp = glam::Vec4::new(0.0, 0.0, 0.0, 2000.0);
-                    particles.push(p);
+                    for p in &mut particles[start..] {
+                        p.vel_temp = glam::Vec4::new(0.0, 0.0, 0.0, 2000.0);
+                    }
                 }
             }
         }
