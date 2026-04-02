@@ -13,6 +13,7 @@ pub mod material;
 pub mod particle;
 pub mod phase;
 pub mod physics;
+pub mod reaction;
 pub mod svd;
 
 pub use constants::*;
