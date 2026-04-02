@@ -21,7 +21,7 @@ const MASS_THRESHOLD: f32 = 1e-8;
 /// - `0.5 <= |d| < 1.5`: `0.5 * (1.5 - |d|)^2`
 /// - `|d| >= 1.5`: `0`
 #[inline]
-fn bspline_weight(d: f32) -> f32 {
+pub fn bspline_weight(d: f32) -> f32 {
     let abs_d = d.abs();
     if abs_d < 0.5 {
         0.75 - abs_d * abs_d
