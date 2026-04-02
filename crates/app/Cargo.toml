@@ -8,8 +8,9 @@ server = { workspace = true }
 client = { workspace = true }
 shared = { workspace = true, features = ["std"] }
 protocol = { workspace = true }
+gpu-core = { workspace = true }
 winit = { workspace = true }
+glam = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
-ron = { workspace = true }
