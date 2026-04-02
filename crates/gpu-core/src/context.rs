@@ -4,12 +4,17 @@
 //! physical/logical device, queues, command pool, and a gpu-allocator [`Allocator`].
 //! It supports headless mode (no surface) for testing.
 
+use std::{
+    ffi::{CStr, CString},
+    mem::ManuallyDrop,
+    sync::Mutex,
+};
+
 use ash::vk;
-use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
-use gpu_allocator::AllocationSizes;
-use std::ffi::{CStr, CString};
-use std::mem::ManuallyDrop;
-use std::sync::Mutex;
+use gpu_allocator::{
+    AllocationSizes,
+    vulkan::{Allocator, AllocatorCreateDesc},
+};
 
 use crate::error::{GpuError, Result};
 
@@ -57,7 +62,6 @@ pub struct QueueFamilyIndices {
 /// All Vulkan objects are destroyed in [`Drop`] in the correct order.
 pub struct VulkanContext {
     // --- Fields are ordered for correct drop: allocator first, then device, then instance ---
-
     /// GPU memory allocator. Wrapped in ManuallyDrop so we can drop it before
     /// the device in our Drop impl.
     pub allocator: ManuallyDrop<Mutex<Allocator>>,
@@ -167,9 +171,7 @@ impl VulkanContext {
                 _debug_utils_enabled = true;
                 tracing::info!("Vulkan validation layers enabled");
             } else {
-                tracing::warn!(
-                    "Vulkan validation layer not available, running without validation"
-                );
+                tracing::warn!("Vulkan validation layer not available, running without validation");
             }
         }
 
@@ -191,8 +193,7 @@ impl VulkanContext {
         // Physical device selection
         let (physical_device, device_properties) = Self::pick_physical_device(&instance)?;
 
-        let device_name =
-            unsafe { CStr::from_ptr(device_properties.device_name.as_ptr()) };
+        let device_name = unsafe { CStr::from_ptr(device_properties.device_name.as_ptr()) };
         tracing::info!("Selected GPU: {}", device_name.to_string_lossy());
 
         let memory_properties =
@@ -207,8 +208,7 @@ impl VulkanContext {
         );
 
         // Create logical device
-        let device =
-            Self::create_device(&instance, physical_device, &queue_families)?;
+        let device = Self::create_device(&instance, physical_device, &queue_families)?;
         tracing::info!("Logical device created");
 
         // Debug utils device loader for naming objects
@@ -218,10 +218,8 @@ impl VulkanContext {
             .map(|_| ash::ext::debug_utils::Device::new(&instance, &device));
 
         // Get queues
-        let graphics_queue =
-            unsafe { device.get_device_queue(queue_families.graphics, 0) };
-        let compute_queue =
-            unsafe { device.get_device_queue(queue_families.compute, 0) };
+        let graphics_queue = unsafe { device.get_device_queue(queue_families.graphics, 0) };
+        let compute_queue = unsafe { device.get_device_queue(queue_families.compute, 0) };
 
         // Command pool for the graphics family
         let pool_ci = vk::CommandPoolCreateInfo::default()
@@ -284,8 +282,7 @@ impl VulkanContext {
 
         #[cfg(debug_assertions)]
         {
-            let debug_utils_loader =
-                ash::ext::debug_utils::Instance::new(entry, instance);
+            let debug_utils_loader = ash::ext::debug_utils::Instance::new(entry, instance);
 
             let messenger_ci = vk::DebugUtilsMessengerCreateInfoEXT::default()
                 .message_severity(
@@ -344,9 +341,8 @@ impl VulkanContext {
         instance: &ash::Instance,
         physical_device: vk::PhysicalDevice,
     ) -> Result<QueueFamilyIndices> {
-        let families = unsafe {
-            instance.get_physical_device_queue_family_properties(physical_device)
-        };
+        let families =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
 
         let mut graphics = None;
         let mut compute_only = None;
@@ -367,9 +363,7 @@ impl VulkanContext {
         }
 
         let graphics_idx = graphics.ok_or_else(|| {
-            GpuError::NoSuitableQueueFamily(
-                "No graphics+compute queue family".into(),
-            )
+            GpuError::NoSuitableQueueFamily("No graphics+compute queue family".into())
         })?;
 
         // Use dedicated compute queue if available, otherwise share with graphics
@@ -388,9 +382,8 @@ impl VulkanContext {
         queue_families: &QueueFamilyIndices,
     ) -> Result<ash::Device> {
         // Check extension support
-        let supported_extensions = unsafe {
-            instance.enumerate_device_extension_properties(physical_device)?
-        };
+        let supported_extensions =
+            unsafe { instance.enumerate_device_extension_properties(physical_device)? };
         let supported_names: Vec<&CStr> = supported_extensions
             .iter()
             .map(|ext| unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) })
@@ -412,9 +405,11 @@ impl VulkanContext {
 
         // Queue create infos
         let queue_priorities = [1.0f32];
-        let mut queue_cis = vec![vk::DeviceQueueCreateInfo::default()
-            .queue_family_index(queue_families.graphics)
-            .queue_priorities(&queue_priorities)];
+        let mut queue_cis = vec![
+            vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(queue_families.graphics)
+                .queue_priorities(&queue_priorities),
+        ];
         if queue_families.compute != queue_families.graphics {
             queue_cis.push(
                 vk::DeviceQueueCreateInfo::default()
@@ -435,15 +430,13 @@ impl VulkanContext {
             .dynamic_rendering(true)
             .synchronization2(true);
 
-        let mut accel_features =
-            vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
-                .acceleration_structure(true);
+        let mut accel_features = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
+            .acceleration_structure(true);
         let mut ray_query_features =
             vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
-        let mut atomic_float_features =
-            vk::PhysicalDeviceShaderAtomicFloatFeaturesEXT::default()
-                .shader_buffer_float32_atomics(true)
-                .shader_buffer_float32_atomic_add(true);
+        let mut atomic_float_features = vk::PhysicalDeviceShaderAtomicFloatFeaturesEXT::default()
+            .shader_buffer_float32_atomics(true)
+            .shader_buffer_float32_atomic_add(true);
 
         let device_ci = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_cis)
@@ -454,9 +447,7 @@ impl VulkanContext {
             .push_next(&mut ray_query_features)
             .push_next(&mut atomic_float_features);
 
-        let device = unsafe {
-            instance.create_device(physical_device, &device_ci, None)?
-        };
+        let device = unsafe { instance.create_device(physical_device, &device_ci, None)? };
 
         Ok(device)
     }
@@ -485,14 +476,12 @@ impl VulkanContext {
 
             self.device.end_command_buffer(cmd)?;
 
-            let submit = vk::SubmitInfo::default()
-                .command_buffers(std::slice::from_ref(&cmd));
+            let submit = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
             self.device
                 .queue_submit(self.graphics_queue, &[submit], vk::Fence::null())?;
             self.device.queue_wait_idle(self.graphics_queue)?;
 
-            self.device
-                .free_command_buffers(self.command_pool, &[cmd]);
+            self.device.free_command_buffers(self.command_pool, &[cmd]);
         }
 
         Ok(())
@@ -507,8 +496,7 @@ impl VulkanContext {
                     let name_info = vk::DebugUtilsObjectNameInfoEXT::default()
                         .object_handle(handle)
                         .object_name(&c_name);
-                    let _ =
-                        unsafe { debug_device.set_debug_utils_object_name(&name_info) };
+                    let _ = unsafe { debug_device.set_debug_utils_object_name(&name_info) };
                 }
             }
         }
@@ -531,8 +519,7 @@ impl Drop for VulkanContext {
             ManuallyDrop::drop(&mut self.allocator);
 
             // Destroy command pool
-            self.device
-                .destroy_command_pool(self.command_pool, None);
+            self.device.destroy_command_pool(self.command_pool, None);
 
             // Destroy debug messenger
             if let (Some(loader), Some(messenger)) =
@@ -593,8 +580,7 @@ mod tests {
         assert_ne!(ctx.graphics_queue, vk::Queue::null());
         assert_ne!(ctx.compute_queue, vk::Queue::null());
 
-        let device_name =
-            unsafe { CStr::from_ptr(ctx.device_properties.device_name.as_ptr()) };
+        let device_name = unsafe { CStr::from_ptr(ctx.device_properties.device_name.as_ptr()) };
         println!("GPU: {}", device_name.to_string_lossy());
     }
 

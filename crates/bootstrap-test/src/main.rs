@@ -2,9 +2,10 @@
 //!
 //! Validates the entire toolchain: rust-gpu + spirv-builder + ash + Vulkan on this machine.
 
+use std::ffi::CStr;
+
 use anyhow::{Context, Result};
 use ash::vk;
-use std::ffi::CStr;
 
 const ELEMENT_COUNT: usize = 64;
 
@@ -17,10 +18,8 @@ fn main() -> Result<()> {
 
     // Create Vulkan instance
     let entry = unsafe { ash::Entry::load()? };
-    let app_info = vk::ApplicationInfo::default()
-        .api_version(vk::make_api_version(0, 1, 3, 0));
-    let instance_ci = vk::InstanceCreateInfo::default()
-        .application_info(&app_info);
+    let app_info = vk::ApplicationInfo::default().api_version(vk::make_api_version(0, 1, 3, 0));
+    let instance_ci = vk::InstanceCreateInfo::default().application_info(&app_info);
     let instance = unsafe { entry.create_instance(&instance_ci, None)? };
     println!("[OK] Vulkan instance created");
 
@@ -39,7 +38,8 @@ fn main() -> Result<()> {
     println!("[OK] GPU: {}", name.to_string_lossy());
 
     // Find compute queue family
-    let queue_families = unsafe { instance.get_physical_device_queue_family_properties(phys_device) };
+    let queue_families =
+        unsafe { instance.get_physical_device_queue_family_properties(phys_device) };
     let compute_family = queue_families
         .iter()
         .position(|qf| qf.queue_flags.contains(vk::QueueFlags::COMPUTE))
@@ -50,8 +50,8 @@ fn main() -> Result<()> {
     let queue_ci = vk::DeviceQueueCreateInfo::default()
         .queue_family_index(compute_family)
         .queue_priorities(&queue_priorities);
-    let device_ci = vk::DeviceCreateInfo::default()
-        .queue_create_infos(std::slice::from_ref(&queue_ci));
+    let device_ci =
+        vk::DeviceCreateInfo::default().queue_create_infos(std::slice::from_ref(&queue_ci));
     let device = unsafe { instance.create_device(phys_device, &device_ci, None)? };
     let queue = unsafe { device.get_device_queue(compute_family, 0) };
     println!("[OK] Device + compute queue created");
@@ -61,7 +61,9 @@ fn main() -> Result<()> {
     let find_memory_type = |type_bits: u32, flags: vk::MemoryPropertyFlags| -> Result<u32> {
         for i in 0..mem_props.memory_type_count {
             if (type_bits & (1 << i)) != 0
-                && mem_props.memory_types[i as usize].property_flags.contains(flags)
+                && mem_props.memory_types[i as usize]
+                    .property_flags
+                    .contains(flags)
             {
                 return Ok(i);
             }
@@ -85,9 +87,8 @@ fn main() -> Result<()> {
             | vk::BufferUsageFlags::TRANSFER_DST
             | vk::BufferUsageFlags::TRANSFER_SRC,
     )?;
-    let staging_buf = create_buffer(
-        vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST,
-    )?;
+    let staging_buf =
+        create_buffer(vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST)?;
 
     // Allocate and bind memory
     let alloc_and_bind = |buf: vk::Buffer, host_visible: bool| -> Result<vk::DeviceMemory> {
@@ -113,7 +114,11 @@ fn main() -> Result<()> {
     let input_data: Vec<u32> = (0..ELEMENT_COUNT as u32).collect();
     unsafe {
         let ptr = device.map_memory(staging_mem, 0, buf_size, vk::MemoryMapFlags::empty())?;
-        std::ptr::copy_nonoverlapping(input_data.as_ptr() as *const u8, ptr as *mut u8, buf_size as usize);
+        std::ptr::copy_nonoverlapping(
+            input_data.as_ptr() as *const u8,
+            ptr as *mut u8,
+            buf_size as usize,
+        );
         device.unmap_memory(staging_mem);
     }
 
@@ -156,13 +161,13 @@ fn main() -> Result<()> {
         .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
         .descriptor_count(1)
         .stage_flags(vk::ShaderStageFlags::COMPUTE);
-    let ds_layout_ci = vk::DescriptorSetLayoutCreateInfo::default()
-        .bindings(std::slice::from_ref(&binding));
+    let ds_layout_ci =
+        vk::DescriptorSetLayoutCreateInfo::default().bindings(std::slice::from_ref(&binding));
     let ds_layout = unsafe { device.create_descriptor_set_layout(&ds_layout_ci, None)? };
 
     // Pipeline layout + compute pipeline
-    let pipe_layout_ci = vk::PipelineLayoutCreateInfo::default()
-        .set_layouts(std::slice::from_ref(&ds_layout));
+    let pipe_layout_ci =
+        vk::PipelineLayoutCreateInfo::default().set_layouts(std::slice::from_ref(&ds_layout));
     let pipe_layout = unsafe { device.create_pipeline_layout(&pipe_layout_ci, None)? };
 
     let entry_name = c"main_cs";
@@ -252,13 +257,19 @@ fn main() -> Result<()> {
     for i in 0..ELEMENT_COUNT {
         let expected = (i as u32) * 2;
         if result[i] != expected {
-            println!("[FAIL] result[{}] = {}, expected {}", i, result[i], expected);
+            println!(
+                "[FAIL] result[{}] = {}, expected {}",
+                i, result[i], expected
+            );
             pass = false;
         }
     }
 
     if pass {
-        println!("[OK] All {} values correct! data[i] = data[i] * 2", ELEMENT_COUNT);
+        println!(
+            "[OK] All {} values correct! data[i] = data[i] * 2",
+            ELEMENT_COUNT
+        );
         println!("\n=== BOOTSTRAP TEST PASSED ===");
         println!("rust-gpu + ash toolchain works on this machine.");
     } else {

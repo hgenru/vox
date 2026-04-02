@@ -1,7 +1,6 @@
 # Rust
 /target/
 **/target/
-Cargo.lock
 
 # SPIR-V compiled shaders (generated at build time)
 *.spv

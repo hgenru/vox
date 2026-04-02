@@ -2,11 +2,14 @@
 //!
 //! Uses `VK_KHR_dynamic_rendering` — no render pass objects needed.
 
-use ash::vk;
 use std::ffi::CStr;
 
-use crate::context::VulkanContext;
-use crate::error::{GpuError, Result};
+use ash::vk;
+
+use crate::{
+    context::VulkanContext,
+    error::{GpuError, Result},
+};
 
 /// Swapchain wrapper with image views and format info.
 pub struct Swapchain {
@@ -47,24 +50,16 @@ impl Swapchain {
         height: u32,
     ) -> Result<Self> {
         let surface_caps = unsafe {
-            surface_loader.get_physical_device_surface_capabilities(
-                ctx.physical_device,
-                surface,
-            )?
+            surface_loader.get_physical_device_surface_capabilities(ctx.physical_device, surface)?
         };
 
         let surface_formats = unsafe {
-            surface_loader.get_physical_device_surface_formats(
-                ctx.physical_device,
-                surface,
-            )?
+            surface_loader.get_physical_device_surface_formats(ctx.physical_device, surface)?
         };
 
         let present_modes = unsafe {
-            surface_loader.get_physical_device_surface_present_modes(
-                ctx.physical_device,
-                surface,
-            )?
+            surface_loader
+                .get_physical_device_surface_present_modes(ctx.physical_device, surface)?
         };
 
         // Choose format: prefer B8G8R8A8_SRGB
@@ -105,9 +100,7 @@ impl Swapchain {
 
         // Image count: at least min + 1, but not exceeding max (if max > 0)
         let mut image_count = surface_caps.min_image_count + 1;
-        if surface_caps.max_image_count > 0
-            && image_count > surface_caps.max_image_count
-        {
+        if surface_caps.max_image_count > 0 && image_count > surface_caps.max_image_count {
             image_count = surface_caps.max_image_count;
         }
 
@@ -118,21 +111,15 @@ impl Swapchain {
             .image_color_space(format.color_space)
             .image_extent(extent)
             .image_array_layers(1)
-            .image_usage(
-                vk::ImageUsageFlags::COLOR_ATTACHMENT
-                    | vk::ImageUsageFlags::TRANSFER_DST,
-            )
+            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(surface_caps.current_transform)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
             .present_mode(present_mode)
             .clipped(true);
 
-        let swapchain_loader =
-            ash::khr::swapchain::Device::new(&ctx.instance, &ctx.device);
-        let handle = unsafe {
-            swapchain_loader.create_swapchain(&swapchain_ci, None)?
-        };
+        let swapchain_loader = ash::khr::swapchain::Device::new(&ctx.instance, &ctx.device);
+        let handle = unsafe { swapchain_loader.create_swapchain(&swapchain_ci, None)? };
 
         let images = unsafe { swapchain_loader.get_swapchain_images(handle)? };
 
@@ -212,10 +199,7 @@ impl Swapchain {
             .swapchains(std::slice::from_ref(&self.handle))
             .image_indices(std::slice::from_ref(&image_index));
 
-        unsafe {
-            self.swapchain_loader
-                .queue_present(queue, &present_info)
-        }
+        unsafe { self.swapchain_loader.queue_present(queue, &present_info) }
     }
 
     /// Destroy swapchain resources. Must be called before dropping.
@@ -227,8 +211,7 @@ impl Swapchain {
             self.image_views.clear();
             self.images.clear();
 
-            self.swapchain_loader
-                .destroy_swapchain(self.handle, None);
+            self.swapchain_loader.destroy_swapchain(self.handle, None);
         }
     }
 }

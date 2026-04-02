@@ -4,11 +4,12 @@
 //! plus helpers for creating 3D images, image views, layout transitions, and samplers.
 
 use ash::vk;
-use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
-use gpu_allocator::MemoryLocation;
+use gpu_allocator::{
+    MemoryLocation,
+    vulkan::{Allocation, AllocationCreateDesc, AllocationScheme},
+};
 
-use crate::context::VulkanContext;
-use crate::error::Result;
+use crate::{context::VulkanContext, error::Result};
 
 /// A GPU image with its associated view and memory allocation.
 pub struct GpuImage {
@@ -59,10 +60,7 @@ pub fn create_3d_image(
     let requirements = unsafe { ctx.device.get_image_memory_requirements(image) };
 
     let allocation = {
-        let mut allocator = ctx
-            .allocator
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut allocator = ctx.allocator.lock().unwrap_or_else(|e| e.into_inner());
         allocator.allocate(&AllocationCreateDesc {
             name,
             requirements,
@@ -178,9 +176,10 @@ fn layout_transition_masks(
     vk::PipelineStageFlags,
 ) {
     let (src_access, src_stage) = match old_layout {
-        vk::ImageLayout::UNDEFINED => {
-            (vk::AccessFlags::empty(), vk::PipelineStageFlags::TOP_OF_PIPE)
-        }
+        vk::ImageLayout::UNDEFINED => (
+            vk::AccessFlags::empty(),
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+        ),
         vk::ImageLayout::TRANSFER_DST_OPTIMAL => (
             vk::AccessFlags::TRANSFER_WRITE,
             vk::PipelineStageFlags::TRANSFER,
@@ -260,10 +259,7 @@ pub fn destroy_image(ctx: &VulkanContext, mut img: GpuImage) {
         ctx.device.destroy_image(img.image, None);
     }
     if let Some(allocation) = img.allocation.take() {
-        let mut allocator = ctx
-            .allocator
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut allocator = ctx.allocator.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(e) = allocator.free(allocation) {
             tracing::error!("Failed to free image allocation: {}", e);
         }

@@ -62,7 +62,7 @@ pub struct WorldSnapshot {
 impl WorldSnapshot {
     /// Create a new empty snapshot.
     pub fn new(grid_size: u32) -> Self {
-        let occupancy_words = (grid_size * grid_size * grid_size + 31) / 32;
+        let occupancy_words = (grid_size * grid_size * grid_size).div_ceil(32);
         Self {
             particles: Vec::new(),
             grid_occupancy: vec![0; occupancy_words as usize],
@@ -160,8 +160,9 @@ pub fn particle_to_state(particle: &shared::particle::Particle) -> ParticleState
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use shared::material::{MAT_WATER, PHASE_LIQUID};
+
+    use super::*;
 
     #[test]
     fn world_snapshot_bitcode_roundtrip() {
@@ -254,7 +255,8 @@ mod tests {
 
     #[test]
     fn particle_to_state_conversion() {
-        let p = shared::particle::Particle::new(Vec3::new(0.1, 0.2, 0.3), 1.0, MAT_WATER, PHASE_LIQUID);
+        let p =
+            shared::particle::Particle::new(Vec3::new(0.1, 0.2, 0.3), 1.0, MAT_WATER, PHASE_LIQUID);
         let state = particle_to_state(&p);
         assert_eq!(state.material_id, MAT_WATER);
         assert_eq!(state.phase, PHASE_LIQUID);
@@ -267,11 +269,11 @@ mod tests {
             keyboard_state: 0b110011,
             ..PlayerInput::idle()
         };
-        assert!(input.key_pressed(0));  // W
-        assert!(input.key_pressed(1));  // S
+        assert!(input.key_pressed(0)); // W
+        assert!(input.key_pressed(1)); // S
         assert!(!input.key_pressed(2)); // not A
         assert!(!input.key_pressed(3)); // not D
-        assert!(input.key_pressed(4));  // Space
-        assert!(input.key_pressed(5));  // Shift
+        assert!(input.key_pressed(4)); // Space
+        assert!(input.key_pressed(5)); // Shift
     }
 }

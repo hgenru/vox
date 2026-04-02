@@ -1,5 +1,6 @@
-use spirv_builder::{Capability, SpirvBuilder};
 use std::path::PathBuf;
+
+use spirv_builder::{Capability, SpirvBuilder};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shader_crate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

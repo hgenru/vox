@@ -6,7 +6,7 @@
 use shared::{
     constants::GRID_SIZE,
     particle::Particle,
-    reaction::{default_reaction_table, find_reaction, ReactionRule},
+    reaction::{ReactionRule, default_reaction_table, find_reaction},
 };
 
 use crate::grid::grid_index;
@@ -130,11 +130,10 @@ fn apply_reaction_to_pair(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use glam::{Mat3, Vec3};
-    use shared::material::{
-        MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_GAS, PHASE_LIQUID, PHASE_SOLID,
-    };
+    use shared::material::{MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_GAS, PHASE_LIQUID, PHASE_SOLID};
+
+    use super::*;
 
     #[test]
     fn water_lava_reaction_produces_stone_and_steam() {
@@ -255,9 +254,6 @@ mod tests {
             .filter(|p| p.material_id() == MAT_WATER && p.phase() == PHASE_LIQUID)
             .count();
         // One water should remain unreacted
-        assert_eq!(
-            water_count, 1,
-            "One water should remain unreacted"
-        );
+        assert_eq!(water_count, 1, "One water should remain unreacted");
     }
 }

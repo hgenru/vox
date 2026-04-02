@@ -45,8 +45,8 @@ pub fn default_reaction_table() -> &'static [ReactionRule] {
             product_b_material: crate::material::MAT_WATER,
             product_b_phase: crate::material::PHASE_GAS,
             min_temperature: f32::MIN,
-            product_a_temp: 300.0,  // cooled stone
-            product_b_temp: 100.0,  // steam at boiling point
+            product_a_temp: 300.0, // cooled stone
+            product_b_temp: 100.0, // steam at boiling point
         },
     ]
 }

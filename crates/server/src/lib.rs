@@ -9,14 +9,16 @@
 //! All shaders are compiled to a single SPIR-V module at build time via
 //! `spirv-builder` in `build.rs`.
 
+use std::{ffi::CStr, mem};
+
 use ash::vk;
 use bytemuck::Pod;
-use gpu_core::buffer::{self, GpuBuffer};
-use gpu_core::pipeline;
-use gpu_core::VulkanContext;
-use shared::{GridCell, Particle, GRID_CELL_COUNT, GRID_SIZE, MAX_PARTICLES};
-use std::ffi::CStr;
-use std::mem;
+use gpu_core::{
+    VulkanContext,
+    buffer::{self, GpuBuffer},
+    pipeline,
+};
+use shared::{GRID_CELL_COUNT, GRID_SIZE, GridCell, MAX_PARTICLES, Particle};
 
 /// Compiled SPIR-V shader module bytes, included at compile time.
 const SHADER_BYTES: &[u8] = include_bytes!(env!("SHADERS_SPV_PATH"));
@@ -158,8 +160,7 @@ impl GpuSimulation {
         tracing::info!("Creating GpuSimulation");
 
         // -- Shader module --
-        let shader_module =
-            pipeline::create_shader_module(ctx, SHADER_BYTES, "mpm-shaders")?;
+        let shader_module = pipeline::create_shader_module(ctx, SHADER_BYTES, "mpm-shaders")?;
 
         // -- Buffers --
         let particle_buf_size =
@@ -183,9 +184,8 @@ impl GpuSimulation {
             "grid-buffer",
         )?;
 
-        let voxel_buf_size = (GRID_CELL_COUNT as usize
-            * mem::size_of::<glam::UVec4>())
-            as vk::DeviceSize;
+        let voxel_buf_size =
+            (GRID_CELL_COUNT as usize * mem::size_of::<glam::UVec4>()) as vk::DeviceSize;
         let voxel_buffer = buffer::create_device_local_buffer(
             ctx,
             voxel_buf_size,
@@ -615,13 +615,12 @@ impl GpuSimulation {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use glam::Vec3;
 
+    use super::*;
+
     fn init_tracing() {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("info")
-            .try_init();
+        let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
     }
 
     #[test]

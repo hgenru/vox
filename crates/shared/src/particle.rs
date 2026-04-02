@@ -181,8 +181,9 @@ pub struct GridCell {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::mem::offset_of;
+
+    use super::*;
 
     #[test]
     fn particle_struct_layout() {

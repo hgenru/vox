@@ -439,10 +439,7 @@ mod tests {
         let r = polar_decomposition(f);
         assert_orthogonal(r, 1e-4);
         let det = r.determinant();
-        assert!(
-            (det - 1.0).abs() < 1e-3,
-            "det(R) = {det}, expected 1.0"
-        );
+        assert!((det - 1.0).abs() < 1e-3, "det(R) = {det}, expected 1.0");
     }
 
     #[test]

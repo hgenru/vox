@@ -10,16 +10,16 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::window::{Window, WindowAttributes, WindowId};
-
-use client::Renderer;
-use client::renderer::required_instance_extensions;
+use client::{Renderer, renderer::required_instance_extensions};
 use gpu_core::VulkanContext;
 use shared::{
     MAT_STONE, MAT_WATER, PHASE_LIQUID, PHASE_SOLID, Particle, RENDER_HEIGHT, RENDER_WIDTH,
+};
+use winit::{
+    application::ApplicationHandler,
+    event::WindowEvent,
+    event_loop::{ActiveEventLoop, EventLoop},
+    window::{Window, WindowAttributes, WindowId},
 };
 
 /// Create the initial set of particles for the MVP demo.
@@ -115,7 +115,8 @@ impl ApplicationHandler for App {
         );
 
         // Create Vulkan context with surface extensions
-        let ctx = match VulkanContext::new_with_instance_extensions(required_instance_extensions()) {
+        let ctx = match VulkanContext::new_with_instance_extensions(required_instance_extensions())
+        {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("Failed to create VulkanContext: {}", e);
@@ -149,9 +150,7 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => {
                 tracing::info!("Close requested, shutting down");
                 // Clean up before exit
-                if let (Some(renderer), Some(ctx)) =
-                    (self.renderer.as_mut(), self.ctx.as_ref())
-                {
+                if let (Some(renderer), Some(ctx)) = (self.renderer.as_mut(), self.ctx.as_ref()) {
                     renderer.destroy(ctx);
                 }
                 event_loop.exit();
@@ -164,9 +163,7 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
-                if let (Some(renderer), Some(ctx)) =
-                    (self.renderer.as_mut(), self.ctx.as_ref())
-                {
+                if let (Some(renderer), Some(ctx)) = (self.renderer.as_mut(), self.ctx.as_ref()) {
                     match renderer.draw_frame(ctx) {
                         Ok(_) => {}
                         Err(e) => {

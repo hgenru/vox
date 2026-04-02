@@ -5,12 +5,13 @@
 //! rendering will be added in a later iteration.
 
 use ash::vk;
+use gpu_core::{
+    context::VulkanContext,
+    frame::FrameManager,
+    swapchain::{SURFACE_INSTANCE_EXTENSIONS, Swapchain},
+};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
-
-use gpu_core::context::VulkanContext;
-use gpu_core::frame::FrameManager;
-use gpu_core::swapchain::{Swapchain, SURFACE_INSTANCE_EXTENSIONS};
 
 /// Errors that can occur in the renderer.
 #[derive(Debug, thiserror::Error)]
@@ -71,15 +72,13 @@ impl Renderer {
             .map_err(RendererError::Vulkan)?
         };
 
-        let surface_loader =
-            ash::khr::surface::Instance::new(&ctx.entry, &ctx.instance);
+        let surface_loader = ash::khr::surface::Instance::new(&ctx.entry, &ctx.instance);
 
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
 
-        let swapchain =
-            Swapchain::new(ctx, &surface_loader, surface, width, height)?;
+        let swapchain = Swapchain::new(ctx, &surface_loader, surface, width, height)?;
 
         let frame_manager = FrameManager::new(ctx)?;
 
@@ -208,8 +207,9 @@ impl Renderer {
         }
 
         // End frame (submit + present)
-        let present_ok =
-            self.frame_manager.end_frame(ctx, &self.swapchain, frame_ctx)?;
+        let present_ok = self
+            .frame_manager
+            .end_frame(ctx, &self.swapchain, frame_ctx)?;
 
         if !present_ok {
             self.needs_resize = true;
@@ -222,7 +222,9 @@ impl Renderer {
     /// Recreate the swapchain (e.g., after a window resize).
     fn recreate_swapchain(&mut self, ctx: &VulkanContext) -> Result<()> {
         unsafe {
-            ctx.device.device_wait_idle().map_err(gpu_core::GpuError::Vulkan)?;
+            ctx.device
+                .device_wait_idle()
+                .map_err(gpu_core::GpuError::Vulkan)?;
         }
 
         self.swapchain.destroy(ctx);
