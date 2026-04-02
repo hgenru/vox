@@ -486,6 +486,32 @@ impl GpuSimulation {
         );
     }
 
+    /// Append new particles to the existing simulation.
+    ///
+    /// Reads back current particles from the GPU, appends the new ones,
+    /// and re-uploads the full set. The total count must not exceed
+    /// [`MAX_PARTICLES`]. This is not efficient but works for MVP interactive
+    /// spawning where we add small batches infrequently.
+    pub fn add_particles(&mut self, ctx: &VulkanContext, new_particles: &[Particle]) -> Result<()> {
+        let new_total = self.num_particles as usize + new_particles.len();
+        if new_total > MAX_PARTICLES as usize {
+            return Err(ServerError::TooManyParticles(new_total));
+        }
+
+        // Read back existing particles
+        let mut all_particles = self.readback_particles(ctx)?;
+        all_particles.extend_from_slice(new_particles);
+
+        self.num_particles = all_particles.len() as u32;
+        buffer::upload(ctx, &all_particles, &self.particle_buffer)?;
+        tracing::info!(
+            "Added {} particles, total now {}",
+            new_particles.len(),
+            self.num_particles
+        );
+        Ok(())
+    }
+
     /// Read particle data back from the GPU for debugging.
     ///
     /// This is a synchronous operation that stalls the GPU pipeline.
