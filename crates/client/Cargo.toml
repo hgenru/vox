@@ -8,6 +8,8 @@ shared = { workspace = true, features = ["std"] }
 protocol = { workspace = true }
 gpu-core = { workspace = true }
 ash = { workspace = true }
+ash-window = { workspace = true }
+raw-window-handle = "0.6"
 glam = { workspace = true }
 bytemuck = { workspace = true }
 winit = { workspace = true }
