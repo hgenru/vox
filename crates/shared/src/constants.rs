@@ -45,3 +45,26 @@ pub const MAX_ACTIVE_CELLS: u32 = GRID_CELL_COUNT / 4;
 
 /// Workgroup size for 1D sparse dispatches over active cell lists.
 pub const SPARSE_WORKGROUP_SIZE: u32 = 64;
+
+/// Total number of bricks in the grid (BRICKS_PER_AXIS³).
+pub const TOTAL_BRICKS: u32 = BRICKS_PER_AXIS * BRICKS_PER_AXIS * BRICKS_PER_AXIS;
+
+/// Velocity² threshold below which a particle is considered inactive.
+/// Particles with speed² <= this won't increment the activity counter.
+pub const ACTIVITY_VELOCITY_THRESHOLD_SQ: f32 = 0.01;
+
+/// Number of consecutive inactive frames before a brick enters sleep state.
+pub const SLEEP_THRESHOLD_FRAMES: u32 = 30;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn total_bricks_matches_grid_layout() {
+        // With GRID_SIZE=256 and BRICK_SIZE=8, BRICKS_PER_AXIS=32, so 32³=32768.
+        assert_eq!(TOTAL_BRICKS, 32_768);
+        assert_eq!(BRICKS_PER_AXIS, 32);
+        assert_eq!(TOTAL_BRICKS, BRICKS_PER_AXIS.pow(3));
+    }
+}
