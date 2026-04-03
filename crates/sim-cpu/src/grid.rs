@@ -235,6 +235,60 @@ pub fn grid_update(grid: &mut [GridCell], dt: f32) {
     }
 }
 
+/// Build a boolean occupancy grid of solid particles for support checks.
+///
+/// Returns a `Vec<bool>` of size `GRID_SIZE^3` where each entry is `true`
+/// if a solid (phase==0) particle maps to that cell.
+///
+/// # Arguments
+/// - `particles`: slice of all particles
+pub fn build_solid_occupancy(particles: &[Particle]) -> Vec<bool> {
+    let gs = GRID_SIZE as usize;
+    let mut occupancy = vec![false; gs * gs * gs];
+    for p in particles {
+        if p.phase() != 0 {
+            continue;
+        }
+        let pos = p.position();
+        let gp = pos * GRID_SIZE as f32;
+        let ix = gp.x as i32;
+        let iy = gp.y as i32;
+        let iz = gp.z as i32;
+        if let Some(idx) = grid_index(ix, iy, iz) {
+            occupancy[idx] = true;
+        }
+    }
+    occupancy
+}
+
+/// Check if a solid particle has support from a solid voxel below it.
+///
+/// A particle is considered supported if:
+/// - It is at the grid floor (iy <= 1), or
+/// - The cell directly below it in the occupancy grid is occupied by a solid.
+///
+/// # Arguments
+/// - `pos`: particle position in world space [0, 1]
+/// - `solid_occupancy`: boolean grid from [`build_solid_occupancy`]
+pub fn check_solid_support(pos: Vec3, solid_occupancy: &[bool]) -> bool {
+    let gs = GRID_SIZE as f32;
+    let gp = pos * gs;
+    let ix = gp.x as i32;
+    let iy = gp.y as i32;
+    let iz = gp.z as i32;
+
+    // At bottom of grid = supported by boundary
+    if iy <= 1 {
+        return true;
+    }
+
+    // Check cell below
+    match grid_index(ix, iy - 1, iz) {
+        Some(idx) => solid_occupancy[idx],
+        None => true, // out of bounds = treat as supported
+    }
+}
+
 /// Grid-to-Particle transfer (G2P).
 ///
 /// Gathers velocity from 27 neighbor grid cells to update each particle:
@@ -243,11 +297,15 @@ pub fn grid_update(grid: &mut [GridCell], dt: f32) {
 /// 3. Update deformation gradient: `F_new = (I + dt*C) * F`
 /// 4. Advect position: `pos += vel * dt`
 ///
+/// For solid particles (phase==0), checks support from the cell below.
+/// Supported solids update only F/C (pinned). Unsupported solids fall normally.
+///
 /// # Arguments
 /// - `particles`: mutable slice of particles
 /// - `grid`: grid buffer with updated velocities
+/// - `solid_occupancy`: boolean grid from [`build_solid_occupancy`] (pass empty slice to skip support check)
 /// - `dt`: timestep
-pub fn g2p(particles: &mut [Particle], grid: &[GridCell], dt: f32) {
+pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[bool], dt: f32) {
     let gs = GRID_SIZE as f32;
     let pic_blend = 0.7_f32; // PIC/FLIP blend factor
 
@@ -339,15 +397,30 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], dt: f32) {
             final_vel.z *= 0.98;
         }
 
+        // Update deformation gradient: F_new = (I + dt * C) * F
+        let f_old = particle.deformation_gradient();
+        let f_new = (Mat3::IDENTITY + dt * new_c) * f_old;
+
+        // Solids: check if the particle has support from a solid voxel below.
+        // Supported solids update F and C only (pinned, prevents floor drift).
+        // Unsupported solids fall through to full position/velocity update.
+        if particle.phase() == 0 && !solid_occupancy.is_empty() {
+            let supported = check_solid_support(pos, solid_occupancy);
+            if supported {
+                particle.set_affine_momentum(new_c);
+                particle.set_deformation_gradient(f_new);
+                continue;
+            }
+            // Unsupported: fall through to position/velocity update
+        }
+
         // Update velocity
         particle.set_velocity(final_vel);
 
         // Update APIC C matrix
         particle.set_affine_momentum(new_c);
 
-        // Update deformation gradient: F_new = (I + dt * C) * F
-        let f_old = particle.deformation_gradient();
-        let f_new = (Mat3::IDENTITY + dt * new_c) * f_old;
+        // Update deformation gradient
         particle.set_deformation_gradient(f_new);
 
         // Advect position
@@ -491,7 +564,8 @@ mod tests {
             let mut grid = make_grid();
             p2g(&particles, &mut grid, &table, dt);
             grid_update(&mut grid, dt);
-            g2p(&mut particles, &grid, dt);
+            let occupancy = build_solid_occupancy(&particles);
+            g2p(&mut particles, &grid, &occupancy, dt);
         }
 
         let final_y = particles[0].position().y;
@@ -515,7 +589,8 @@ mod tests {
             let mut grid = make_grid();
             p2g(&particles, &mut grid, &table, dt);
             grid_update(&mut grid, dt);
-            g2p(&mut particles, &grid, dt);
+            let occupancy = build_solid_occupancy(&particles);
+            g2p(&mut particles, &grid, &occupancy, dt);
         }
 
         for (i, p) in particles.iter().enumerate() {
