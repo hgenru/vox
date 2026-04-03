@@ -53,8 +53,9 @@ pub const TOTAL_BRICKS: u32 = BRICKS_PER_AXIS * BRICKS_PER_AXIS * BRICKS_PER_AXI
 /// Particles with speed² <= this won't increment the activity counter.
 pub const ACTIVITY_VELOCITY_THRESHOLD_SQ: f32 = 0.01;
 
-/// Number of consecutive inactive frames before a brick enters sleep state.
-pub const SLEEP_THRESHOLD_FRAMES: u32 = 30;
+/// Frames of zero activity before a brick enters sleep state.
+/// At 60 Hz physics, 30 frames = 0.5 seconds of calm before sleeping.
+pub const SLEEP_THRESHOLD: u32 = 30;
 
 #[cfg(test)]
 mod tests {
@@ -66,5 +67,10 @@ mod tests {
         assert_eq!(TOTAL_BRICKS, 32_768);
         assert_eq!(BRICKS_PER_AXIS, 32);
         assert_eq!(TOTAL_BRICKS, BRICKS_PER_AXIS.pow(3));
+    }
+
+    #[test]
+    fn sleep_threshold_is_positive() {
+        assert!(SLEEP_THRESHOLD > 0);
     }
 }
