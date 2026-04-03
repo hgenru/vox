@@ -158,8 +158,8 @@ fn ice_melts_near_heat() {
     let center = Vec3::new(0.5, 0.5, 0.5);
     let dx = 1.0 / 256.0;
 
-    // Warm stone (50 C — enough to melt ice, not enough to boil water)
-    w.spawn(center, MAT_STONE, PHASE_SOLID, 50.0);
+    // Warm stone (80 C — enough to melt ice, not enough to boil water)
+    w.spawn(center, MAT_STONE, PHASE_SOLID, 80.0);
     // Ice one cell away
     w.spawn(
         center + Vec3::new(dx, 0.0, 0.0),
@@ -168,7 +168,7 @@ fn ice_melts_near_heat() {
         -10.0,
     );
 
-    w.step_n(200);
+    w.step_n(500);
 
     let ice_particle = &w.particles()[1];
     // Ice melts at 0 C -> becomes water (material=1, phase=liquid)

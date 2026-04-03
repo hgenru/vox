@@ -37,7 +37,7 @@ const U32S_PER_VOXEL: u32 = 4;
 /// Returns `true` if the cell is in-bounds, occupied, and has phase==0.
 fn is_solid_voxel(vx: u32, vy: u32, vz: u32, voxels: &[u32], grid_size: u32) -> bool {
     if vx >= grid_size || vy >= grid_size || vz >= grid_size {
-        return false;
+        return true; // out of bounds = treat as supported (safe default)
     }
     let idx = (vz * grid_size * grid_size + vy * grid_size + vx) as usize;
     let base = idx * U32S_PER_VOXEL as usize;
@@ -181,11 +181,12 @@ pub fn gather_particle(
     c_col2 *= apic_scale;
 
     // Thermal diffusion: blend grid temp with particle temp for gradual transfer.
-    // Full grid temp (blend=1.0) = instant equalization (too fast, lava cools in <1s).
-    // Blend=0.005 means 0.5% of grid temp difference per step.
-    // At 120 steps/sec: after 1s temp moves ~45% toward grid average.
-    // Lava at 2000C surrounded by stone at 20C cools to solidification (~1500C) in ~3-5s.
-    let thermal_blend = 0.005_f32;
+    // Full grid temp (blend=1.0) = instant equalization (too fast).
+    // Blend=0.002 means 0.2% of grid temp difference per step.
+    // At 120 steps/sec: lava at 2000C surrounded by cold stone cools to
+    // solidification (~1500C) in ~8-12 seconds. Combined with radiative cooling
+    // (0.0005/step), total cooling rate is gentle enough for visual gameplay.
+    let thermal_blend = 0.002_f32;
     let old_temp = particle.vel_temp.w;
     new_temp = old_temp + thermal_blend * (new_temp - old_temp);
 
@@ -193,8 +194,8 @@ pub fn gather_particle(
     // Without this, total thermal energy only accumulates (each explosion adds 3000C)
     // and chain explosions escalate infinitely. This ensures heat dissipates even
     // without cold neighbors nearby.
-    // At 0.002 per step (120 steps/sec): hot particle loses ~21% of excess heat per second.
-    // 3000C -> ~2370C after 1s, ~1870C after 2s, reaches ambient in ~15-20s.
+    // At 0.0005 per step (120 steps/sec): hot particle loses ~6% of excess heat per second.
+    // 2000C lava takes ~8-10s to cool to solidification (1500C). Gentle enough for gameplay.
     new_temp = apply_radiative_cooling(new_temp);
 
     // PIC/FLIP blend
@@ -300,20 +301,20 @@ pub fn gather_particle(
 /// a minimum downward velocity proportional to accumulated gravity over ~10 frames.
 /// Also zeros out horizontal velocity to prevent wall-sliding artifacts.
 fn apply_min_fall_speed(vel: Vec3, dt: f32) -> Vec3 {
-    // Gravity = -196.0 grid-units/s^2. Over 10 frames at dt=0.001:
-    // min_fall_speed = -196.0 * 0.001 * 10 = -1.96 grid-units/s
+    // Gravity = -196.0 grid-units/s^2. Over 5 frames at dt=0.001:
+    // min_fall_speed = -196.0 * 0.001 * 5 = -0.98 grid-units/s
+    // Gentle minimum ensures blocks don't freeze but doesn't yank them down.
     let gravity = -196.0_f32;
-    let min_fall_speed = gravity * dt * 10.0;
+    let min_fall_speed = gravity * dt * 5.0;
 
     let mut result = vel;
     // Ensure downward velocity is at least min_fall_speed (both are negative)
     if result.y > min_fall_speed {
         result.y = min_fall_speed;
     }
-    // Dampen horizontal velocity to prevent wall-sliding and lateral sticking.
-    // Solids should fall straight down, not drift sideways from grid coupling.
-    result.x *= 0.5;
-    result.z *= 0.5;
+    // Gentle horizontal damping — don't zero out, just reduce grid coupling drift
+    result.x *= 0.8;
+    result.z *= 0.8;
     result
 }
 
@@ -327,7 +328,7 @@ fn apply_min_fall_speed(vel: Vec3, dt: f32) -> Vec3 {
 /// loses ~21% of excess heat per second.
 fn apply_radiative_cooling(temp: f32) -> f32 {
     let ambient_temp = 20.0_f32;
-    let cooling_rate = 0.002_f32;
+    let cooling_rate = 0.0005_f32;
     temp + cooling_rate * (ambient_temp - temp)
 }
 
@@ -364,15 +365,22 @@ fn apply_gunpowder_explosion(particle: &mut Particle) {
     let hy = hash_f32(py * 127.31 + px * 53.47);
     let hz = hash_f32(pz * 91.53 + py * 67.13);
 
-    // Explosion speed: 150 grid-units/s.
-    // Against gravity=-196, max vertical rise = v^2/(2*g) ~ 57 grid units.
-    // Horizontal spread is unimpeded. Good visual for 256-grid.
-    let explosion_speed = 150.0_f32;
-    particle.vel_temp = Vec4::new(
-        hx * explosion_speed,
-        hy.abs() * explosion_speed + 80.0, // always some upward bias
-        hz * explosion_speed,
-        3000.0, // boost temperature for gas thermal pressure
+    // Explosion speed: 200 grid-units/s.
+    // Against gravity=-196, max vertical rise = v^2/(2*g) ~ 102 grid units.
+    let explosion_speed = 200.0_f32;
+    let vx = hx * explosion_speed;
+    let vy_exp = hy.abs() * explosion_speed + 100.0; // always some upward bias
+    let vz = hz * explosion_speed;
+    particle.vel_temp = Vec4::new(vx, vy_exp, vz, 3000.0);
+    // Also push position directly — G2P will overwrite velocity on next frame
+    // via grid coupling, so the impulse must also move particles spatially.
+    // Same approach as explosion.rs (direct position push).
+    let push_scale = 0.02_f32;
+    particle.pos_mass = Vec4::new(
+        particle.pos_mass.x + vx * push_scale,
+        particle.pos_mass.y + vy_exp * push_scale,
+        particle.pos_mass.z + vz * push_scale,
+        particle.pos_mass.w,
     );
     // Reset F (trap #8)
     particle.f_col0 = Vec4::new(1.0, 0.0, 0.0, 0.0);
