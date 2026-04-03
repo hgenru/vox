@@ -7,7 +7,9 @@
 //! that changes each frame. Voxel ray tracing comes later.
 
 pub mod camera;
+pub mod player;
 pub mod renderer;
 
 pub use camera::Camera;
+pub use player::PlayerController;
 pub use renderer::Renderer;
