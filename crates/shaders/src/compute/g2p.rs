@@ -273,11 +273,21 @@ pub fn gather_particle(
             apply_phase_transitions(particle, reactions, num_rules);
             return;
         }
-        // Unsupported solid: enforce minimum fall speed to overcome grid friction.
-        // Grid coupling with neighboring solids creates artificial friction that
-        // prevents free-fall. Override with gravity-based minimum downward velocity.
-        // GRAVITY is -196.0, so min_fall_speed is negative (downward).
-        new_vel = apply_min_fall_speed(new_vel, dt);
+        // Unsupported solid: bypass PIC blend entirely.
+        // PIC blend resets velocity to grid average (~0) every frame, preventing
+        // gravity from accumulating. Instead, use old particle velocity + gravity
+        // directly, so blocks accelerate like real falling objects.
+        let old_vel_y = particle.vel_temp.y;
+        let gravity = -196.0_f32;
+        new_vel = Vec3::new(
+            old_vel.x * 0.9, // slight horizontal damping
+            old_vel_y + gravity * dt, // accumulate gravity each frame
+            old_vel.z * 0.9,
+        );
+        // Clamp to terminal velocity (~50 grid-units/s) to prevent instability
+        if new_vel.y < -50.0 {
+            new_vel.y = -50.0;
+        }
     }
 
     // Write back to particle (liquids and gases only)
@@ -292,30 +302,6 @@ pub fn gather_particle(
 
     // Phase transitions by temperature (data-driven)
     apply_phase_transitions(particle, reactions, num_rules);
-}
-
-/// Enforce minimum fall speed for unsupported solid particles.
-///
-/// Grid coupling with neighboring solids creates artificial friction that
-/// prevents free-fall. This ensures unsupported solids always have at least
-/// a minimum downward velocity proportional to accumulated gravity over ~10 frames.
-/// Also zeros out horizontal velocity to prevent wall-sliding artifacts.
-fn apply_min_fall_speed(vel: Vec3, dt: f32) -> Vec3 {
-    // Gravity = -196.0 grid-units/s^2. Over 5 frames at dt=0.001:
-    // min_fall_speed = -196.0 * 0.001 * 5 = -0.98 grid-units/s
-    // Gentle minimum ensures blocks don't freeze but doesn't yank them down.
-    let gravity = -196.0_f32;
-    let min_fall_speed = gravity * dt * 5.0;
-
-    let mut result = vel;
-    // Ensure downward velocity is at least min_fall_speed (both are negative)
-    if result.y > min_fall_speed {
-        result.y = min_fall_speed;
-    }
-    // Gentle horizontal damping — don't zero out, just reduce grid coupling drift
-    result.x *= 0.8;
-    result.z *= 0.8;
-    result
 }
 
 /// Apply radiative cooling (Newton's cooling law) to a temperature value.

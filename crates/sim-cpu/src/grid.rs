@@ -455,16 +455,17 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[boo
                 particle.set_temperature(new_temp);
                 continue;
             }
-            // Unsupported solid: enforce minimum fall speed to overcome grid friction.
-            // Grid coupling with neighboring solids creates artificial friction that
-            // prevents free-fall. Override with gravity-based minimum downward velocity.
-            let min_fall_speed = GRAVITY * dt * 5.0; // ~5 frames of gravity
-            if final_vel.y > min_fall_speed {
-                final_vel.y = min_fall_speed;
+            // Unsupported solid: bypass PIC blend entirely.
+            // Use old particle velocity + gravity directly so blocks accelerate
+            // like real falling objects, not crawl one cell per frame.
+            final_vel = Vec3::new(
+                old_vel.x * 0.9,
+                old_vel.y + GRAVITY * dt, // accumulate gravity
+                old_vel.z * 0.9,
+            );
+            if final_vel.y < -50.0 {
+                final_vel.y = -50.0; // terminal velocity
             }
-            // Gentle horizontal damping
-            final_vel.x *= 0.8;
-            final_vel.z *= 0.8;
         }
 
         // Update velocity and temperature
