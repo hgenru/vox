@@ -112,6 +112,13 @@ Scene must produce particles under MAX_PARTICLES. Never hand off broken builds.
 G2P skips velocity/position update for phase=0 (solid). Falling solids check voxel below for support.
 Explosion debris must be converted to liquid (phase=1) + heated above melting point to fly properly.
 
+### 20. Shader build.rs must track shader source files
+spirv-builder compiles shaders in a **separate** cargo invocation inside `crates/server/build.rs`.
+Cargo's build-script caching only watches files the build script itself reads, so it has no idea
+when shader sources change. You **must** add explicit `cargo:rerun-if-changed` directives for
+`../shaders/src/` and `../shaders/Cargo.toml`. Without these, editing a shader file may not
+trigger recompilation and you'll keep running stale SPIR-V.
+
 ---
 
 ## Code Patterns
