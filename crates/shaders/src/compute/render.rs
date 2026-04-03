@@ -3,7 +3,7 @@
 //! Dispatched with (ceil(width/8), ceil(height/8), 1) workgroups.
 //! Each thread computes one pixel via DDA ray marching through the 3D voxel grid.
 
-use crate::types::MaterialParams;
+use crate::types::{MaterialParams, MAT_WATER, MAT_WOOD};
 use spirv_std::glam::{UVec3, UVec4, Vec3, Vec4};
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
@@ -443,6 +443,175 @@ fn compute_lava_light(
     light
 }
 
+/// Compute blackbody-like emissive color from temperature.
+///
+/// Returns an RGB color that approximates blackbody radiation:
+/// - Below 500C: no glow
+/// - 500-800C: faint dark red
+/// - 800-1200C: bright red-orange
+/// - 1200-2000C: orange to yellow
+/// - 2000C+: yellow-white
+fn blackbody_color(temperature: f32) -> Vec3 {
+    if temperature < 500.0 {
+        return Vec3::new(0.0, 0.0, 0.0);
+    }
+    // Normalize temperature to [0, 1] over the 500-3000 range
+    let t = ((temperature - 500.0) / 2500.0).clamp(0.0, 1.0);
+
+    // Red ramps up quickly, green follows, blue last
+    let r = (t * 3.0).clamp(0.0, 1.0);
+    let g = ((t - 0.2) * 2.0).clamp(0.0, 1.0);
+    let b = ((t - 0.6) * 2.5).clamp(0.0, 1.0);
+
+    // Scale intensity — brighter at higher temps
+    let intensity = 0.3 + t * 1.2;
+    Vec3::new(r * intensity, g * intensity, b * intensity)
+}
+
+/// Apply emissive glow for lava (material_id=2).
+///
+/// Uses temperature-based blackbody color for physically plausible glow.
+fn emissive_lava(lit_color: Vec3, temperature: f32) -> Vec3 {
+    let emissive = blackbody_color(temperature);
+    Vec3::new(
+        lit_color.x + emissive.x,
+        lit_color.y + emissive.y,
+        lit_color.z + emissive.z,
+    )
+}
+
+/// Apply emissive glow for burning wood (material_id=3).
+///
+/// Uses temperature-based blackbody with reduced intensity.
+fn emissive_wood(lit_color: Vec3, temperature: f32) -> Vec3 {
+    let emissive = blackbody_color(temperature);
+    // Wood burns less brightly than lava — scale down
+    let scale = 0.6;
+    Vec3::new(
+        lit_color.x + emissive.x * scale,
+        lit_color.y + emissive.y * scale,
+        lit_color.z + emissive.z * scale,
+    )
+}
+
+/// Apply emissive glow for burning gunpowder gas (material_id=6, phase=2).
+///
+/// Bright white-orange flash using temperature.
+fn emissive_gunpowder(lit_color: Vec3, temperature: f32) -> Vec3 {
+    let emissive = blackbody_color(temperature);
+    // Gunpowder explosion is very bright
+    let scale = 1.5;
+    Vec3::new(
+        lit_color.x + emissive.x * scale,
+        lit_color.y + emissive.y * scale,
+        lit_color.z + emissive.z * scale,
+    )
+}
+
+/// Apply emissive glow to a lit surface color based on material and temperature.
+///
+/// Split into per-material helpers to avoid >3 if/else branches (trap #15).
+fn apply_emissive(lit_color: Vec3, material_id: u32, phase: u32, temperature: f32) -> Vec3 {
+    if material_id == 2 {
+        return emissive_lava(lit_color, temperature);
+    }
+    if material_id == MAT_WOOD {
+        return emissive_wood(lit_color, temperature);
+    }
+    if material_id == 6 && phase == 2 {
+        return emissive_gunpowder(lit_color, temperature);
+    }
+    lit_color
+}
+
+/// Compute sky color from ray direction for background.
+///
+/// Returns a gradient from dark navy (horizon) to slightly lighter blue (zenith).
+fn compute_sky_color(ray_dir: Vec3) -> Vec3 {
+    let t = (ray_dir.y * 0.5 + 0.5).clamp(0.0, 1.0);
+    Vec3::new(
+        0.05 + (0.1 - 0.05) * t,
+        0.05 + (0.1 - 0.05) * t,
+        0.12 + (0.2 - 0.12) * t,
+    )
+}
+
+/// Shade a hit voxel: compute lighting, AO, shadows, lava light, and emissive.
+///
+/// Separated from render_pixel to keep function complexity manageable and
+/// avoid the rust-gpu branch-dropping trap (#15).
+fn shade_voxel(
+    vx: i32,
+    vy: i32,
+    vz: i32,
+    last_axis: u32,
+    step_x: i32,
+    step_y: i32,
+    step_z: i32,
+    hit_material: u32,
+    voxels: &[UVec4],
+    grid_size: u32,
+    materials: &[MaterialParams],
+) -> Vec3 {
+    // Determine face normal from last DDA step axis
+    let normal = if last_axis == 0 {
+        Vec3::new(-(step_x as f32), 0.0, 0.0)
+    } else if last_axis == 1 {
+        Vec3::new(0.0, -(step_y as f32), 0.0)
+    } else {
+        Vec3::new(0.0, 0.0, -(step_z as f32))
+    };
+
+    let ao_factor = compute_ao(vx, vy, vz, normal, voxels, grid_size);
+
+    // Shadow ray
+    let shadow_origin = Vec3::new(
+        vx as f32 + 0.5 + normal.x * 0.5,
+        vy as f32 + 0.5 + normal.y * 0.5,
+        vz as f32 + 0.5 + normal.z * 0.5,
+    );
+    let in_shadow = march_shadow(shadow_origin, sun_direction(), voxels, grid_size);
+
+    let hit_idx = (vz as u32 * grid_size * grid_size + vy as u32 * grid_size + vx as u32) as usize;
+    let hit_phase = (voxels[hit_idx].x >> 8) & 0xFF;
+
+    // Base color: gas/steam gets white-ish, others from material table
+    let base_color = if hit_phase == 2 {
+        Vec3::new(0.9, 0.9, 0.95)
+    } else {
+        textured_material_color(hit_material, vx, vy, vz, materials)
+    };
+
+    // Diffuse + ambient lighting with shadow
+    let lit_color = if in_shadow {
+        let ambient = 0.4;
+        Vec3::new(
+            base_color.x * ambient * ao_factor,
+            base_color.y * ambient * ao_factor,
+            base_color.z * ambient * ao_factor,
+        )
+    } else {
+        let full_lit = apply_lighting(base_color, normal);
+        Vec3::new(
+            full_lit.x * ao_factor,
+            full_lit.y * ao_factor,
+            full_lit.z * ao_factor,
+        )
+    };
+
+    // Add lava point lighting
+    let lava_light = compute_lava_light(vx, vy, vz, voxels, grid_size);
+    let lit_color = Vec3::new(
+        lit_color.x + base_color.x * lava_light.x,
+        lit_color.y + base_color.y * lava_light.y,
+        lit_color.z + base_color.z * lava_light.z,
+    );
+
+    // Temperature-based emissive
+    let temperature = f32::from_bits(voxels[hit_idx].y);
+    apply_emissive(lit_color, hit_material, hit_phase, temperature)
+}
+
 /// Perform DDA ray march through the voxel grid and write pixel color.
 ///
 /// This is the main per-pixel function, separated from the entry point
@@ -471,58 +640,54 @@ pub fn render_pixel(
     let grid = grid_size as f32;
 
     // Find entry point into the grid [0, grid_size]^3
-    // Ray: P = eye + t * dir
-    // We need to find t_enter and t_exit for the AABB [0, grid]^3
     let mut t_min = 0.0_f32;
-    let mut t_max = 1e20_f32;
+    let mut t_max_bound = 1e20_f32;
 
-    // X axis
+    // X axis slab test
     if ray_dir.x.abs() > 1e-8 {
         let t1 = (0.0 - eye.x) / ray_dir.x;
         let t2 = (grid - eye.x) / ray_dir.x;
         let (ta, tb) = if t1 < t2 { (t1, t2) } else { (t2, t1) };
         t_min = if ta > t_min { ta } else { t_min };
-        t_max = if tb < t_max { tb } else { t_max };
+        t_max_bound = if tb < t_max_bound { tb } else { t_max_bound };
     } else if eye.x < 0.0 || eye.x > grid {
-        // Ray parallel to X slab and outside
         let pixel_idx = (py * width + px) as usize;
         output[pixel_idx] = pack_bgra(18, 18, 40, 255);
         return;
     }
 
-    // Y axis
+    // Y axis slab test
     if ray_dir.y.abs() > 1e-8 {
         let t1 = (0.0 - eye.y) / ray_dir.y;
         let t2 = (grid - eye.y) / ray_dir.y;
         let (ta, tb) = if t1 < t2 { (t1, t2) } else { (t2, t1) };
         t_min = if ta > t_min { ta } else { t_min };
-        t_max = if tb < t_max { tb } else { t_max };
+        t_max_bound = if tb < t_max_bound { tb } else { t_max_bound };
     } else if eye.y < 0.0 || eye.y > grid {
         let pixel_idx = (py * width + px) as usize;
         output[pixel_idx] = pack_bgra(18, 18, 40, 255);
         return;
     }
 
-    // Z axis
+    // Z axis slab test
     if ray_dir.z.abs() > 1e-8 {
         let t1 = (0.0 - eye.z) / ray_dir.z;
         let t2 = (grid - eye.z) / ray_dir.z;
         let (ta, tb) = if t1 < t2 { (t1, t2) } else { (t2, t1) };
         t_min = if ta > t_min { ta } else { t_min };
-        t_max = if tb < t_max { tb } else { t_max };
+        t_max_bound = if tb < t_max_bound { tb } else { t_max_bound };
     } else if eye.z < 0.0 || eye.z > grid {
         let pixel_idx = (py * width + px) as usize;
         output[pixel_idx] = pack_bgra(18, 18, 40, 255);
         return;
     }
 
-    if t_min > t_max || t_max < 0.0 {
+    if t_min > t_max_bound || t_max_bound < 0.0 {
         let pixel_idx = (py * width + px) as usize;
         output[pixel_idx] = pack_bgra(18, 18, 40, 255);
         return;
     }
 
-    // Start point: clamp t_min to be >= 0 (eye may be inside the grid)
     if t_min < 0.0 {
         t_min = 0.0;
     }
@@ -567,14 +732,35 @@ pub fn render_pixel(
     let mut t_max_y = if ray_dir.y.abs() > 1e-8 { (next_y - entry.y) / ray_dir.y } else { 1e20 };
     let mut t_max_z = if ray_dir.z.abs() > 1e-8 { (next_z - entry.z) / ray_dir.z } else { 1e20 };
 
-    // DDA traversal
-    let max_steps = grid_size * 3; // sqrt(3) * grid_size roughly
-    // Track which axis was last stepped for face normal
-    let mut last_axis: u32 = 0; // 0=x, 1=y, 2=z
+    // DDA traversal with water transparency support.
+    // When a water voxel is hit, we accumulate its tint and continue marching.
+    // When a solid (non-water) voxel is hit, we shade it and blend with
+    // accumulated water color. If the ray exits without hitting solid,
+    // we blend water with sky.
+    let max_steps = grid_size * 3;
+    let mut last_axis: u32 = 0;
 
     let mut i: u32 = 0;
     let mut hit = false;
     let mut hit_material: u32 = 0;
+
+    // Water transparency accumulation
+    let mut water_transmittance = 1.0_f32; // remaining light (1.0 = no water traversed)
+    let mut water_tint = Vec3::new(0.0, 0.0, 0.0); // accumulated water color contribution
+
+    // Read water opacity from MaterialParams
+    let water_opacity = if (MAT_WATER as usize) < materials.len() {
+        materials[MAT_WATER as usize].visual.z
+    } else {
+        0.3
+    };
+    // Water base color from materials
+    let water_base = if (MAT_WATER as usize) < materials.len() {
+        let c = materials[MAT_WATER as usize].color;
+        Vec3::new(c.x, c.y, c.z)
+    } else {
+        Vec3::new(0.2, 0.4, 0.8)
+    };
 
     while i < max_steps {
         // Check current voxel
@@ -582,12 +768,25 @@ pub fn render_pixel(
             let idx = (vz as u32 * grid_size * grid_size + vy as u32 * grid_size + vx as u32) as usize;
             let voxel = voxels[idx];
             if voxel.w > 0 {
-                hit = true;
-                hit_material = (voxel.x >> 16) & 0xFF;
-                break;
+                let mat_id = (voxel.x >> 16) & 0xFF;
+                if mat_id == MAT_WATER && water_transmittance > 0.05 {
+                    // Water voxel: accumulate tint and continue marching.
+                    // Per-voxel absorption: water_color * opacity blended into tint.
+                    let absorption = water_opacity * water_transmittance;
+                    water_tint = Vec3::new(
+                        water_tint.x + water_base.x * absorption,
+                        water_tint.y + water_base.y * absorption,
+                        water_tint.z + water_base.z * absorption,
+                    );
+                    water_transmittance *= 1.0 - water_opacity;
+                    // Do NOT break — continue DDA to find what's behind the water
+                } else {
+                    hit = true;
+                    hit_material = mat_id;
+                    break;
+                }
             }
         } else {
-            // Exited grid
             break;
         }
 
@@ -617,114 +816,29 @@ pub fn render_pixel(
 
     let pixel_idx = (py * width + px) as usize;
 
-    if hit {
-        // Determine face normal from the last DDA step axis
-        let normal = if last_axis == 0 {
-            Vec3::new(-(step_x as f32), 0.0, 0.0)
-        } else if last_axis == 1 {
-            Vec3::new(0.0, -(step_y as f32), 0.0)
-        } else {
-            Vec3::new(0.0, 0.0, -(step_z as f32))
-        };
-
-        // Compute ambient occlusion from neighboring voxels
-        let ao_factor = compute_ao(vx, vy, vz, normal, voxels, grid_size);
-
-        // Shadow ray: offset start position by half a voxel along the normal
-        let shadow_origin = Vec3::new(
-            vx as f32 + 0.5 + normal.x * 0.5,
-            vy as f32 + 0.5 + normal.y * 0.5,
-            vz as f32 + 0.5 + normal.z * 0.5,
-        );
-        let in_shadow = march_shadow(shadow_origin, sun_direction(), voxels, grid_size);
-
-        // Read phase from packed voxel data (.x component, bits 8-15)
-        let hit_idx = (vz as u32 * grid_size * grid_size + vy as u32 * grid_size + vx as u32) as usize;
-        let hit_phase = (voxels[hit_idx].x >> 8) & 0xFF;
-
-        // Override color for gas/steam (phase == 2): white-ish wispy appearance
-        let base_color = if hit_phase == 2 {
-            Vec3::new(0.9, 0.9, 0.95)
-        } else {
-            textured_material_color(hit_material, vx, vy, vz, materials)
-        };
-
-        // Lighting: if in shadow, only ambient contributes; otherwise full lighting
-        let lit_color = if in_shadow {
-            let ambient = 0.4;
-            Vec3::new(
-                base_color.x * ambient * ao_factor,
-                base_color.y * ambient * ao_factor,
-                base_color.z * ambient * ao_factor,
-            )
-        } else {
-            let full_lit = apply_lighting(base_color, normal);
-            Vec3::new(
-                full_lit.x * ao_factor,
-                full_lit.y * ao_factor,
-                full_lit.z * ao_factor,
-            )
-        };
-
-        // Add lava point lighting from nearby lava voxels
-        let lava_light = compute_lava_light(vx, vy, vz, voxels, grid_size);
-        let lit_color = Vec3::new(
-            lit_color.x + base_color.x * lava_light.x,
-            lit_color.y + base_color.y * lava_light.y,
-            lit_color.z + base_color.z * lava_light.z,
-        );
-
-        // Add emissive glow for lava (material_id == 2) and burning wood (material_id == 3)
-        let final_color = if hit_material == 2 {
-            // Orange-red emissive glow — keep green low to avoid yellow wash
-            let emissive = Vec3::new(0.6, 0.15, 0.02);
-            Vec3::new(
-                lit_color.x + emissive.x,
-                lit_color.y + emissive.y,
-                lit_color.z + emissive.z,
-            )
-        } else if hit_material == 3 {
-            // Burning wood: emissive orange glow based on temperature
-            // Temperature is encoded in the voxel; approximate by using
-            // a moderate glow since we know wood on fire has T > 300
-            let emissive = Vec3::new(1.0, 0.4, 0.05) * 0.5;
-            Vec3::new(
-                lit_color.x + emissive.x,
-                lit_color.y + emissive.y,
-                lit_color.z + emissive.z,
-            )
-        } else if hit_material == 6 && hit_phase == 2 {
-            // Burning gunpowder (phase=gas): bright white-orange flash
-            let emissive = Vec3::new(1.0, 0.9, 0.5) * 1.2;
-            Vec3::new(
-                lit_color.x + emissive.x,
-                lit_color.y + emissive.y,
-                lit_color.z + emissive.z,
-            )
-        } else {
-            lit_color
-        };
-
-        // Clamp and convert to u8
-        let r = ((final_color.x * 255.0) as u32).min(255);
-        let g = ((final_color.y * 255.0) as u32).min(255);
-        let b = ((final_color.z * 255.0) as u32).min(255);
-
-        output[pixel_idx] = pack_bgra(r, g, b, 255);
+    // Determine the background color (either shaded solid or sky)
+    let background = if hit {
+        shade_voxel(
+            vx, vy, vz, last_axis, step_x, step_y, step_z,
+            hit_material, voxels, grid_size, materials,
+        )
     } else {
-        // Sky gradient based on ray direction Y
-        let t = (ray_dir.y * 0.5 + 0.5).clamp(0.0, 1.0);
-        // Lerp from dark navy (bottom) to slightly lighter (top)
-        let sky = Vec3::new(
-            0.05 + (0.1 - 0.05) * t,
-            0.05 + (0.1 - 0.05) * t,
-            0.12 + (0.2 - 0.12) * t,
-        );
-        let r = ((sky.x * 255.0) as u32).min(255);
-        let g = ((sky.y * 255.0) as u32).min(255);
-        let b = ((sky.z * 255.0) as u32).min(255);
-        output[pixel_idx] = pack_bgra(r, g, b, 255);
-    }
+        compute_sky_color(ray_dir)
+    };
+
+    // Blend water tint with background using accumulated transmittance
+    let final_color = Vec3::new(
+        water_tint.x + background.x * water_transmittance,
+        water_tint.y + background.y * water_transmittance,
+        water_tint.z + background.z * water_transmittance,
+    );
+
+    // Clamp and convert to u8
+    let r = ((final_color.x * 255.0) as u32).min(255);
+    let g = ((final_color.y * 255.0) as u32).min(255);
+    let b = ((final_color.z * 255.0) as u32).min(255);
+
+    output[pixel_idx] = pack_bgra(r, g, b, 255);
 }
 
 /// Compute shader entry point: render voxels via ray marching.
