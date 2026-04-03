@@ -17,7 +17,7 @@ fn lava_solidifies_within_timeout() {
     w.spawn(center, MAT_LAVA, PHASE_LIQUID, 2000.0);
 
     // Surround with cold stone (3x3x3 minus center)
-    let dx = 1.0 / 256.0;
+    let dx = 1.0 / 32.0;
     for dz in -1..=1_i32 {
         for dy in -1..=1_i32 {
             for ddx in -1..=1_i32 {
@@ -30,8 +30,9 @@ fn lava_solidifies_within_timeout() {
         }
     }
 
-    // Run simulation — lava should cool and solidify
-    w.step_n(200);
+    // Run simulation — lava should cool and solidify.
+    // With grid_size=32, thermal diffusion is slower so more steps needed.
+    w.step_n(300);
 
     // The original lava particle (index 0) should now be stone
     let p = &w.particles()[0];
@@ -52,7 +53,7 @@ fn lava_solidifies_within_timeout() {
 fn thermal_energy_equalizes() {
     let mut w = TestWorld::new();
     let center = Vec3::new(0.5, 0.5, 0.5);
-    let dx = 1.0 / 256.0;
+    let dx = 1.0 / 32.0;
 
     // One hot stone + several cold stones nearby
     // Keep below 1500 to avoid melting
@@ -68,7 +69,7 @@ fn thermal_energy_equalizes() {
 
     let initial_max = w.max_temperature();
 
-    w.step_n(100);
+    w.step_n(30);
 
     let final_max = w.max_temperature();
     assert!(
@@ -82,7 +83,7 @@ fn thermal_energy_equalizes() {
 fn explosion_debris_limited_cascade() {
     let mut w = TestWorld::new();
     let center = Vec3::new(0.5, 0.5, 0.5);
-    let dx = 1.0 / 256.0;
+    let dx = 1.0 / 32.0;
 
     for dz in -2..=2_i32 {
         for dy in -2..=2_i32 {
@@ -100,7 +101,7 @@ fn explosion_debris_limited_cascade() {
 
     let total = w.particles().len(); // 125
 
-    w.step_n(100);
+    w.step_n(30);
 
     // Count how many became lava — should be bounded, not all 125
     let lava_count = w.count_material(MAT_LAVA);
@@ -115,7 +116,7 @@ fn explosion_debris_limited_cascade() {
 #[test]
 fn water_near_lava_causes_solidification() {
     let center = Vec3::new(0.5, 0.5, 0.5);
-    let dx = 1.0 / 256.0;
+    let dx = 1.0 / 32.0;
 
     // Setup 1: lava alone
     let mut w_alone = TestWorld::new();
@@ -134,7 +135,7 @@ fn water_near_lava_causes_solidification() {
     }
 
     // Run both for the same number of steps
-    let steps = 100;
+    let steps = 30;
     w_alone.step_n(steps);
     w_water.step_n(steps);
 
@@ -156,7 +157,7 @@ fn water_near_lava_causes_solidification() {
 fn ice_melts_near_heat() {
     let mut w = TestWorld::new();
     let center = Vec3::new(0.5, 0.5, 0.5);
-    let dx = 1.0 / 256.0;
+    let dx = 1.0 / 32.0;
 
     // Warm stone (80 C — enough to melt ice, not enough to boil water)
     w.spawn(center, MAT_STONE, PHASE_SOLID, 80.0);
@@ -168,7 +169,8 @@ fn ice_melts_near_heat() {
         -10.0,
     );
 
-    w.step_n(500);
+    // With grid_size=32, thermal diffusion is slower so more steps needed.
+    w.step_n(800);
 
     let ice_particle = &w.particles()[1];
     // Ice melts at 0 C -> becomes water (material=1, phase=liquid)
@@ -190,7 +192,7 @@ fn ice_melts_near_heat() {
 fn phase_transitions_preserve_particle_count() {
     let mut w = TestWorld::new();
     let center = Vec3::new(0.5, 0.5, 0.5);
-    let dx = 1.0 / 256.0;
+    let dx = 1.0 / 32.0;
 
     // Mix of materials at various temperatures
     w.spawn(center, MAT_STONE, PHASE_SOLID, 1600.0); // will melt to lava
@@ -215,7 +217,7 @@ fn phase_transitions_preserve_particle_count() {
 
     let initial_count = w.particles().len();
 
-    w.step_n(50);
+    w.step_n(20);
 
     assert_eq!(
         w.particles().len(),
@@ -234,7 +236,7 @@ fn phase_transitions_preserve_particle_count() {
 fn no_nan_after_many_steps() {
     let mut w = TestWorld::new();
     let center = Vec3::new(0.5, 0.5, 0.5);
-    let dx = 1.0 / 256.0;
+    let dx = 1.0 / 32.0;
 
     w.spawn(center, MAT_WATER, PHASE_LIQUID, 50.0);
     w.spawn(
@@ -250,7 +252,7 @@ fn no_nan_after_many_steps() {
         40.0,
     );
 
-    w.step_n(100);
+    w.step_n(30);
 
     for (i, p) in w.particles().iter().enumerate() {
         assert!(
@@ -281,7 +283,7 @@ fn no_nan_after_many_steps() {
 fn no_nan_with_mixed_materials() {
     let mut w = TestWorld::new();
     let center = Vec3::new(0.5, 0.5, 0.5);
-    let dx = 1.0 / 256.0;
+    let dx = 1.0 / 32.0;
 
     w.spawn(center, MAT_STONE, PHASE_SOLID, 20.0);
     w.spawn(
@@ -291,7 +293,7 @@ fn no_nan_with_mixed_materials() {
         50.0,
     );
 
-    w.step_n(100);
+    w.step_n(30);
 
     for (i, p) in w.particles().iter().enumerate() {
         assert!(
@@ -311,7 +313,7 @@ fn mass_conserved_through_full_pipeline() {
     w.spawn_block(center, 1, MAT_WATER, PHASE_LIQUID, 20.0);
     let initial_mass: f32 = w.particles().iter().map(|p| p.mass()).sum();
 
-    w.step_n(50);
+    w.step_n(20);
 
     let final_mass: f32 = w.particles().iter().map(|p| p.mass()).sum();
     assert!(

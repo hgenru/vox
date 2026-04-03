@@ -13,7 +13,14 @@ use shared::{
     reaction::{PhaseTransitionRule, FLAG_EXPLOSION},
 };
 
-use crate::grid::{bspline_weight, grid_index};
+use crate::grid::{bspline_weight, grid_index_sized};
+
+/// Diffuse temperature using compile-time `GRID_SIZE`.
+///
+/// Convenience wrapper around [`diffuse_temperature_sized`].
+pub fn diffuse_temperature(particles: &mut [Particle], materials: &[MaterialParams], dt: f32) {
+    diffuse_temperature_sized(particles, materials, dt, GRID_SIZE);
+}
 
 /// Diffuse temperature on the grid using a simple averaging scheme.
 ///
@@ -26,11 +33,17 @@ use crate::grid::{bspline_weight, grid_index};
 /// - `particles`: mutable particle slice
 /// - `materials`: material parameter table
 /// - `dt`: timestep
-pub fn diffuse_temperature(particles: &mut [Particle], materials: &[MaterialParams], dt: f32) {
-    let gs = GRID_SIZE as f32;
+/// - `grid_size`: number of cells per axis
+pub fn diffuse_temperature_sized(
+    particles: &mut [Particle],
+    materials: &[MaterialParams],
+    dt: f32,
+    grid_size: u32,
+) {
+    let gs = grid_size as f32;
 
     // First, accumulate temperature onto grid (weighted average)
-    let grid_count = (GRID_SIZE * GRID_SIZE * GRID_SIZE) as usize;
+    let grid_count = (grid_size * grid_size * grid_size) as usize;
     let mut grid_temp = vec![0.0_f32; grid_count];
     let mut grid_mass = vec![0.0_f32; grid_count];
 
@@ -49,7 +62,7 @@ pub fn diffuse_temperature(particles: &mut [Particle], materials: &[MaterialPara
                     let ix = base_x + dx;
                     let iy = base_y + dy;
                     let iz = base_z + dz;
-                    let idx = match grid_index(ix, iy, iz) {
+                    let idx = match grid_index_sized(ix, iy, iz, grid_size) {
                         Some(i) => i,
                         None => continue,
                     };
@@ -99,7 +112,7 @@ pub fn diffuse_temperature(particles: &mut [Particle], materials: &[MaterialPara
                     let ix = base_x + dx;
                     let iy = base_y + dy;
                     let iz = base_z + dz;
-                    let idx = match grid_index(ix, iy, iz) {
+                    let idx = match grid_index_sized(ix, iy, iz, grid_size) {
                         Some(i) => i,
                         None => continue,
                     };
@@ -152,7 +165,13 @@ pub fn apply_phase_transitions(particles: &mut [Particle], rules: &[PhaseTransit
 ///
 /// Uses particle position as a seed for pseudo-random direction.
 /// Matches the shader implementation in g2p.rs `apply_gunpowder_explosion()`.
+/// The `grid_size` parameter is used to scale explosion velocity to world-space.
 fn apply_gunpowder_explosion_cpu(particle: &mut Particle) {
+    apply_gunpowder_explosion_cpu_sized(particle, shared::constants::GRID_SIZE);
+}
+
+/// Apply gunpowder explosion with explicit grid size.
+fn apply_gunpowder_explosion_cpu_sized(particle: &mut Particle, grid_size: u32) {
     let pos = particle.position();
     let px = pos.x;
     let py = pos.y;
@@ -164,7 +183,7 @@ fn apply_gunpowder_explosion_cpu(particle: &mut Particle) {
     let hz = hash_f32_cpu(pz * 91.53 + py * 67.13);
 
     let explosion_speed = 200.0_f32;
-    let gs = shared::constants::GRID_SIZE as f32;
+    let gs = grid_size as f32;
 
     // Convert grid-space velocity to world-space (divide by grid size)
     let vx = hx * explosion_speed / gs;
@@ -205,6 +224,9 @@ mod tests {
 
     use super::*;
 
+    /// Test grid size: small grid for fast unit tests.
+    const TEST_GS: u32 = 32;
+
     /// Helper: get the valid rules as a Vec.
     fn rules() -> Vec<PhaseTransitionRule> {
         let (table, count) = default_phase_transition_table();
@@ -215,10 +237,10 @@ mod tests {
     fn temperature_diffusion_equalizes() {
         let table = default_material_table();
         // Place particles close enough to share grid cells.
-        // GRID_SIZE=256, so 1 grid cell = 1/256 ~ 0.0039.
+        // TEST_GS=32, so 1 grid cell = 1/32 = 0.03125.
         // B-spline stencil covers +-1.5 cells, so particles within ~3 cells
-        // (~0.012 world units) will overlap and exchange heat.
-        let dx = 1.0 / shared::constants::GRID_SIZE as f32; // one grid cell
+        // will overlap and exchange heat.
+        let dx = 1.0 / TEST_GS as f32; // one grid cell
         let mut particles = vec![
             // Hot particle
             {
@@ -238,7 +260,7 @@ mod tests {
         let initial_diff = (particles[0].temperature() - particles[1].temperature()).abs();
 
         for _ in 0..100 {
-            diffuse_temperature(&mut particles, &table, 0.01);
+            diffuse_temperature_sized(&mut particles, &table, 0.01, TEST_GS);
         }
 
         let final_diff = (particles[0].temperature() - particles[1].temperature()).abs();
@@ -283,7 +305,7 @@ mod tests {
     fn lava_cools_to_stone() {
         let table = default_material_table();
         let r = rules();
-        let dx = 1.0 / shared::constants::GRID_SIZE as f32;
+        let dx = 1.0 / TEST_GS as f32;
         let mut particles = vec![
             // Hot lava
             {
@@ -306,7 +328,7 @@ mod tests {
 
         // Run many diffusion + transition steps
         for _ in 0..500 {
-            diffuse_temperature(&mut particles, &table, 0.01);
+            diffuse_temperature_sized(&mut particles, &table, 0.01, TEST_GS);
             apply_phase_transitions(&mut particles, &r);
         }
 

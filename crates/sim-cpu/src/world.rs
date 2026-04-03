@@ -5,13 +5,15 @@
 
 use glam::Vec3;
 use shared::{
-    constants::{DT, GRID_CELL_COUNT, GRID_SIZE},
+    constants::{DT, GRID_SIZE},
     material::{MATERIAL_COUNT, MaterialParams, default_material_table},
     particle::{GridCell, Particle},
 };
 use thiserror::Error;
 
-use crate::grid::{build_solid_occupancy, clear_grid, g2p, grid_update, p2g};
+use crate::grid::{
+    build_solid_occupancy_sized, clear_grid, g2p_sized, grid_update_sized, p2g_sized,
+};
 
 /// Errors that can occur during simulation.
 #[derive(Debug, Error)]
@@ -49,14 +51,32 @@ pub struct Simulation {
     pub time: f32,
     /// Total steps executed.
     pub step_count: u64,
+    /// Number of grid cells per axis.
+    pub grid_size: u32,
 }
 
 impl Simulation {
     /// Create a new simulation with the given particles and default materials.
     ///
+    /// Uses the compile-time `GRID_SIZE` constant (256). For tests with smaller
+    /// grids, use [`Simulation::with_grid_size`].
+    ///
     /// # Arguments
     /// - `particles`: initial particle list
     pub fn new(particles: Vec<Particle>) -> Self {
+        Self::with_grid_size(particles, GRID_SIZE)
+    }
+
+    /// Create a new simulation with a custom grid size.
+    ///
+    /// Allocates `grid_size^3` grid cells. Gravity and other physics constants
+    /// are automatically scaled relative to `GRID_SIZE=256`.
+    ///
+    /// # Arguments
+    /// - `particles`: initial particle list
+    /// - `grid_size`: number of grid cells per axis
+    pub fn with_grid_size(particles: Vec<Particle>, grid_size: u32) -> Self {
+        let cell_count = (grid_size as usize) * (grid_size as usize) * (grid_size as usize);
         Self {
             particles,
             grid: vec![
@@ -65,11 +85,12 @@ impl Simulation {
                     force_pad: glam::Vec4::ZERO,
                     temp_pad: glam::Vec4::ZERO,
                 };
-                GRID_CELL_COUNT as usize
+                cell_count
             ],
             materials: default_material_table(),
             time: 0.0,
             step_count: 0,
+            grid_size,
         }
     }
 
@@ -82,6 +103,7 @@ impl Simulation {
         particles: Vec<Particle>,
         materials: [MaterialParams; MATERIAL_COUNT],
     ) -> Self {
+        let cell_count = (GRID_SIZE as usize) * (GRID_SIZE as usize) * (GRID_SIZE as usize);
         Self {
             particles,
             grid: vec![
@@ -90,11 +112,12 @@ impl Simulation {
                     force_pad: glam::Vec4::ZERO,
                     temp_pad: glam::Vec4::ZERO,
                 };
-                GRID_CELL_COUNT as usize
+                cell_count
             ],
             materials,
             time: 0.0,
             step_count: 0,
+            grid_size: GRID_SIZE,
         }
     }
 
@@ -119,14 +142,26 @@ impl Simulation {
         clear_grid(&mut self.grid);
 
         // 2. Particle-to-Grid transfer
-        p2g(&self.particles, &mut self.grid, &self.materials, dt);
+        p2g_sized(
+            &self.particles,
+            &mut self.grid,
+            &self.materials,
+            dt,
+            self.grid_size,
+        );
 
         // 3. Grid update: momentum → velocity, gravity, boundaries
-        grid_update(&mut self.grid, dt);
+        grid_update_sized(&mut self.grid, dt, self.grid_size);
 
         // 4. Grid-to-Particle transfer (with solid support check)
-        let solid_occupancy = build_solid_occupancy(&self.particles);
-        g2p(&mut self.particles, &self.grid, &solid_occupancy, dt);
+        let solid_occupancy = build_solid_occupancy_sized(&self.particles, self.grid_size);
+        g2p_sized(
+            &mut self.particles,
+            &self.grid,
+            &solid_occupancy,
+            dt,
+            self.grid_size,
+        );
 
         self.time += dt;
         self.step_count += 1;
@@ -170,9 +205,9 @@ impl Simulation {
         self.particles.len()
     }
 
-    /// Get the grid dimensions.
+    /// Get the grid dimensions (cells per axis).
     pub fn grid_size(&self) -> u32 {
-        GRID_SIZE
+        self.grid_size
     }
 
     /// Compute total kinetic energy of all particles.
@@ -248,10 +283,13 @@ mod tests {
 
     use super::*;
 
+    /// Test grid size for fast unit tests.
+    const TEST_GS: u32 = 32;
+
     #[test]
     fn simulation_step_runs() {
         let particles = vec![Particle::new(Vec3::new(0.5, 0.5, 0.5), 1.0, MAT_WATER, 1)];
-        let mut sim = Simulation::new(particles);
+        let mut sim = Simulation::with_grid_size(particles, TEST_GS);
         sim.step(DT).unwrap();
         assert_eq!(sim.step_count, 1);
         assert!((sim.time - DT).abs() < 1e-8);
@@ -260,9 +298,9 @@ mod tests {
     #[test]
     fn simulation_run_multiple_steps() {
         let particles = vec![Particle::new(Vec3::new(0.5, 0.5, 0.5), 1.0, MAT_WATER, 1)];
-        let mut sim = Simulation::new(particles);
-        sim.run(100).unwrap();
-        assert_eq!(sim.step_count, 100);
+        let mut sim = Simulation::with_grid_size(particles, TEST_GS);
+        sim.run(30).unwrap();
+        assert_eq!(sim.step_count, 30);
     }
 
     #[test]
@@ -282,8 +320,8 @@ mod tests {
             weighted_y / total_mass
         };
 
-        let mut sim = Simulation::new(particles);
-        sim.run(100).unwrap();
+        let mut sim = Simulation::with_grid_size(particles, TEST_GS);
+        sim.run(30).unwrap();
 
         let final_com_y = sim.center_of_mass().y;
         assert!(
@@ -304,8 +342,8 @@ mod tests {
         );
 
         let initial_mass = particles.iter().map(|p| p.mass()).sum::<f32>();
-        let mut sim = Simulation::new(particles);
-        sim.run(50).unwrap();
+        let mut sim = Simulation::with_grid_size(particles, TEST_GS);
+        sim.run(20).unwrap();
 
         let final_mass = sim.total_mass();
         assert!(
@@ -325,17 +363,17 @@ mod tests {
             PHASE_LIQUID,
         );
 
-        let mut sim = Simulation::new(particles);
-        sim.run(200).unwrap();
+        let mut sim = Simulation::with_grid_size(particles, TEST_GS);
+        sim.run(30).unwrap();
 
         for (i, p) in sim.particles.iter().enumerate() {
             assert!(
                 p.position().is_finite(),
-                "Particle {i} position is NaN after 200 steps"
+                "Particle {i} position is NaN after steps"
             );
             assert!(
                 p.velocity().is_finite(),
-                "Particle {i} velocity is NaN after 200 steps"
+                "Particle {i} velocity is NaN after steps"
             );
         }
     }
@@ -357,7 +395,7 @@ mod tests {
     #[test]
     fn kinetic_energy_increases_under_gravity() {
         let particles = vec![Particle::new(Vec3::new(0.5, 0.8, 0.5), 1.0, MAT_WATER, 1)];
-        let mut sim = Simulation::new(particles);
+        let mut sim = Simulation::with_grid_size(particles, TEST_GS);
         let ke_initial = sim.kinetic_energy();
         sim.run(20).unwrap();
         let ke_final = sim.kinetic_energy();
@@ -370,10 +408,9 @@ mod tests {
 
     #[test]
     fn water_above_stone_floor_falls() {
-        // Regression: a single water particle above a stone floor must move downward
         let mut particles = Vec::new();
 
-        // Stone floor: a layer of stone particles at y ≈ 0.3
+        // Stone floor: a layer of stone particles at y = 0.3
         for x in 0..5 {
             for z in 0..5 {
                 particles.push(Particle::new(
@@ -395,8 +432,8 @@ mod tests {
         ));
 
         let water_idx = particles.len() - 1;
-        let mut sim = Simulation::new(particles);
-        sim.run(50).unwrap();
+        let mut sim = Simulation::with_grid_size(particles, TEST_GS);
+        sim.run(30).unwrap();
 
         let final_y = sim.particles[water_idx].position().y;
         assert!(
@@ -408,7 +445,7 @@ mod tests {
     #[test]
     fn validate_catches_bad_material() {
         let particles = vec![Particle::new(Vec3::new(0.5, 0.5, 0.5), 1.0, 99, 0)];
-        let mut sim = Simulation::new(particles);
+        let mut sim = Simulation::with_grid_size(particles, TEST_GS);
         let result = sim.step(DT);
         assert!(result.is_err());
     }

@@ -11,6 +11,16 @@ use shared::{
     physics::constitutive_stress,
 };
 
+/// Compute gravity scaled to a given grid size.
+///
+/// The default `GRAVITY` constant (-196.0) is tuned for `GRID_SIZE=256` (5cm voxels).
+/// For a different grid size, gravity must scale proportionally:
+/// `gravity = GRAVITY * grid_size / GRID_SIZE`.
+#[inline]
+fn scaled_gravity(grid_size: u32) -> f32 {
+    GRAVITY * grid_size as f32 / GRID_SIZE as f32
+}
+
 /// Mass threshold below which a grid cell is considered empty.
 const MASS_THRESHOLD: f32 = 1e-8;
 
@@ -51,10 +61,21 @@ fn bspline_weight_gradient(d: f32) -> f32 {
 
 /// Convert a 3D grid index `(ix, iy, iz)` to a flat index.
 ///
+/// Uses the compile-time `GRID_SIZE` constant. For runtime grid sizes,
+/// use [`grid_index_sized`].
+///
 /// Returns `None` if any index is out of bounds.
 #[inline]
 pub fn grid_index(ix: i32, iy: i32, iz: i32) -> Option<usize> {
-    let gs = GRID_SIZE as i32;
+    grid_index_sized(ix, iy, iz, GRID_SIZE)
+}
+
+/// Convert a 3D grid index `(ix, iy, iz)` to a flat index for the given `grid_size`.
+///
+/// Returns `None` if any index is out of bounds.
+#[inline]
+pub fn grid_index_sized(ix: i32, iy: i32, iz: i32, grid_size: u32) -> Option<usize> {
+    let gs = grid_size as i32;
     if ix < 0 || iy < 0 || iz < 0 || ix >= gs || iy >= gs || iz >= gs {
         return None;
     }
@@ -74,6 +95,13 @@ pub fn clear_grid(grid: &mut [GridCell]) {
     }
 }
 
+/// Particle-to-Grid transfer (P2G) using compile-time `GRID_SIZE`.
+///
+/// Convenience wrapper around [`p2g_sized`].
+pub fn p2g(particles: &[Particle], grid: &mut [GridCell], materials: &[MaterialParams], dt: f32) {
+    p2g_sized(particles, grid, materials, dt, GRID_SIZE);
+}
+
 /// Particle-to-Grid transfer (P2G).
 ///
 /// Scatters mass, momentum, and stress from each particle to its 27 neighboring
@@ -87,9 +115,16 @@ pub fn clear_grid(grid: &mut [GridCell]) {
 /// - `grid`: mutable grid buffer (must be pre-cleared)
 /// - `materials`: material parameter table
 /// - `dt`: timestep
-pub fn p2g(particles: &[Particle], grid: &mut [GridCell], materials: &[MaterialParams], dt: f32) {
-    let gs = GRID_SIZE as f32;
-    let inv_dx = gs; // grid spacing = 1/GRID_SIZE in normalized coords
+/// - `grid_size`: number of cells per axis
+pub fn p2g_sized(
+    particles: &[Particle],
+    grid: &mut [GridCell],
+    materials: &[MaterialParams],
+    dt: f32,
+    grid_size: u32,
+) {
+    let gs = grid_size as f32;
+    let inv_dx = gs; // grid spacing = 1/grid_size in normalized coords
     let _ = inv_dx;
 
     for particle in particles {
@@ -132,7 +167,7 @@ pub fn p2g(particles: &[Particle], grid: &mut [GridCell], materials: &[MaterialP
                     let iy = base_y + dy;
                     let iz = base_z + dz;
 
-                    let idx = match grid_index(ix, iy, iz) {
+                    let idx = match grid_index_sized(ix, iy, iz, grid_size) {
                         Some(i) => i,
                         None => continue,
                     };
@@ -181,6 +216,13 @@ pub fn p2g(particles: &[Particle], grid: &mut [GridCell], materials: &[MaterialP
     }
 }
 
+/// Grid update using compile-time `GRID_SIZE`.
+///
+/// Convenience wrapper around [`grid_update_sized`].
+pub fn grid_update(grid: &mut [GridCell], dt: f32) {
+    grid_update_sized(grid, dt, GRID_SIZE);
+}
+
 /// Grid update: convert momentum to velocity, apply gravity and boundary conditions.
 ///
 /// For each cell with sufficient mass:
@@ -188,11 +230,14 @@ pub fn p2g(particles: &[Particle], grid: &mut [GridCell], materials: &[MaterialP
 /// 2. Apply gravity: `vel.y += gravity * dt`
 /// 3. Enforce boundary conditions at grid edges (velocity clamping)
 ///
+/// Gravity is automatically scaled to the given `grid_size` relative to `GRID_SIZE=256`.
+///
 /// # Arguments
 /// - `grid`: mutable grid buffer (contains accumulated momentum from P2G)
 /// - `dt`: timestep
-pub fn grid_update(grid: &mut [GridCell], dt: f32) {
-    let gs = GRID_SIZE as i32;
+/// - `grid_size`: number of cells per axis
+pub fn grid_update_sized(grid: &mut [GridCell], dt: f32, grid_size: u32) {
+    let gs = grid_size as i32;
     let boundary = 3; // boundary cells thickness
 
     for iz in 0..gs {
@@ -214,8 +259,8 @@ pub fn grid_update(grid: &mut [GridCell], dt: f32) {
                 cell.velocity_mass.y *= inv_mass;
                 cell.velocity_mass.z *= inv_mass;
 
-                // Apply gravity
-                cell.velocity_mass.y += GRAVITY * dt;
+                // Apply gravity (scaled for grid_size)
+                cell.velocity_mass.y += scaled_gravity(grid_size) * dt;
 
                 // Boundary conditions: clamp velocity at grid edges
                 // Sticky boundary (zero velocity at walls)
@@ -248,30 +293,45 @@ pub fn grid_update(grid: &mut [GridCell], dt: f32) {
     }
 }
 
+/// Build a boolean occupancy grid using compile-time `GRID_SIZE`.
+///
+/// Convenience wrapper around [`build_solid_occupancy_sized`].
+pub fn build_solid_occupancy(particles: &[Particle]) -> Vec<bool> {
+    build_solid_occupancy_sized(particles, GRID_SIZE)
+}
+
 /// Build a boolean occupancy grid of solid particles for support checks.
 ///
-/// Returns a `Vec<bool>` of size `GRID_SIZE^3` where each entry is `true`
+/// Returns a `Vec<bool>` of size `grid_size^3` where each entry is `true`
 /// if a solid (phase==0) particle maps to that cell.
 ///
 /// # Arguments
 /// - `particles`: slice of all particles
-pub fn build_solid_occupancy(particles: &[Particle]) -> Vec<bool> {
-    let gs = GRID_SIZE as usize;
+/// - `grid_size`: number of cells per axis
+pub fn build_solid_occupancy_sized(particles: &[Particle], grid_size: u32) -> Vec<bool> {
+    let gs = grid_size as usize;
     let mut occupancy = vec![false; gs * gs * gs];
     for p in particles {
         if p.phase() != 0 {
             continue;
         }
         let pos = p.position();
-        let gp = pos * GRID_SIZE as f32;
+        let gp = pos * grid_size as f32;
         let ix = gp.x as i32;
         let iy = gp.y as i32;
         let iz = gp.z as i32;
-        if let Some(idx) = grid_index(ix, iy, iz) {
+        if let Some(idx) = grid_index_sized(ix, iy, iz, grid_size) {
             occupancy[idx] = true;
         }
     }
     occupancy
+}
+
+/// Check if a solid particle has support using compile-time `GRID_SIZE`.
+///
+/// Convenience wrapper around [`check_solid_support_sized`].
+pub fn check_solid_support(pos: Vec3, solid_occupancy: &[bool]) -> bool {
+    check_solid_support_sized(pos, solid_occupancy, GRID_SIZE)
 }
 
 /// Check if a solid particle has support from a solid voxel below it.
@@ -287,8 +347,9 @@ pub fn build_solid_occupancy(particles: &[Particle]) -> Vec<bool> {
 /// # Arguments
 /// - `pos`: particle position in world space [0, 1]
 /// - `solid_occupancy`: boolean grid from [`build_solid_occupancy`]
-pub fn check_solid_support(pos: Vec3, solid_occupancy: &[bool]) -> bool {
-    let gs = GRID_SIZE as f32;
+/// - `grid_size`: number of cells per axis
+pub fn check_solid_support_sized(pos: Vec3, solid_occupancy: &[bool], grid_size: u32) -> bool {
+    let gs = grid_size as f32;
     let gp = pos * gs;
     let ix = gp.x as i32;
     let iy = gp.y as i32;
@@ -300,7 +361,7 @@ pub fn check_solid_support(pos: Vec3, solid_occupancy: &[bool]) -> bool {
     }
 
     // Check cell directly below
-    match grid_index(ix, iy - 1, iz) {
+    match grid_index_sized(ix, iy - 1, iz, grid_size) {
         Some(idx) => {
             if solid_occupancy[idx] {
                 return true;
@@ -311,7 +372,7 @@ pub fn check_solid_support(pos: Vec3, solid_occupancy: &[bool]) -> bool {
 
     // Check 2 cells below to handle stale voxel buffer
     if iy >= 3 {
-        match grid_index(ix, iy - 2, iz) {
+        match grid_index_sized(ix, iy - 2, iz, grid_size) {
             Some(idx) => {
                 if solid_occupancy[idx] {
                     return true;
@@ -322,6 +383,13 @@ pub fn check_solid_support(pos: Vec3, solid_occupancy: &[bool]) -> bool {
     }
 
     false
+}
+
+/// Grid-to-Particle transfer (G2P) using compile-time `GRID_SIZE`.
+///
+/// Convenience wrapper around [`g2p_sized`].
+pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[bool], dt: f32) {
+    g2p_sized(particles, grid, solid_occupancy, dt, GRID_SIZE);
 }
 
 /// Grid-to-Particle transfer (G2P).
@@ -340,8 +408,15 @@ pub fn check_solid_support(pos: Vec3, solid_occupancy: &[bool]) -> bool {
 /// - `grid`: grid buffer with updated velocities
 /// - `solid_occupancy`: boolean grid from [`build_solid_occupancy`] (pass empty slice to skip support check)
 /// - `dt`: timestep
-pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[bool], dt: f32) {
-    let gs = GRID_SIZE as f32;
+/// - `grid_size`: number of cells per axis
+pub fn g2p_sized(
+    particles: &mut [Particle],
+    grid: &[GridCell],
+    solid_occupancy: &[bool],
+    dt: f32,
+    grid_size: u32,
+) {
+    let gs = grid_size as f32;
     let pic_blend = 0.7_f32; // PIC/FLIP blend factor
 
     for particle in particles.iter_mut() {
@@ -365,7 +440,7 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[boo
                     let iy = base_y + dy;
                     let iz = base_z + dz;
 
-                    let idx = match grid_index(ix, iy, iz) {
+                    let idx = match grid_index_sized(ix, iy, iz, grid_size) {
                         Some(i) => i,
                         None => continue,
                     };
@@ -431,10 +506,12 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[boo
 
         let mut final_vel = blended_vel;
 
+        let gravity = scaled_gravity(grid_size);
+
         // Gas buoyancy: counteract most of gravity and add slight upward force
         // so steam rises and persists visually instead of falling immediately.
         if particle.phase() == 2 {
-            final_vel.y += (-GRAVITY) * 0.7 * dt;
+            final_vel.y += (-gravity) * 0.7 * dt;
             final_vel.x *= 0.98;
             final_vel.z *= 0.98;
         }
@@ -447,7 +524,7 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[boo
         // Supported solids update F and C only (pinned, prevents floor drift).
         // Unsupported solids fall normally with minimum fall speed to overcome grid friction.
         if particle.phase() == 0 && !solid_occupancy.is_empty() {
-            let supported = check_solid_support(pos, solid_occupancy);
+            let supported = check_solid_support_sized(pos, solid_occupancy, grid_size);
             if supported {
                 particle.set_affine_momentum(new_c);
                 particle.set_deformation_gradient(f_new);
@@ -460,11 +537,13 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[boo
             // like real falling objects, not crawl one cell per frame.
             final_vel = Vec3::new(
                 old_vel.x * 0.9,
-                old_vel.y + GRAVITY * dt, // accumulate gravity
+                old_vel.y + gravity * dt, // accumulate gravity (scaled)
                 old_vel.z * 0.9,
             );
-            if final_vel.y < -50.0 {
-                final_vel.y = -50.0; // terminal velocity
+            // Terminal velocity scaled with gravity
+            let terminal_vel = -50.0 * grid_size as f32 / GRID_SIZE as f32;
+            if final_vel.y < terminal_vel {
+                final_vel.y = terminal_vel;
             }
         }
 
@@ -495,12 +574,12 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[boo
 
 #[cfg(test)]
 mod tests {
-    use shared::{
-        constants::GRID_CELL_COUNT,
-        material::{MAT_WATER, default_material_table},
-    };
+    use shared::material::{MAT_WATER, default_material_table};
 
     use super::*;
+
+    /// Test grid size: small grid for fast unit tests.
+    const TEST_GS: u32 = 32;
 
     fn make_grid() -> Vec<GridCell> {
         vec![
@@ -509,7 +588,7 @@ mod tests {
                 force_pad: glam::Vec4::ZERO,
                 temp_pad: glam::Vec4::ZERO,
             };
-            GRID_CELL_COUNT as usize
+            (TEST_GS * TEST_GS * TEST_GS) as usize
         ]
     }
 
@@ -553,7 +632,7 @@ mod tests {
         let mut grid = make_grid();
         let dt = 0.001;
 
-        p2g(&particles, &mut grid, &table, dt);
+        p2g_sized(&particles, &mut grid, &table, dt, TEST_GS);
 
         let total_grid_mass: f32 = grid.iter().map(|c| c.velocity_mass.w).sum();
         let total_particle_mass: f32 = particles.iter().map(|p| p.mass()).sum();
@@ -570,16 +649,16 @@ mod tests {
         let dt = 0.01;
 
         // Put mass and zero momentum in a cell away from boundaries
-        let idx = grid_index(16, 16, 16).unwrap();
+        let idx = grid_index_sized(10, 10, 10, TEST_GS).unwrap();
         grid[idx].velocity_mass = glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
 
-        grid_update(&mut grid, dt);
+        grid_update_sized(&mut grid, dt, TEST_GS);
 
         let vy = grid[idx].velocity_mass.y;
+        let expected = scaled_gravity(TEST_GS) * dt;
         assert!(
-            (vy - GRAVITY * dt).abs() < 1e-6,
-            "Expected vy={}, got {vy}",
-            GRAVITY * dt
+            (vy - expected).abs() < 1e-6,
+            "Expected vy={expected}, got {vy}",
         );
     }
 
@@ -589,10 +668,10 @@ mod tests {
         let dt = 0.001;
 
         // Cell on the floor
-        let idx = grid_index(16, 1, 16).unwrap();
+        let idx = grid_index_sized(10, 1, 10, TEST_GS).unwrap();
         grid[idx].velocity_mass = glam::Vec4::new(0.0, -5.0, 0.0, 1.0); // downward momentum
 
-        grid_update(&mut grid, dt);
+        grid_update_sized(&mut grid, dt, TEST_GS);
 
         // Floor should clamp downward velocity
         let vy = grid[idx].velocity_mass.y;
@@ -618,10 +697,10 @@ mod tests {
 
         for _ in 0..steps {
             let mut grid = make_grid();
-            p2g(&particles, &mut grid, &table, dt);
-            grid_update(&mut grid, dt);
-            let occupancy = build_solid_occupancy(&particles);
-            g2p(&mut particles, &grid, &occupancy, dt);
+            p2g_sized(&particles, &mut grid, &table, dt, TEST_GS);
+            grid_update_sized(&mut grid, dt, TEST_GS);
+            let occupancy = build_solid_occupancy_sized(&particles, TEST_GS);
+            g2p_sized(&mut particles, &grid, &occupancy, dt, TEST_GS);
         }
 
         let final_y = particles[0].position().y;
@@ -643,10 +722,10 @@ mod tests {
         let dt = 0.001;
         for _ in 0..20 {
             let mut grid = make_grid();
-            p2g(&particles, &mut grid, &table, dt);
-            grid_update(&mut grid, dt);
-            let occupancy = build_solid_occupancy(&particles);
-            g2p(&mut particles, &grid, &occupancy, dt);
+            p2g_sized(&particles, &mut grid, &table, dt, TEST_GS);
+            grid_update_sized(&mut grid, dt, TEST_GS);
+            let occupancy = build_solid_occupancy_sized(&particles, TEST_GS);
+            g2p_sized(&mut particles, &grid, &occupancy, dt, TEST_GS);
         }
 
         for (i, p) in particles.iter().enumerate() {
@@ -665,12 +744,18 @@ mod tests {
 
     #[test]
     fn grid_index_bounds() {
+        // Test with default GRID_SIZE
         let gs = shared::constants::GRID_SIZE as i32;
         assert!(grid_index(0, 0, 0).is_some());
         assert!(grid_index(gs - 1, gs - 1, gs - 1).is_some());
         assert!(grid_index(-1, 0, 0).is_none());
         assert!(grid_index(0, gs, 0).is_none());
         assert_eq!(grid_index(0, 0, 0).unwrap(), 0);
+
+        // Test with sized variant
+        assert!(grid_index_sized(0, 0, 0, TEST_GS).is_some());
+        assert!(grid_index_sized(TEST_GS as i32 - 1, TEST_GS as i32 - 1, TEST_GS as i32 - 1, TEST_GS).is_some());
+        assert!(grid_index_sized(TEST_GS as i32, 0, 0, TEST_GS).is_none());
     }
 
     #[test]
@@ -678,7 +763,7 @@ mod tests {
         // Verify that temperature transfers between nearby particles
         // through the P2G -> grid_update -> G2P cycle.
         let table = default_material_table();
-        let dx = 1.0 / shared::constants::GRID_SIZE as f32;
+        let dx = 1.0 / TEST_GS as f32;
         let center = 0.5_f32;
 
         let mut particles = vec![
@@ -711,10 +796,10 @@ mod tests {
 
         for _ in 0..20 {
             let mut grid = make_grid();
-            p2g(&particles, &mut grid, &table, dt);
-            grid_update(&mut grid, dt);
-            let occupancy = build_solid_occupancy(&particles);
-            g2p(&mut particles, &grid, &occupancy, dt);
+            p2g_sized(&particles, &mut grid, &table, dt, TEST_GS);
+            grid_update_sized(&mut grid, dt, TEST_GS);
+            let occupancy = build_solid_occupancy_sized(&particles, TEST_GS);
+            g2p_sized(&mut particles, &grid, &occupancy, dt, TEST_GS);
         }
 
         let final_diff = (particles[0].temperature() - particles[1].temperature()).abs();
