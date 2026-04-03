@@ -149,6 +149,20 @@ pub struct ComputeActivityPushConstants {
     pub _pad: u32,
 }
 
+/// Push constants for the update_sleep shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct UpdateSleepPushConstants {
+    /// Total number of bricks in the grid.
+    pub total_bricks: u32,
+    /// Frames of zero activity before a brick enters sleep state.
+    pub sleep_threshold: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad0: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad1: u32,
+}
+
 /// Maximum number of material slots in the toolbar.
 pub const TOOLBAR_MAX_MATERIALS: usize = 8;
 
