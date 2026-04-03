@@ -11,14 +11,19 @@
 
 pub mod clear_grid;
 pub mod clear_grid_sparse;
+pub mod clear_hash_grid;
 pub mod compute_activity;
 pub mod compute_occupancy;
 pub mod explosion;
 pub mod g2p;
+pub mod g2p_sparse;
 pub mod grid_update;
+pub mod grid_update_hash;
 pub mod grid_update_sparse;
+pub mod hash_grid;
 pub mod mark_active;
 pub mod p2g;
+pub mod p2g_sparse;
 pub mod prepare_indirect;
 pub mod react;
 pub mod render;

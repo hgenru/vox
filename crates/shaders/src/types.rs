@@ -63,6 +63,12 @@ pub struct GridCell {
 /// Grid dimension (cells per axis). 256³ with 5cm voxels = 12.8m world.
 pub const GRID_SIZE: u32 = 256;
 
+/// Default hash grid capacity (synced with shared::constants).
+pub const HASH_GRID_DEFAULT_CAPACITY: u32 = 1 << 20;
+
+/// Empty sentinel for hash grid keys (synced with shared::constants).
+pub const HASH_GRID_EMPTY_KEY: u32 = 0xFFFF_FFFF;
+
 /// Fixed simulation timestep (seconds).
 pub const DT: f32 = 0.001;
 

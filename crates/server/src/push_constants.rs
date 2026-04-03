@@ -185,6 +185,78 @@ pub struct UpdateSleepPushConstants {
     pub _pad1: u32,
 }
 
+/// Push constants for the sparse P2G shader (hash grid).
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct P2gSparsePushConstants {
+    /// Grid dimension (cells per axis).
+    pub grid_size: u32,
+    /// Simulation timestep.
+    pub dt: f32,
+    /// Total number of active particles.
+    pub num_particles: u32,
+    /// Current simulation frame number (used with tick_period for graduated sleep).
+    pub frame_number: u32,
+    /// Hash grid capacity (number of slots, must be power of 2).
+    pub hash_capacity: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad0: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad1: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad2: u32,
+}
+
+/// Push constants for the sparse G2P shader (hash grid).
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct G2pSparsePushConstants {
+    /// Grid dimension (cells per axis).
+    pub grid_size: u32,
+    /// Simulation timestep.
+    pub dt: f32,
+    /// Total number of active particles.
+    pub num_particles: u32,
+    /// Number of valid phase transition rules.
+    pub num_rules: u32,
+    /// Current simulation frame number (used with tick_period for graduated sleep).
+    pub frame_number: u32,
+    /// Hash grid capacity (number of slots, must be power of 2).
+    pub hash_capacity: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad0: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad1: u32,
+}
+
+/// Push constants for the clear hash grid shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct ClearHashGridPushConstants {
+    /// Hash grid capacity (number of slots).
+    pub hash_capacity: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad0: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad1: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad2: u32,
+}
+
+/// Push constants for the hash grid update shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct GridUpdateHashPushConstants {
+    /// Grid dimension (cells per axis).
+    pub grid_size: u32,
+    /// Simulation timestep.
+    pub dt: f32,
+    /// Gravity acceleration (negative Y).
+    pub gravity: f32,
+    /// Hash grid capacity (number of slots).
+    pub hash_capacity: u32,
+}
+
 /// Maximum number of material slots in the toolbar.
 pub const TOOLBAR_MAX_MATERIALS: usize = 8;
 

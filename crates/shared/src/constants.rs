@@ -49,6 +49,18 @@ pub const SPARSE_WORKGROUP_SIZE: u32 = 64;
 /// Total number of bricks in the grid (BRICKS_PER_AXIS³).
 pub const TOTAL_BRICKS: u32 = BRICKS_PER_AXIS * BRICKS_PER_AXIS * BRICKS_PER_AXIS;
 
+/// Default hash grid capacity (number of slots).
+/// Should be ~2x the expected max active cells for low collision rate.
+/// Must be a power of 2 for fast modulo via bitwise AND.
+pub const HASH_GRID_DEFAULT_CAPACITY: u32 = 1 << 20; // 1M slots = ~52MB
+
+/// Empty sentinel for hash grid keys.
+/// Represents an unoccupied slot in the hash grid.
+pub const HASH_GRID_EMPTY_KEY: u32 = 0xFFFF_FFFF;
+
+/// Maximum number of linear probes before giving up on hash grid insert/lookup.
+pub const HASH_GRID_MAX_PROBES: u32 = 128;
+
 /// Velocity² threshold below which a particle is considered inactive.
 /// Particles with speed² <= this won't increment the activity counter.
 pub const ACTIVITY_VELOCITY_THRESHOLD_SQ: f32 = 0.01;
@@ -72,5 +84,16 @@ mod tests {
     #[test]
     fn sleep_threshold_is_positive() {
         assert!(SLEEP_THRESHOLD > 0);
+    }
+
+    #[test]
+    fn hash_grid_capacity_is_power_of_two() {
+        assert!(HASH_GRID_DEFAULT_CAPACITY.is_power_of_two());
+        assert!(HASH_GRID_DEFAULT_CAPACITY > 0);
+    }
+
+    #[test]
+    fn hash_grid_empty_key_is_max_u32() {
+        assert_eq!(HASH_GRID_EMPTY_KEY, u32::MAX);
     }
 }

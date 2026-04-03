@@ -9,7 +9,8 @@ use gpu_core::{
     pipeline,
 };
 use shared::{
-    GRID_CELL_COUNT, GRID_SIZE, GridCell, MAX_ACTIVE_CELLS, MAX_PARTICLES,
+    GRID_CELL_COUNT, GRID_SIZE, GridCell, HASH_GRID_DEFAULT_CAPACITY,
+    MAX_ACTIVE_CELLS, MAX_PARTICLES,
     Particle, RENDER_HEIGHT, RENDER_WIDTH, SLEEP_THRESHOLD, TOTAL_BRICKS,
     material::{self, MATERIAL_COUNT, MaterialParams},
     reaction::{self, MAX_PHASE_RULES, PhaseTransitionRule},
@@ -79,6 +80,19 @@ pub struct GpuSimulation {
     prepare_indirect_pass: ComputePass,
     clear_grid_sparse_pass: ComputePass,
     grid_update_sparse_pass: ComputePass,
+
+    // Hash grid buffers (sparse grid alternative)
+    hash_grid_keys_buffer: GpuBuffer,
+    hash_grid_values_buffer: GpuBuffer,
+
+    // Hash grid compute passes
+    clear_hash_grid_pass: ComputePass,
+    p2g_hash_pass: ComputePass,
+    g2p_hash_pass: ComputePass,
+    grid_update_hash_pass: ComputePass,
+
+    /// When true, use sparse hash grid P2G/G2P instead of dense grid.
+    pub use_sparse_grid: bool,
 
     // Shader module (kept alive for pipeline lifetime)
     shader_module: vk::ShaderModule,
@@ -259,14 +273,43 @@ impl GpuSimulation {
         let indirect_dispatch_buffer =
             buffer::create_indirect_buffer(ctx, "indirect-dispatch-buffer")?;
 
+        // -- Hash grid buffers --
+        let hash_capacity = HASH_GRID_DEFAULT_CAPACITY as usize;
+        let hash_keys_buf_size = (hash_capacity * mem::size_of::<u32>()) as vk::DeviceSize;
+        let hash_grid_keys_buffer = buffer::create_device_local_buffer(
+            ctx,
+            hash_keys_buf_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "hash-grid-keys-buffer",
+        )?;
+
+        let hash_values_buf_size =
+            (hash_capacity * mem::size_of::<GridCell>()) as vk::DeviceSize;
+        let hash_grid_values_buffer = buffer::create_device_local_buffer(
+            ctx,
+            hash_values_buf_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            "hash-grid-values-buffer",
+        )?;
+
+        // Initialize hash grid keys to EMPTY sentinel
+        let empty_keys = vec![shared::HASH_GRID_EMPTY_KEY; hash_capacity];
+        buffer::upload(ctx, &empty_keys, &hash_grid_keys_buffer)?;
+        tracing::info!(
+            "Created hash grid buffers: keys={}MB, values={}MB (capacity={})",
+            hash_keys_buf_size / (1024 * 1024),
+            hash_values_buf_size / (1024 * 1024),
+            hash_capacity
+        );
+
         // -- Descriptor pool --
-        // 18 passes, max 5 bindings each = up to 90 storage buffer descriptors
+        // 22 passes (18 + 4 hash grid), max 6 bindings each = up to 132 storage buffer descriptors
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 90,
+            descriptor_count: 132,
         }];
         let descriptor_pool =
-            pipeline::create_descriptor_pool(ctx, &pool_sizes, 18, "sim-descriptor-pool")?;
+            pipeline::create_descriptor_pool(ctx, &pool_sizes, 22, "sim-descriptor-pool")?;
 
         // -- Create each compute pass --
         // Entry point names are fully qualified module paths in rust-gpu SPIR-V.
@@ -451,6 +494,64 @@ impl GpuSimulation {
             "grid-update-sparse",
         )?;
 
+        // -- Hash grid compute passes --
+        // clear_hash_grid: hash_keys(w), hash_values(w)
+        let clear_hash_grid_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::clear_hash_grid::clear_hash_grid",
+            &[&hash_grid_keys_buffer, &hash_grid_values_buffer],
+            mem::size_of::<ClearHashGridPushConstants>() as u32,
+            descriptor_pool,
+            "clear-hash-grid",
+        )?;
+
+        // p2g_hash: particles(r), hash_keys(rw), hash_values(rw), materials(r), sleep_state(r)
+        let p2g_hash_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::p2g_sparse::p2g_sparse",
+            &[
+                &particle_buffer,
+                &hash_grid_keys_buffer,
+                &hash_grid_values_buffer,
+                &material_buffer,
+                &sleep_state_buffer,
+            ],
+            mem::size_of::<P2gSparsePushConstants>() as u32,
+            descriptor_pool,
+            "p2g-hash",
+        )?;
+
+        // g2p_hash: particles(rw), hash_keys(r), hash_values(r), voxels(r), reactions(r), sleep_state(r)
+        let g2p_hash_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::g2p_sparse::g2p_sparse",
+            &[
+                &particle_buffer,
+                &hash_grid_keys_buffer,
+                &hash_grid_values_buffer,
+                &voxel_buffer,
+                &reaction_buffer,
+                &sleep_state_buffer,
+            ],
+            mem::size_of::<G2pSparsePushConstants>() as u32,
+            descriptor_pool,
+            "g2p-hash",
+        )?;
+
+        // grid_update_hash: hash_keys(r), hash_values(rw)
+        let grid_update_hash_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::grid_update_hash::grid_update_hash",
+            &[&hash_grid_keys_buffer, &hash_grid_values_buffer],
+            mem::size_of::<GridUpdateHashPushConstants>() as u32,
+            descriptor_pool,
+            "grid-update-hash",
+        )?;
+
         tracing::info!("GpuSimulation created successfully");
 
         Ok(Self {
@@ -485,6 +586,13 @@ impl GpuSimulation {
             prepare_indirect_pass,
             clear_grid_sparse_pass,
             grid_update_sparse_pass,
+            hash_grid_keys_buffer,
+            hash_grid_values_buffer,
+            clear_hash_grid_pass,
+            p2g_hash_pass,
+            g2p_hash_pass,
+            grid_update_hash_pass,
+            use_sparse_grid: false,
             shader_module,
             descriptor_pool,
             num_particles: 0,
@@ -995,6 +1103,10 @@ impl GpuSimulation {
             &self.prepare_indirect_pass,
             &self.clear_grid_sparse_pass,
             &self.grid_update_sparse_pass,
+            &self.clear_hash_grid_pass,
+            &self.p2g_hash_pass,
+            &self.g2p_hash_pass,
+            &self.grid_update_hash_pass,
         ];
         for pass in passes {
             pipeline::destroy_pipeline(ctx, pass.pipeline);
@@ -1122,6 +1234,22 @@ impl GpuSimulation {
                 size: 0,
             },
         );
+        let hash_keys_buf = std::mem::replace(
+            &mut self.hash_grid_keys_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
+        let hash_values_buf = std::mem::replace(
+            &mut self.hash_grid_values_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
         buffer::destroy_buffer(ctx, particle_buf);
         buffer::destroy_buffer(ctx, grid_buf);
         buffer::destroy_buffer(ctx, voxel_buf);
@@ -1136,5 +1264,7 @@ impl GpuSimulation {
         buffer::destroy_buffer(ctx, active_cells_buf);
         buffer::destroy_buffer(ctx, active_count_buf);
         buffer::destroy_buffer(ctx, indirect_buf);
+        buffer::destroy_buffer(ctx, hash_keys_buf);
+        buffer::destroy_buffer(ctx, hash_values_buf);
     }
 }
