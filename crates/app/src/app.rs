@@ -52,6 +52,7 @@ pub(crate) struct App {
     palette: Vec<MaterialSlot>,
     pending_explosion: Option<[f32; 3]>,
     material_db: Option<MaterialDatabase>,
+    last_react_time: Instant,
 }
 
 impl App {
@@ -141,6 +142,7 @@ impl App {
             palette: material_palette(),
             pending_explosion: None,
             material_db,
+            last_react_time: Instant::now(),
         }
     }
 
@@ -243,6 +245,16 @@ impl App {
             selected_index: self.selected_material as u32,
             material_count: self.palette.len().min(TOOLBAR_MAX_MATERIALS) as u32,
             colors,
+        }
+    }
+
+    /// Returns `true` roughly every 100ms to throttle reaction dispatch.
+    fn should_run_react(&mut self, now: Instant) -> bool {
+        if now.duration_since(self.last_react_time).as_millis() >= 100 {
+            self.last_react_time = now;
+            true
+        } else {
+            false
         }
     }
 
@@ -391,10 +403,13 @@ impl ApplicationHandler for App {
                 let target = self.player.camera.target();
                 let toolbar_pc = self.toolbar_push_constants();
                 let explosion = self.pending_explosion.take();
+                let run_react = self.should_run_react(now);
                 if let (Some(renderer), Some(ctx), Some(sim)) = (self.renderer.as_mut(), self.ctx.as_ref(), self.sim.as_ref()) {
                     if let Err(e) = ctx.execute_one_shot(|cmd| {
-                        for _ in 0..substeps { sim.step_physics(cmd); }
-                        sim.step_react(cmd);
+                        for _ in 0..substeps { sim.step_physics_with_time(cmd, now); }
+                        if run_react {
+                            sim.step_react(cmd);
+                        }
                         if let Some(center) = explosion {
                             sim.apply_explosion(cmd, center, EXPLOSION_RADIUS, EXPLOSION_STRENGTH);
                         }
