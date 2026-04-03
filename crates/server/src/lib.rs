@@ -73,7 +73,7 @@ mod tests {
     fn push_constant_sizes() {
         assert_eq!(mem::size_of::<P2gPushConstants>(), 16);
         assert_eq!(mem::size_of::<GridUpdatePushConstants>(), 16);
-        assert_eq!(mem::size_of::<G2pPushConstants>(), 16);
+        assert_eq!(mem::size_of::<G2pPushConstants>(), 32);
         assert_eq!(mem::size_of::<VoxelizePushConstants>(), 16);
         assert_eq!(mem::size_of::<ReactPushConstants>(), 16);
         // ExplosionPushConstants: 2 Vec4s (32 bytes) + 1 u32 + 3 u32 pad (16 bytes) = 48 bytes
