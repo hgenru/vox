@@ -91,6 +91,27 @@ When creating compute pipelines, use the full path as the entry point name (e.g.
 Multiple tests creating separate `VulkanContext` + `GpuSimulation` instances will fail with `ERROR_UNKNOWN`
 when run in parallel. Use `cargo test -p server -- --test-threads=1` for GPU-heavy test suites.
 
+### 15. rust-gpu drops later branches in long if/else chains
+Shader functions with >3 if/else branches: later branches get dropped during SPIR-V compilation.
+**WORKAROUND:** Split into separate helper functions per branch, call via match or independent if-return blocks.
+
+### 16. Temperature does NOT diffuse by default
+Temperature (`vel_temp.w`) is per-particle and does NOT transfer through the grid unless explicitly
+implemented. P2G must scatter temperature, G2P must gather it. Without this, thermal gameplay
+(gunpowder ignition, fire spread, ice melting from lava) is broken.
+
+### 17. Gravity and physics constants must scale with voxel size
+At 5cm voxels (GRID_SIZE=256), 1 grid unit = 0.05m. Gravity must be -196.0 (not -9.81).
+All physics constants (jump speed, spawn distance, explosion radius) must scale accordingly.
+
+### 18. Always smoke-test before telling user "ready"
+After merging PRs, always: `git pull origin main && cargo run -p app` to verify no crash.
+Scene must produce particles under MAX_PARTICLES. Never hand off broken builds.
+
+### 19. Solid particles are pinned unless unsupported
+G2P skips velocity/position update for phase=0 (solid). Falling solids check voxel below for support.
+Explosion debris must be converted to liquid (phase=1) + heated above melting point to fly properly.
+
 ---
 
 ## Code Patterns
