@@ -49,6 +49,18 @@ pub const SPARSE_WORKGROUP_SIZE: u32 = 64;
 /// Total number of bricks in the grid (BRICKS_PER_AXIS³).
 pub const TOTAL_BRICKS: u32 = BRICKS_PER_AXIS * BRICKS_PER_AXIS * BRICKS_PER_AXIS;
 
+/// Default hash grid capacity (number of slots).
+/// Should be ~2x the expected max active cells for low collision rate.
+/// Must be a power of 2 for fast modulo via bitwise AND.
+pub const HASH_GRID_DEFAULT_CAPACITY: u32 = 1 << 20; // 1M slots = ~52MB
+
+/// Empty sentinel for hash grid keys.
+/// Represents an unoccupied slot in the hash grid.
+pub const HASH_GRID_EMPTY_KEY: u32 = 0xFFFF_FFFF;
+
+/// Maximum number of linear probes before giving up on hash grid insert/lookup.
+pub const HASH_GRID_MAX_PROBES: u32 = 128;
+
 /// Super-brick size: number of bricks per super-brick axis (8 bricks = 64 voxels).
 pub const SUPER_BRICK_SIZE: u32 = 8;
 
@@ -84,9 +96,18 @@ mod tests {
     }
 
     #[test]
+    fn hash_grid_capacity_is_power_of_two() {
+        assert!(HASH_GRID_DEFAULT_CAPACITY.is_power_of_two());
+        assert!(HASH_GRID_DEFAULT_CAPACITY > 0);
+    }
+
+    #[test]
+    fn hash_grid_empty_key_is_max_u32() {
+        assert_eq!(HASH_GRID_EMPTY_KEY, u32::MAX);
+    }
+
+    #[test]
     fn super_brick_constants_consistent() {
-        // With GRID_SIZE=256, BRICK_SIZE=8: BRICKS_PER_AXIS=32, SUPER_BRICK_SIZE=8
-        // so SUPER_BRICKS_PER_AXIS=4, TOTAL_SUPER_BRICKS=64
         assert_eq!(SUPER_BRICKS_PER_AXIS, 4);
         assert_eq!(TOTAL_SUPER_BRICKS, 64);
         assert_eq!(TOTAL_SUPER_BRICKS, SUPER_BRICKS_PER_AXIS.pow(3));
