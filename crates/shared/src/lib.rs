@@ -8,6 +8,7 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod config;
 pub mod constants;
 pub mod material;
 pub mod particle;
@@ -16,6 +17,7 @@ pub mod physics;
 pub mod reaction;
 pub mod svd;
 
+pub use config::*;
 pub use constants::*;
 pub use material::*;
 pub use particle::*;

@@ -7,10 +7,16 @@ pub const GRID_SIZE: u32 = 256;
 pub const GRID_CELL_COUNT: u32 = GRID_SIZE * GRID_SIZE * GRID_SIZE;
 
 /// Fixed simulation timestep (seconds).
+///
+/// This is the default value. At runtime, prefer [`WorldConfig::dt()`](crate::WorldConfig::dt)
+/// for per-world configuration.
 pub const DT: f32 = 0.001;
 
 /// Gravity acceleration (grid-units/s², negative Y).
 /// Scaled 20x from 9.81 for 256³ grid with 5cm voxels.
+///
+/// This is the default value. At runtime, prefer [`WorldConfig::gravity`](crate::WorldConfig)
+/// for per-world configuration.
 pub const GRAVITY: f32 = -196.0;
 
 /// Brick size for BLAS acceleration structure (voxels per axis).
