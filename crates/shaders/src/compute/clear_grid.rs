@@ -15,6 +15,7 @@ use spirv_std::spirv;
 pub fn zero_cell(cell: &mut GridCell) {
     cell.velocity_mass = Vec4::ZERO;
     cell.force_pad = Vec4::ZERO;
+    cell.temp_pad = Vec4::ZERO;
 }
 
 /// Compute shader entry point: clears all grid cells to zero.

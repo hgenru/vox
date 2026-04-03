@@ -43,17 +43,21 @@ pub struct Particle {
     pub ids: UVec4,
 }
 
-/// A single grid cell for MPM transfer. 32 bytes, 16-byte aligned.
+/// A single grid cell for MPM transfer. 48 bytes, 16-byte aligned.
 ///
 /// - `velocity_mass`: xyz = velocity (or momentum during P2G), w = mass
-/// - `force_pad`: xyz = force, w = padding
+/// - `force_pad`: xyz = force, w = solid flag
+/// - `temp_pad`: x = accumulated temperature (weighted by mass during P2G,
+///   normalized after grid_update), yzw = padding (reserved for future use)
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct GridCell {
     /// Velocity or momentum (xyz) and mass (w).
     pub velocity_mass: Vec4,
-    /// Force (xyz) and padding (w).
+    /// Force (xyz) and solid flag (w).
     pub force_pad: Vec4,
+    /// Temperature (x) and padding (yzw).
+    pub temp_pad: Vec4,
 }
 
 /// Grid dimension (cells per axis). 256³ with 5cm voxels = 12.8m world.

@@ -168,15 +168,18 @@ impl Particle {
     }
 }
 
-/// A single grid cell for MPM transfer. 32 bytes, 16-byte aligned.
+/// A single grid cell for MPM transfer. 48 bytes, 16-byte aligned.
 ///
-/// - `velocity_mass`: xyz = velocity, w = mass
-/// - `force_pad`: xyz = force, w = padding
+/// - `velocity_mass`: xyz = velocity (or momentum during P2G), w = mass
+/// - `force_pad`: xyz = force, w = solid flag
+/// - `temp_pad`: x = accumulated temperature (weighted by mass during P2G,
+///   normalized after grid_update), yzw = padding (reserved for future use)
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct GridCell {
     pub velocity_mass: Vec4,
     pub force_pad: Vec4,
+    pub temp_pad: Vec4,
 }
 
 #[cfg(test)]
@@ -203,11 +206,12 @@ mod tests {
 
     #[test]
     fn grid_cell_struct_layout() {
-        assert_eq!(size_of::<GridCell>(), 32);
+        assert_eq!(size_of::<GridCell>(), 48);
         assert_eq!(align_of::<GridCell>(), 16);
 
         assert_eq!(offset_of!(GridCell, velocity_mass), 0);
         assert_eq!(offset_of!(GridCell, force_pad), 16);
+        assert_eq!(offset_of!(GridCell, temp_pad), 32);
     }
 
     #[test]

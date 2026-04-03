@@ -250,8 +250,8 @@ impl GpuSimulation {
         )?;
 
         // Grid buffer: must fit both GridCell view and flat f32 view.
-        // GridCell = 32 bytes = 8 * f32, so GRID_CELL_COUNT * sizeof(GridCell)
-        // equals GRID_CELL_COUNT * 8 * sizeof(f32). Same size, no issue.
+        // GridCell = 48 bytes = 12 * f32, so GRID_CELL_COUNT * sizeof(GridCell)
+        // equals GRID_CELL_COUNT * 12 * sizeof(f32). Same size, no issue.
         let grid_buf_size =
             (GRID_CELL_COUNT as usize * mem::size_of::<GridCell>()) as vk::DeviceSize;
         let grid_buffer = buffer::create_device_local_buffer(

@@ -40,6 +40,7 @@ pub fn update_cell(
     // Skip empty cells (mass below threshold)
     if mass < 1.0e-6 {
         cell.velocity_mass = Vec4::ZERO;
+        cell.temp_pad = Vec4::ZERO;
         return;
     }
 
@@ -90,6 +91,12 @@ pub fn update_cell(
     }
 
     cell.velocity_mass = Vec4::new(vx, vy, vz, mass);
+
+    // Normalize accumulated temperature by mass (P2G scattered temp * mass * weight).
+    // This gives the mass-weighted average temperature at this grid cell,
+    // enabling natural thermal diffusion through the MPM transfer cycle.
+    let cell_temp = cell.temp_pad.x / mass;
+    cell.temp_pad = Vec4::new(cell_temp, 0.0, 0.0, 0.0);
 }
 
 /// Compute shader entry point: grid velocity update.

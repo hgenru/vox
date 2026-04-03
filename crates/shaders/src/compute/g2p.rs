@@ -1,8 +1,8 @@
 //! Grid-to-Particle (G2P) compute shader.
 //!
-//! Each thread processes one particle, gathering velocity from the 27
-//! neighboring grid cells using quadratic B-spline weights.
-//! Updates particle velocity (PIC/FLIP blend), APIC C matrix,
+//! Each thread processes one particle, gathering velocity and temperature
+//! from the 27 neighboring grid cells using quadratic B-spline weights.
+//! Updates particle velocity (PIC/FLIP blend), temperature, APIC C matrix,
 //! deformation gradient F, position, and phase transitions.
 
 use crate::types::{GridCell, Particle};
@@ -103,11 +103,12 @@ pub fn gather_particle(
     let wy = quadratic_bspline_weights(fy);
     let wz = quadratic_bspline_weights(fz);
 
-    // Accumulate PIC velocity and APIC C matrix
+    // Accumulate PIC velocity, APIC C matrix, and temperature
     let mut pic_vel = Vec3::ZERO;
     let mut c_col0 = Vec3::ZERO;
     let mut c_col1 = Vec3::ZERO;
     let mut c_col2 = Vec3::ZERO;
+    let mut new_temp = 0.0_f32;
 
     let mut di = 0u32;
     while di < 3 {
@@ -139,6 +140,11 @@ pub fn gather_particle(
                     c_col0 += cell_vel * (w * dx.x);
                     c_col1 += cell_vel * (w * dx.y);
                     c_col2 += cell_vel * (w * dx.z);
+
+                    // Gather temperature from grid (normalized by mass in grid_update).
+                    // This enables natural thermal diffusion through the MPM transfer.
+                    let grid_temp = grid[idx].temp_pad.x;
+                    new_temp += grid_temp * w;
                 }
                 dk += 1;
             }
@@ -221,6 +227,10 @@ pub fn gather_particle(
             particle.c_col0 = c_col0.extend(0.0);
             particle.c_col1 = c_col1.extend(0.0);
             particle.c_col2 = c_col2.extend(0.0);
+            // Update temperature even for pinned solids (heat conducts through stone)
+            particle.vel_temp = Vec4::new(
+                particle.vel_temp.x, particle.vel_temp.y, particle.vel_temp.z, new_temp,
+            );
             apply_phase_transitions(particle);
             return;
         }
@@ -229,7 +239,7 @@ pub fn gather_particle(
 
     // Write back to particle (liquids and gases only)
     particle.pos_mass = Vec4::new(new_pos.x, new_pos.y, new_pos.z, particle.pos_mass.w);
-    particle.vel_temp = Vec4::new(new_vel.x, new_vel.y, new_vel.z, particle.vel_temp.w);
+    particle.vel_temp = Vec4::new(new_vel.x, new_vel.y, new_vel.z, new_temp);
     particle.f_col0 = new_f0.extend(0.0);
     particle.f_col1 = new_f1.extend(0.0);
     particle.f_col2 = new_f2.extend(0.0);
