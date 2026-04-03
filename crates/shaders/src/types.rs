@@ -66,6 +66,26 @@ pub const DT: f32 = 0.001;
 /// Scaled 20x from 9.81 for 256^3 grid with 5cm voxels.
 pub const GRAVITY: f32 = -196.0;
 
+/// Material parameters for GPU storage buffer. 64 bytes per material.
+///
+/// Mirrors `shared::material::MaterialParams` layout exactly.
+/// - `elastic`: x=youngs_modulus, y=poissons_ratio, z=yield_stress, w=viscosity
+/// - `thermal`: x=melting_point, y=boiling_point, z=heat_conductivity, w=specific_heat
+/// - `visual`: x=density, y=emissive_temp, z=opacity, w=pad
+/// - `color`: xyz=rgb (0..1), w=pad
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct MaterialParams {
+    /// Elastic properties: x=youngs_modulus, y=poissons_ratio, z=yield_stress, w=viscosity.
+    pub elastic: Vec4,
+    /// Thermal properties: x=melting_point, y=boiling_point, z=heat_conductivity, w=specific_heat.
+    pub thermal: Vec4,
+    /// Visual properties: x=density, y=emissive_temp, z=opacity, w=pad.
+    pub visual: Vec4,
+    /// Color: xyz=rgb (0..1), w=pad.
+    pub color: Vec4,
+}
+
 /// Material ID constants (synced with shared::material).
 pub const MAT_WATER: u32 = 1;
 pub const MAT_WOOD: u32 = 3;

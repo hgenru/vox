@@ -8,7 +8,7 @@
 //! float atomics. Each `GridCell` occupies 8 consecutive f32 values:
 //! `[vel_x, vel_y, vel_z, mass, force_x, force_y, force_z, pad]`.
 
-use crate::types::Particle;
+use crate::types::{MaterialParams, Particle};
 use spirv_std::glam::{UVec3, Vec3};
 use spirv_std::spirv;
 
@@ -39,8 +39,10 @@ pub struct P2gPushConstants {
 /// For liquid (phase=1): equation of state pressure.
 /// For gas (phase=2): weak EOS pressure.
 ///
+/// Reads viscosity from the MaterialParams buffer instead of hardcoded values.
+///
 /// Returns the Cauchy stress tensor columns packed into Vec3s.
-pub fn compute_stress(particle: &Particle) -> [Vec3; 3] {
+pub fn compute_stress(particle: &Particle, materials: &[MaterialParams]) -> [Vec3; 3] {
     let phase = particle.ids.y;
     let f_col0 = particle.f_col0.truncate();
     let f_col1 = particle.f_col1.truncate();
@@ -51,20 +53,22 @@ pub fn compute_stress(particle: &Particle) -> [Vec3; 3] {
 
     if phase == 1 || phase == 2 {
         // Liquid / Gas: EOS pressure + viscous stress.
-        // Material-specific bulk modulus and viscosity.
-        // We can't access MaterialParams buffer here (only particle + grid bindings),
-        // so use hardcoded per-material values matching shared::material defaults.
+        // Read viscosity from material buffer.
         let material_id = particle.ids.x;
+        let mat_count = materials.len() as u32;
+        let safe_id = if material_id < mat_count {
+            material_id
+        } else {
+            0
+        };
+        let mat = &materials[safe_id as usize];
+
         let (bulk, viscosity) = if phase == 2 {
             // Gas: weak pressure, very low viscosity
             (2.0_f32, 0.001_f32)
         } else {
-            // Liquid: material-specific
-            match material_id {
-                1 => (20.0_f32, 0.001_f32),  // Water: low viscosity (runny)
-                2 => (20.0_f32, 8.0_f32),    // Lava: HIGH viscosity (thick spread), SAME bulk
-                _ => (20.0_f32, 0.1_f32),    // Default liquid
-            }
+            // Liquid: read viscosity from material elastic.w
+            (20.0_f32, mat.elastic.w)
         };
 
         let pressure = bulk * (j - 1.0);
@@ -172,6 +176,7 @@ pub fn scatter_particle(
     grid: &mut [f32],
     grid_size: u32,
     dt: f32,
+    materials: &[MaterialParams],
 ) {
     let pos = particle.pos_mass.truncate();
     let vel = particle.vel_temp.truncate();
@@ -196,8 +201,8 @@ pub fn scatter_particle(
     let c_col1 = particle.c_col1.truncate();
     let c_col2 = particle.c_col2.truncate();
 
-    // Compute stress contribution
-    let stress = compute_stress(particle);
+    // Compute stress contribution (reads viscosity from material buffer)
+    let stress = compute_stress(particle, materials);
 
     // Scatter to 3x3x3 neighborhood
     let mut di = 0u32;
@@ -275,6 +280,7 @@ pub fn scatter_particle(
 /// Descriptor set 0, binding 0: storage buffer of `Particle` (read).
 /// Descriptor set 0, binding 1: storage buffer of `f32` (grid, read-write with atomics).
 ///   Layout: 8 floats per cell `[vel_x, vel_y, vel_z, mass, force_x, force_y, force_z, pad]`.
+/// Descriptor set 0, binding 2: storage buffer of `MaterialParams` (material table, read).
 /// Push constants: `P2gPushConstants`.
 /// Dispatch with `(ceil(num_particles / 64), 1, 1)` workgroups.
 #[spirv(compute(threads(64)))]
@@ -283,10 +289,11 @@ pub fn p2g(
     #[spirv(push_constant)] push: &P2gPushConstants,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] particles: &[Particle],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] grid: &mut [f32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] materials: &[MaterialParams],
 ) {
     let idx = id.x as usize;
     if id.x >= push.num_particles {
         return;
     }
-    scatter_particle(&particles[idx], grid, push.grid_size, push.dt);
+    scatter_particle(&particles[idx], grid, push.grid_size, push.dt, materials);
 }
