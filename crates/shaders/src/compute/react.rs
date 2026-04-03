@@ -4,8 +4,8 @@
 //! checking 6 face-neighbors in the voxel grid for reaction partners.
 //!
 //! Reactions:
-//! - Water (material_id=1, phase=1) + adjacent Lava (material_id=2) -> Stone (material_id=0, phase=0)
-//! - Lava (material_id=2, phase=1) + adjacent Water (material_id=1) -> Steam (material_id=1, phase=2, temp=100)
+//! - Water (material_id=1, phase=1) + adjacent Lava (material_id=2) -> Steam (material_id=1, phase=2, temp=100)
+//! - Lava (material_id=2, phase=1) + adjacent Water (material_id=1) -> Stone (material_id=0, phase=0, temp=300)
 
 use crate::types::Particle;
 use spirv_std::glam::{UVec3, UVec4, Vec4};
@@ -80,10 +80,10 @@ pub fn particle_hash(idx: u32, frame_offset: u32) -> u32 {
 /// Process a single particle for chemical reactions.
 ///
 /// Checks 6 face-neighbors in the voxel buffer and applies:
-/// - Water + adjacent Lava -> Stone (reset F = Identity)
-/// - Lava + adjacent Water -> Steam (reset F = Identity, temp = 100)
+/// - Water + adjacent Lava -> Steam (water boils: material_id=1, phase=2, temp=100)
+/// - Lava + adjacent Water -> Stone (lava cools: material_id=0, phase=0, temp=300)
 ///
-/// Reactions are rate-limited: only ~6% chance per particle per frame to avoid
+/// Reactions are rate-limited: only ~1.5% chance per particle per frame to avoid
 /// instant mass conversion and visual flickering.
 pub fn react_particle(
     particle: &mut Particle,
@@ -91,10 +91,10 @@ pub fn react_particle(
     grid_size: u32,
     particle_index: u32,
 ) {
-    // Rate-limit reactions: only 1/16 chance (~6%) per particle per frame.
+    // Rate-limit reactions: only 1/64 chance (~1.5%) per particle per frame.
     // This spreads conversions over many frames for gradual visual transition.
     let hash = particle_hash(particle_index, 0);
-    if hash % 16 != 0 {
+    if hash % 64 != 0 {
         return;
     }
 
@@ -117,23 +117,10 @@ pub fn react_particle(
         return;
     }
 
-    // Water (material_id=1) + adjacent Lava (material_id=2) -> Stone
+    // Water (material_id=1) + adjacent Lava (material_id=2) -> Steam
+    // Water boils from contact with lava
     if material_id == 1
         && any_face_neighbor_has_material(voxels, grid_size, vx, vy, vz, 2)
-    {
-        // Become stone: material_id=0, phase=0 (solid)
-        particle.ids.x = 0;
-        particle.ids.y = 0;
-        // Reset deformation gradient (trap #8)
-        particle.f_col0 = Vec4::new(1.0, 0.0, 0.0, 0.0);
-        particle.f_col1 = Vec4::new(0.0, 1.0, 0.0, 0.0);
-        particle.f_col2 = Vec4::new(0.0, 0.0, 1.0, 0.0);
-        return;
-    }
-
-    // Lava (material_id=2) + adjacent Water (material_id=1) -> Steam
-    if material_id == 2
-        && any_face_neighbor_has_material(voxels, grid_size, vx, vy, vz, 1)
     {
         // Become steam: material_id=1 (water material), phase=2 (gas)
         particle.ids.x = 1;
@@ -144,6 +131,28 @@ pub fn react_particle(
             particle.vel_temp.y,
             particle.vel_temp.z,
             100.0,
+        );
+        // Reset deformation gradient (trap #8)
+        particle.f_col0 = Vec4::new(1.0, 0.0, 0.0, 0.0);
+        particle.f_col1 = Vec4::new(0.0, 1.0, 0.0, 0.0);
+        particle.f_col2 = Vec4::new(0.0, 0.0, 1.0, 0.0);
+        return;
+    }
+
+    // Lava (material_id=2) + adjacent Water (material_id=1) -> Stone
+    // Lava cools from contact with water
+    if material_id == 2
+        && any_face_neighbor_has_material(voxels, grid_size, vx, vy, vz, 1)
+    {
+        // Become stone: material_id=0, phase=0 (solid)
+        particle.ids.x = 0;
+        particle.ids.y = 0;
+        // Set temperature to 300 (cooled stone)
+        particle.vel_temp = Vec4::new(
+            particle.vel_temp.x,
+            particle.vel_temp.y,
+            particle.vel_temp.z,
+            300.0,
         );
         // Reset deformation gradient (trap #8)
         particle.f_col0 = Vec4::new(1.0, 0.0, 0.0, 0.0);
