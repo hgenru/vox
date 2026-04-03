@@ -240,6 +240,14 @@ pub fn apply_phase_transitions(particle: &mut Particle) {
                 new_phase = 0; // liquid -> solid (becomes stone)
             }
         }
+        // Gunpowder: T > 200 -> explode into hot gas
+        5 => {
+            if phase == 0 && temp > 200.0 {
+                new_phase = 2; // solid -> gas (explosion)
+                // Boost temperature massively to create high EOS pressure
+                particle.vel_temp.w = 3000.0;
+            }
+        }
         _ => {}
     }
 

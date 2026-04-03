@@ -68,6 +68,7 @@ pub const GRAVITY: f32 = -9.81;
 /// Material ID constants (synced with shared::material).
 pub const MAT_WOOD: u32 = 3;
 pub const MAT_ASH: u32 = 4;
+pub const MAT_GUNPOWDER: u32 = 5;
 
 /// Number of materials in the table (synced with shared::material).
-pub const MATERIAL_COUNT: usize = 5;
+pub const MATERIAL_COUNT: usize = 6;
