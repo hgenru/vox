@@ -1,0 +1,358 @@
+//! Application struct and winit event handling.
+//!
+//! Contains the `App` struct that holds all runtime state (window, Vulkan
+//! context, renderer, simulation, player controller) and the
+//! `ApplicationHandler` implementation that drives the main loop.
+
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Instant;
+
+use client::{Camera, PlayerController, Renderer, renderer::required_instance_extensions};
+use glam::Vec3;
+use gpu_core::VulkanContext;
+use server::{GpuSimulation, ToolbarPushConstants, TOOLBAR_MAX_MATERIALS};
+use shared::{GRID_SIZE, PHASE_LIQUID, Particle, RENDER_HEIGHT, RENDER_WIDTH};
+use winit::{
+    application::ApplicationHandler,
+    event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent},
+    event_loop::ActiveEventLoop,
+    keyboard::PhysicalKey,
+    window::{CursorGrabMode, Window, WindowAttributes, WindowId},
+};
+
+use crate::scene::{
+    MaterialSlot, create_island_particles, generate_heightmap, material_palette, spawn_cell,
+};
+
+/// Distance (in grid units) from the camera eye at which particles are
+/// spawned, removed, or explosions are centered.
+const SPAWN_DISTANCE: f32 = 15.0;
+/// Radius used when removing particles with right-click.
+const REMOVE_RADIUS: f32 = 2.0;
+/// Radius of the explosion effect triggered by middle-click.
+const EXPLOSION_RADIUS: f32 = 20.0;
+/// Impulse strength of the explosion effect.
+const EXPLOSION_STRENGTH: f32 = 800.0;
+
+/// Top-level application state for the windowed mode.
+pub(crate) struct App {
+    window: Option<Arc<Window>>,
+    ctx: Option<VulkanContext>,
+    renderer: Option<Renderer>,
+    sim: Option<GpuSimulation>,
+    particles: Vec<Particle>,
+    player: PlayerController,
+    pressed_keys: HashSet<PhysicalKey>,
+    cursor_captured: bool,
+    last_frame_time: Instant,
+    substeps: u32,
+    selected_material: usize,
+    palette: Vec<MaterialSlot>,
+    pending_explosion: Option<[f32; 3]>,
+}
+
+impl App {
+    /// Create a new `App` with the given number of physics substeps per frame.
+    pub(crate) fn new(substeps: u32) -> Self {
+        let particles = create_island_particles();
+        tracing::info!("Created {} initial particles", particles.len());
+
+        let gs = GRID_SIZE as f32;
+        let camera = Camera::look_at(
+            Vec3::new(gs * 0.75, gs * 0.4, gs * 0.75),
+            Vec3::new(gs * 0.5, gs * 0.3, gs * 0.5),
+        );
+        let mut player = PlayerController::new(camera);
+        let heightmap = generate_heightmap();
+        if let Err(e) = player.set_heightmap(heightmap, GRID_SIZE) {
+            tracing::warn!("Failed to set heightmap: {}", e);
+        }
+
+        Self {
+            window: None, ctx: None, renderer: None, sim: None,
+            particles, player,
+            pressed_keys: HashSet::new(),
+            cursor_captured: false,
+            last_frame_time: Instant::now(),
+            substeps,
+            selected_material: 0,
+            palette: material_palette(),
+            pending_explosion: None,
+        }
+    }
+
+    /// Lock the cursor inside the window and hide it (FPS-style grab).
+    fn capture_cursor(&mut self) {
+        if let Some(window) = &self.window {
+            window.set_cursor_visible(false);
+            let _ = window.set_cursor_grab(CursorGrabMode::Confined);
+            self.cursor_captured = true;
+        }
+    }
+
+    /// Release the cursor so the user can interact with the OS.
+    fn release_cursor(&mut self) {
+        if let Some(window) = &self.window {
+            window.set_cursor_visible(true);
+            let _ = window.set_cursor_grab(CursorGrabMode::None);
+            self.cursor_captured = false;
+        }
+    }
+
+    /// Spawn a cluster of particles of the currently selected material in
+    /// front of the camera.
+    fn spawn_particles(&mut self) {
+        let (ctx, sim) = match (self.ctx.as_ref(), self.sim.as_mut()) {
+            (Some(c), Some(s)) => (c, s),
+            _ => return,
+        };
+        let slot = &self.palette[self.selected_material];
+        let center = self.player.camera.eye() + self.player.camera.forward() * SPAWN_DISTANCE;
+        let mut new_particles = Vec::new();
+        // Spawn a larger cluster for liquids so they are visible (3x3x3 = 27 cells x 8 PPC = 216 particles)
+        let spawn_size: u32 = if slot.phase == PHASE_LIQUID { 3 } else { 1 };
+        let half = spawn_size as f32 * 0.5;
+        for dx in 0..spawn_size {
+            for dy in 0..spawn_size {
+                for dz in 0..spawn_size {
+                    spawn_cell(
+                        &mut new_particles,
+                        center.x - half + dx as f32,
+                        center.y - half + dy as f32,
+                        center.z - half + dz as f32,
+                        0.125, slot.mat_id, slot.phase,
+                    );
+                }
+            }
+        }
+        if slot.temperature != 0.0 {
+            for p in &mut new_particles {
+                p.vel_temp = glam::Vec4::new(0.0, 0.0, 0.0, slot.temperature);
+            }
+        }
+        if let Err(e) = sim.add_particles(ctx, &new_particles) {
+            tracing::warn!("Failed to spawn particles: {}", e);
+        }
+    }
+
+    /// Queue an explosion at the point in front of the camera.
+    fn trigger_explosion(&mut self) {
+        let center = self.player.camera.eye() + self.player.camera.forward() * SPAWN_DISTANCE;
+        self.pending_explosion = Some([center.x, center.y, center.z]);
+        tracing::info!("Explosion at [{:.1}, {:.1}, {:.1}]", center.x, center.y, center.z);
+    }
+
+    /// Remove all particles within `REMOVE_RADIUS` of the point in front of
+    /// the camera.
+    fn remove_particles(&mut self) {
+        let (ctx, sim) = match (self.ctx.as_ref(), self.sim.as_mut()) {
+            (Some(c), Some(s)) => (c, s),
+            _ => return,
+        };
+        let center = self.player.camera.eye() + self.player.camera.forward() * SPAWN_DISTANCE;
+        let radius_sq = REMOVE_RADIUS * REMOVE_RADIUS;
+        match sim.readback_particles(ctx) {
+            Ok(particles) => {
+                let filtered: Vec<Particle> = particles.into_iter()
+                    .filter(|p| (p.position() - center).length_squared() > radius_sq)
+                    .collect();
+                let removed = sim.num_particles() as usize - filtered.len();
+                if removed > 0 {
+                    if let Err(e) = sim.init_particles(ctx, &filtered) {
+                        tracing::warn!("Failed to re-upload after remove: {}", e);
+                    } else {
+                        tracing::info!("Removed {} particles", removed);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("Failed to readback for remove: {}", e),
+        }
+    }
+
+    /// Build the push-constants struct describing the current toolbar state.
+    fn toolbar_push_constants(&self) -> ToolbarPushConstants {
+        let mut colors = [glam::Vec4::ZERO; TOOLBAR_MAX_MATERIALS];
+        for (i, slot) in self.palette.iter().enumerate() {
+            if i < TOOLBAR_MAX_MATERIALS { colors[i] = slot.color; }
+        }
+        ToolbarPushConstants {
+            screen_width: RENDER_WIDTH, screen_height: RENDER_HEIGHT,
+            selected_index: self.selected_material as u32,
+            material_count: self.palette.len().min(TOOLBAR_MAX_MATERIALS) as u32,
+            colors,
+        }
+    }
+
+    /// Apply keyboard-driven movement to the player controller.
+    fn update_movement(&mut self, dt: f32) {
+        let keys: Vec<PhysicalKey> = self.pressed_keys.iter().copied().collect();
+        for key in keys {
+            if let PhysicalKey::Code(code) = key { self.player.process_keyboard(code, dt); }
+        }
+        self.player.update(dt);
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() { return; }
+
+        let attrs = WindowAttributes::default()
+            .with_title("VOX Engine")
+            .with_inner_size(winit::dpi::PhysicalSize::new(RENDER_WIDTH, RENDER_HEIGHT));
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => { tracing::error!("Failed to create window: {}", e); event_loop.exit(); return; }
+        };
+
+        let size = window.inner_size();
+        self.player.camera.update_aspect(size.width, size.height);
+
+        let ctx = match VulkanContext::new_with_instance_extensions(required_instance_extensions()) {
+            Ok(c) => c,
+            Err(e) => { tracing::error!("Failed to create VulkanContext: {}", e); event_loop.exit(); return; }
+        };
+        let renderer = match Renderer::new(&ctx, &window) {
+            Ok(r) => r,
+            Err(e) => { tracing::error!("Failed to create Renderer: {}", e); event_loop.exit(); return; }
+        };
+        let mut sim = match GpuSimulation::new(&ctx) {
+            Ok(s) => s,
+            Err(e) => { tracing::error!("Failed to create GpuSimulation: {}", e); event_loop.exit(); return; }
+        };
+        if let Err(e) = sim.init_particles(&ctx, &self.particles) {
+            tracing::error!("Failed to upload particles: {}", e); event_loop.exit(); return;
+        }
+        tracing::info!("GpuSimulation initialized with {} particles", self.particles.len());
+
+        self.window = Some(window);
+        self.ctx = Some(ctx);
+        self.renderer = Some(renderer);
+        self.sim = Some(sim);
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => {
+                if let Some(ctx) = self.ctx.as_ref() {
+                    if let Some(sim) = self.sim.as_mut() { sim.destroy(ctx); }
+                    if let Some(renderer) = self.renderer.as_mut() { renderer.destroy(ctx); }
+                }
+                event_loop.exit();
+            }
+            WindowEvent::Resized(new_size) => {
+                if let Some(renderer) = self.renderer.as_mut() { renderer.notify_resized(new_size.width, new_size.height); }
+                self.player.camera.update_aspect(new_size.width, new_size.height);
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                match event.state {
+                    ElementState::Pressed => { self.pressed_keys.insert(event.physical_key); }
+                    ElementState::Released => { self.pressed_keys.remove(&event.physical_key); }
+                }
+                if event.state == ElementState::Pressed {
+                    if let PhysicalKey::Code(code) = event.physical_key {
+                        match code {
+                            winit::keyboard::KeyCode::Escape => self.release_cursor(),
+                            winit::keyboard::KeyCode::KeyF => self.player.toggle_fly_mode(),
+                            winit::keyboard::KeyCode::Digit1 if !self.palette.is_empty() => {
+                                self.selected_material = 0;
+                                tracing::info!("Selected: {}", self.palette[0].name);
+                            }
+                            winit::keyboard::KeyCode::Digit2 if self.palette.len() > 1 => {
+                                self.selected_material = 1;
+                                tracing::info!("Selected: {}", self.palette[1].name);
+                            }
+                            winit::keyboard::KeyCode::Digit3 if self.palette.len() > 2 => {
+                                self.selected_material = 2;
+                                tracing::info!("Selected: {}", self.palette[2].name);
+                            }
+                            winit::keyboard::KeyCode::Digit4 if self.palette.len() > 3 => {
+                                self.selected_material = 3;
+                                tracing::info!("Selected: {}", self.palette[3].name);
+                            }
+                            winit::keyboard::KeyCode::Digit5 if self.palette.len() > 4 => {
+                                self.selected_material = 4;
+                                tracing::info!("Selected: {}", self.palette[4].name);
+                            }
+                            winit::keyboard::KeyCode::Digit6 if self.palette.len() > 5 => {
+                                self.selected_material = 5;
+                                tracing::info!("Selected: {}", self.palette[5].name);
+                            }
+                            winit::keyboard::KeyCode::Digit7 if self.palette.len() > 6 => {
+                                self.selected_material = 6;
+                                tracing::info!("Selected: {}", self.palette[6].name);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {
+                if !self.cursor_captured {
+                    self.capture_cursor();
+                } else {
+                    match button {
+                        MouseButton::Left => self.spawn_particles(),
+                        MouseButton::Right => self.remove_particles(),
+                        MouseButton::Middle => self.trigger_explosion(),
+                        _ => {}
+                    }
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.cursor_captured && !self.palette.is_empty() {
+                    let scroll = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 120.0,
+                    };
+                    let len = self.palette.len();
+                    if scroll > 0.0 { self.selected_material = (self.selected_material + len - 1) % len; }
+                    else if scroll < 0.0 { self.selected_material = (self.selected_material + 1) % len; }
+                    tracing::info!("Selected: {}", self.palette[self.selected_material].name);
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                let now = Instant::now();
+                let dt = now.duration_since(self.last_frame_time).as_secs_f32();
+                self.last_frame_time = now;
+                self.update_movement(dt);
+
+                let substeps = self.substeps;
+                let eye = self.player.camera.eye();
+                let target = self.player.camera.target();
+                let toolbar_pc = self.toolbar_push_constants();
+                let explosion = self.pending_explosion.take();
+                if let (Some(renderer), Some(ctx), Some(sim)) = (self.renderer.as_mut(), self.ctx.as_ref(), self.sim.as_ref()) {
+                    if let Err(e) = ctx.execute_one_shot(|cmd| {
+                        for _ in 0..substeps { sim.step_physics(cmd); }
+                        sim.step_react(cmd);
+                        if let Some(center) = explosion {
+                            sim.apply_explosion(cmd, center, EXPLOSION_RADIUS, EXPLOSION_STRENGTH);
+                        }
+                        sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, [eye.x, eye.y, eye.z], [target.x, target.y, target.z]);
+                        sim.render_toolbar(cmd, &toolbar_pc);
+                        sim.finalize_render(cmd);
+                    }) {
+                        tracing::error!("Simulation/render error: {}", e);
+                    }
+                    match renderer.draw_frame_with_buffer(ctx, sim.render_output_buffer(), RENDER_WIDTH, RENDER_HEIGHT) {
+                        Ok(_) => {}
+                        Err(e) => tracing::error!("Frame error: {}", e),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _device_id: DeviceId, event: DeviceEvent) {
+        if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
+            if self.cursor_captured { self.player.process_mouse(dx as f32, dy as f32); }
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(window) = &self.window { window.request_redraw(); }
+    }
+}
