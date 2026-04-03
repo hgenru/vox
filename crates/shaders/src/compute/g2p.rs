@@ -32,10 +32,34 @@ const PIC_RATIO: f32 = 0.5;
 /// Number of u32 values per voxel cell (must match voxelize.rs layout).
 const U32S_PER_VOXEL: u32 = 4;
 
+/// Check if a voxel cell at (vx, vy, vz) is occupied by a solid (phase==0).
+///
+/// Returns `true` if the cell is in-bounds, occupied, and has phase==0.
+fn is_solid_voxel(vx: u32, vy: u32, vz: u32, voxels: &[u32], grid_size: u32) -> bool {
+    if vx >= grid_size || vy >= grid_size || vz >= grid_size {
+        return false;
+    }
+    let idx = (vz * grid_size * grid_size + vy * grid_size + vx) as usize;
+    let base = idx * U32S_PER_VOXEL as usize;
+
+    // Check occupied flag (offset +3)
+    let occupied = voxels[base + 3] > 0;
+    if !occupied {
+        return false;
+    }
+
+    // Unpack phase from packed_material at offset +0: (weight<<24 | mat<<16 | phase<<8 | 0xFF)
+    let packed = voxels[base];
+    let phase_below = (packed >> 8) & 0xFF;
+    phase_below == 0
+}
+
 /// Check if a solid particle has support from a solid voxel below it.
 ///
 /// Reads the voxel buffer (from the previous frame's voxelize pass) to see
-/// if the cell directly below this particle is occupied by a solid (phase==0).
+/// if the cell below this particle is occupied by a solid (phase==0).
+/// Checks 2 cells below to avoid stale-read issues where adjacent solids
+/// at the same Y level see each other's old positions as support.
 /// Particles at the grid floor (vy <= 1) are always considered supported.
 pub fn check_solid_support(pos: spirv_std::glam::Vec3, voxels: &[u32], grid_size: u32) -> bool {
     let vx = pos.x as u32;
@@ -47,25 +71,20 @@ pub fn check_solid_support(pos: spirv_std::glam::Vec3, voxels: &[u32], grid_size
         return true;
     }
 
-    // Check cell below
-    let below_y = vy - 1;
-    if vx >= grid_size || below_y >= grid_size || vz >= grid_size {
-        return true; // out of bounds = treat as supported (safe default)
+    // Check cell directly below (vy - 1)
+    if is_solid_voxel(vx, vy - 1, vz, voxels, grid_size) {
+        return true;
     }
 
-    let below_idx = (vz * grid_size * grid_size + below_y * grid_size + vx) as usize;
-    let base = below_idx * U32S_PER_VOXEL as usize;
-
-    // Check occupied flag (offset +3) and that the occupant is solid (phase==0)
-    let occupied = voxels[base + 3] > 0;
-    if !occupied {
-        return false;
+    // Check 2 cells below (vy - 2) to catch cases where the voxel buffer
+    // is stale by one frame and the support has shifted down by 1 cell.
+    if vy >= 3 {
+        if is_solid_voxel(vx, vy - 2, vz, voxels, grid_size) {
+            return true;
+        }
     }
 
-    // Unpack phase from packed_material at offset +0: (weight<<24 | mat<<16 | phase<<8 | 0xFF)
-    let packed = voxels[base];
-    let phase_below = (packed >> 8) & 0xFF;
-    phase_below == 0 // supported only if the voxel below is also solid
+    false
 }
 
 /// Gather velocity from the grid and update one particle.
@@ -236,7 +255,7 @@ pub fn gather_particle(
 
     // Solids: check if the particle has support from a solid voxel below.
     // Supported solids update F and C only (pinned, prevents floor drift #45).
-    // Unsupported solids fall through to full position/velocity update.
+    // Unsupported solids fall normally with minimum fall speed to overcome grid friction.
     if phase == 0 {
         let supported = check_solid_support(pos, voxels, grid_size);
         if supported {
@@ -253,7 +272,11 @@ pub fn gather_particle(
             apply_phase_transitions(particle, reactions, num_rules);
             return;
         }
-        // Unsupported: fall through to position/velocity update below
+        // Unsupported solid: enforce minimum fall speed to overcome grid friction.
+        // Grid coupling with neighboring solids creates artificial friction that
+        // prevents free-fall. Override with gravity-based minimum downward velocity.
+        // GRAVITY is -196.0, so min_fall_speed is negative (downward).
+        new_vel = apply_min_fall_speed(new_vel, dt);
     }
 
     // Write back to particle (liquids and gases only)
@@ -268,6 +291,30 @@ pub fn gather_particle(
 
     // Phase transitions by temperature (data-driven)
     apply_phase_transitions(particle, reactions, num_rules);
+}
+
+/// Enforce minimum fall speed for unsupported solid particles.
+///
+/// Grid coupling with neighboring solids creates artificial friction that
+/// prevents free-fall. This ensures unsupported solids always have at least
+/// a minimum downward velocity proportional to accumulated gravity over ~10 frames.
+/// Also zeros out horizontal velocity to prevent wall-sliding artifacts.
+fn apply_min_fall_speed(vel: Vec3, dt: f32) -> Vec3 {
+    // Gravity = -196.0 grid-units/s^2. Over 10 frames at dt=0.001:
+    // min_fall_speed = -196.0 * 0.001 * 10 = -1.96 grid-units/s
+    let gravity = -196.0_f32;
+    let min_fall_speed = gravity * dt * 10.0;
+
+    let mut result = vel;
+    // Ensure downward velocity is at least min_fall_speed (both are negative)
+    if result.y > min_fall_speed {
+        result.y = min_fall_speed;
+    }
+    // Dampen horizontal velocity to prevent wall-sliding and lateral sticking.
+    // Solids should fall straight down, not drift sideways from grid coupling.
+    result.x *= 0.5;
+    result.z *= 0.5;
+    result
 }
 
 /// Apply radiative cooling (Newton's cooling law) to a temperature value.
