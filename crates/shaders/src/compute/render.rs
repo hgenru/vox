@@ -322,7 +322,7 @@ fn apply_lighting(color: Vec3, normal: Vec3) -> Vec3 {
     let ndotl = dot(normal, light_dir);
     let diffuse = if ndotl > 0.0 { ndotl } else { 0.0 };
 
-    let ambient = 0.35;
+    let ambient = 0.5;
     let intensity = ambient + (1.0 - ambient) * diffuse;
 
     Vec3::new(
@@ -589,7 +589,7 @@ pub fn render_pixel(
 
         // Lighting: if in shadow, only ambient contributes; otherwise full lighting
         let lit_color = if in_shadow {
-            let ambient = 0.35;
+            let ambient = 0.4;
             Vec3::new(
                 base_color.x * ambient * ao_factor,
                 base_color.y * ambient * ao_factor,
