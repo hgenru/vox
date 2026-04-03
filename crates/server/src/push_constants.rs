@@ -179,10 +179,10 @@ pub struct UpdateSleepPushConstants {
     pub total_bricks: u32,
     /// Frames of zero activity before a brick enters sleep state.
     pub sleep_threshold: u32,
+    /// Number of bricks per axis (grid_size / brick_size).
+    pub bricks_per_axis: u32,
     /// Padding to 16-byte alignment.
-    pub _pad0: u32,
-    /// Padding to 16-byte alignment.
-    pub _pad1: u32,
+    pub _pad: u32,
 }
 
 /// Push constants for the count_per_brick shader.
