@@ -49,6 +49,18 @@ pub const SPARSE_WORKGROUP_SIZE: u32 = 64;
 /// Total number of bricks in the grid (BRICKS_PER_AXIS³).
 pub const TOTAL_BRICKS: u32 = BRICKS_PER_AXIS * BRICKS_PER_AXIS * BRICKS_PER_AXIS;
 
+/// Tile size in pixels for dirty-tile rendering optimization.
+pub const DIRTY_TILE_SIZE: u32 = 16;
+
+/// Number of tiles across X for dirty-tile rendering.
+pub const DIRTY_TILES_X: u32 = (RENDER_WIDTH + DIRTY_TILE_SIZE - 1) / DIRTY_TILE_SIZE;
+
+/// Number of tiles across Y for dirty-tile rendering.
+pub const DIRTY_TILES_Y: u32 = (RENDER_HEIGHT + DIRTY_TILE_SIZE - 1) / DIRTY_TILE_SIZE;
+
+/// Total number of dirty tiles.
+pub const DIRTY_TILE_COUNT: u32 = DIRTY_TILES_X * DIRTY_TILES_Y;
+
 /// Velocity² threshold below which a particle is considered inactive.
 /// Particles with speed² <= this won't increment the activity counter.
 pub const ACTIVITY_VELOCITY_THRESHOLD_SQ: f32 = 0.01;
@@ -72,5 +84,13 @@ mod tests {
     #[test]
     fn sleep_threshold_is_positive() {
         assert!(SLEEP_THRESHOLD > 0);
+    }
+
+    #[test]
+    fn dirty_tile_constants() {
+        // 1280 / 16 = 80 tiles, 720 / 16 = 45 tiles
+        assert_eq!(DIRTY_TILES_X, 80);
+        assert_eq!(DIRTY_TILES_Y, 45);
+        assert_eq!(DIRTY_TILE_COUNT, 3600);
     }
 }

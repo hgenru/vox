@@ -12,6 +12,7 @@
 pub mod clear_grid;
 pub mod clear_grid_sparse;
 pub mod compute_activity;
+pub mod compute_dirty_tiles;
 pub mod compute_occupancy;
 pub mod explosion;
 pub mod g2p;

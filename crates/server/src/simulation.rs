@@ -9,7 +9,7 @@ use gpu_core::{
     pipeline,
 };
 use shared::{
-    GRID_CELL_COUNT, GRID_SIZE, GridCell, MAX_ACTIVE_CELLS, MAX_PARTICLES,
+    DIRTY_TILE_COUNT, GRID_CELL_COUNT, GRID_SIZE, GridCell, MAX_ACTIVE_CELLS, MAX_PARTICLES,
     Particle, RENDER_HEIGHT, RENDER_WIDTH, SLEEP_THRESHOLD, TOTAL_BRICKS,
     material::{self, MATERIAL_COUNT, MaterialParams},
     reaction::{self, MAX_PHASE_RULES, PhaseTransitionRule},
@@ -47,6 +47,10 @@ pub struct GpuSimulation {
     // Brick occupancy (render optimization)
     brick_occupancy_buffer: GpuBuffer,
 
+    // Dirty-tile rendering
+    prev_render_output_buffer: GpuBuffer,
+    dirty_tile_buffer: GpuBuffer,
+
     // Sparse dispatch buffers
     mark_buffer: GpuBuffer,
     active_cells_buffer: GpuBuffer,
@@ -71,6 +75,9 @@ pub struct GpuSimulation {
     // Brick occupancy pass (render optimization)
     compute_occupancy_pass: ComputePass,
 
+    // Dirty-tile pass
+    compute_dirty_tiles_pass: ComputePass,
+
     // Brick sleep pass
     update_sleep_pass: ComputePass,
 
@@ -91,6 +98,10 @@ pub struct GpuSimulation {
     num_phase_rules: u32,
     /// Monotonically increasing frame counter for graduated sleep scheduling.
     frame_number: core::cell::Cell<u32>,
+    /// Previous frame camera eye (for dirty-tile camera-moved detection).
+    prev_eye: core::cell::Cell<[f32; 3]>,
+    /// Previous frame camera target (for dirty-tile camera-moved detection).
+    prev_target: core::cell::Cell<[f32; 3]>,
 
     // Reference to context (not owned — caller must keep alive)
     // We store raw device handle for recording commands; the context
@@ -237,6 +248,23 @@ impl GpuSimulation {
             "brick-occupancy-buffer",
         )?;
 
+        // -- Dirty-tile rendering buffers --
+        // Previous frame render output (same size as render_output_buffer)
+        let prev_render_output_buffer = buffer::create_device_local_buffer(
+            ctx,
+            render_output_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "prev-render-output-buffer",
+        )?;
+
+        // Dirty tile buffer: 1 u32 per tile
+        let dirty_tile_buffer = buffer::create_device_local_buffer(
+            ctx,
+            (DIRTY_TILE_COUNT as usize * 4) as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "dirty-tile-buffer",
+        )?;
+
         // -- Sparse dispatch buffers --
         let mark_buffer = buffer::create_device_local_buffer(
             ctx,
@@ -260,13 +288,13 @@ impl GpuSimulation {
             buffer::create_indirect_buffer(ctx, "indirect-dispatch-buffer")?;
 
         // -- Descriptor pool --
-        // 18 passes, max 5 bindings each = up to 90 storage buffer descriptors
+        // 19 passes, max 6 bindings each = up to 114 storage buffer descriptors
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 90,
+            descriptor_count: 114,
         }];
         let descriptor_pool =
-            pipeline::create_descriptor_pool(ctx, &pool_sizes, 18, "sim-descriptor-pool")?;
+            pipeline::create_descriptor_pool(ctx, &pool_sizes, 19, "sim-descriptor-pool")?;
 
         // -- Create each compute pass --
         // Entry point names are fully qualified module paths in rust-gpu SPIR-V.
@@ -334,7 +362,14 @@ impl GpuSimulation {
             ctx,
             shader_module,
             c"compute::render::render_voxels",
-            &[&voxel_buffer, &render_output_buffer, &material_buffer, &brick_occupancy_buffer],
+            &[
+                &voxel_buffer,
+                &render_output_buffer,
+                &material_buffer,
+                &brick_occupancy_buffer,
+                &dirty_tile_buffer,
+                &prev_render_output_buffer,
+            ],
             mem::size_of::<RenderPushConstants>() as u32,
             descriptor_pool,
             "render",
@@ -392,6 +427,18 @@ impl GpuSimulation {
             mem::size_of::<ComputeOccupancyPushConstants>() as u32,
             descriptor_pool,
             "compute-occupancy",
+        )?;
+
+        // -- Dirty-tile pass --
+        // compute_dirty_tiles: sleep_state(r), dirty_tiles(w)
+        let compute_dirty_tiles_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::compute_dirty_tiles::compute_dirty_tiles",
+            &[&sleep_state_buffer, &dirty_tile_buffer],
+            mem::size_of::<DirtyTilesPushConstants>() as u32,
+            descriptor_pool,
+            "compute-dirty-tiles",
         )?;
 
         // -- Brick sleep pass --
@@ -464,6 +511,8 @@ impl GpuSimulation {
             sleep_counter_buffer,
             sleep_state_buffer,
             brick_occupancy_buffer,
+            prev_render_output_buffer,
+            dirty_tile_buffer,
             mark_buffer,
             active_cells_buffer,
             active_count_buffer,
@@ -480,6 +529,7 @@ impl GpuSimulation {
             explosion_pass,
             compute_activity_pass,
             compute_occupancy_pass,
+            compute_dirty_tiles_pass,
             update_sleep_pass,
             mark_active_pass,
             prepare_indirect_pass,
@@ -490,6 +540,8 @@ impl GpuSimulation {
             num_particles: 0,
             num_phase_rules: num_phase_rules as u32,
             frame_number: core::cell::Cell::new(0),
+            prev_eye: core::cell::Cell::new([f32::NAN; 3]),
+            prev_target: core::cell::Cell::new([f32::NAN; 3]),
             device: ctx.device.clone(),
         })
     }
@@ -852,8 +904,12 @@ impl GpuSimulation {
 
     /// Record a render dispatch into the given command buffer.
     ///
-    /// Ray-marches through the voxel grid and writes pixel data to the
-    /// render output buffer. The command buffer must be in recording state.
+    /// Uses dirty-tile optimization: first computes which 16x16 pixel tiles
+    /// need re-rendering (based on camera movement and brick sleep state),
+    /// then only ray-marches dirty tiles. Clean tiles are copied from the
+    /// previous frame buffer.
+    ///
+    /// The command buffer must be in recording state.
     /// Call this after `step()` (which populates the voxel buffer).
     pub fn render(
         &self,
@@ -866,6 +922,38 @@ impl GpuSimulation {
         // Barrier: ensure voxelize writes are visible to render shader reads
         passes::barrier(cmd, &self.device);
 
+        // Detect camera movement
+        let prev_eye = self.prev_eye.get();
+        let camera_moved = Self::has_camera_moved(eye, target, prev_eye, self.prev_target.get());
+
+        // 1. Compute dirty tiles
+        let dirty_tiles_pc = DirtyTilesPushConstants {
+            width,
+            height,
+            grid_size: GRID_SIZE,
+            bricks_per_axis: shared::BRICKS_PER_AXIS,
+            eye: glam::Vec4::new(
+                eye[0],
+                eye[1],
+                eye[2],
+                if camera_moved { 1.0 } else { 0.0 },
+            ),
+            target: glam::Vec4::new(target[0], target[1], target[2], 0.0),
+        };
+
+        let tile_wg = (DIRTY_TILE_COUNT + 63) / 64;
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.compute_dirty_tiles_pass,
+            tile_wg,
+            1,
+            1,
+            bytemuck::bytes_of(&dirty_tiles_pc),
+        );
+        passes::barrier(cmd, &self.device);
+
+        // 2. Render with dirty-tile check
         let push = RenderPushConstants {
             width,
             height,
@@ -887,6 +975,37 @@ impl GpuSimulation {
             1,
             bytemuck::bytes_of(&push),
         );
+
+        // Store current camera for next frame comparison
+        self.prev_eye.set(eye);
+        self.prev_target.set(target);
+    }
+
+    /// Check if the camera has moved between frames.
+    ///
+    /// Returns `true` on the first frame (prev_eye is NaN) or if the eye/target
+    /// position changed by more than a tiny epsilon.
+    fn has_camera_moved(
+        eye: [f32; 3],
+        target: [f32; 3],
+        prev_eye: [f32; 3],
+        prev_target: [f32; 3],
+    ) -> bool {
+        // First frame: NaN comparison always fails, so camera is "moved"
+        if prev_eye[0].is_nan() {
+            return true;
+        }
+        Self::vec3_diff_exceeds(eye, prev_eye)
+            || Self::vec3_diff_exceeds(target, prev_target)
+    }
+
+    /// Check if two 3-component vectors differ by more than epsilon.
+    fn vec3_diff_exceeds(a: [f32; 3], b: [f32; 3]) -> bool {
+        let eps = 0.001;
+        let dx = (a[0] - b[0]).abs();
+        let dy = (a[1] - b[1]).abs();
+        let dz = (a[2] - b[2]).abs();
+        dx > eps || dy > eps || dz > eps
     }
 
     /// Record a toolbar overlay dispatch into the given command buffer.
@@ -945,13 +1064,15 @@ impl GpuSimulation {
     }
 
     /// Insert a final barrier to ensure all render output writes are complete
-    /// before the buffer is copied to the swapchain.
+    /// before the buffer is copied to the swapchain, then copy current render
+    /// output to the previous-frame buffer for dirty-tile reuse next frame.
     ///
     /// Must be called after [`render`] and [`render_toolbar`] (if used).
     pub fn finalize_render(&self, cmd: vk::CommandBuffer) {
+        // Barrier: SHADER_WRITE -> TRANSFER_READ | TRANSFER_WRITE
         let memory_barrier = vk::MemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-            .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::TRANSFER_WRITE);
         unsafe {
             self.device.cmd_pipeline_barrier(
                 cmd,
@@ -959,6 +1080,34 @@ impl GpuSimulation {
                 vk::PipelineStageFlags::TRANSFER,
                 vk::DependencyFlags::empty(),
                 &[memory_barrier],
+                &[],
+                &[],
+            );
+        }
+
+        // Copy current render output to previous frame buffer for next frame
+        let copy_size = self.render_output_buffer.size;
+        let region = vk::BufferCopy::default().size(copy_size);
+        unsafe {
+            self.device.cmd_copy_buffer(
+                cmd,
+                self.render_output_buffer.buffer,
+                self.prev_render_output_buffer.buffer,
+                &[region],
+            );
+        }
+
+        // Barrier: ensure the copy finishes before next frame's shader reads
+        let copy_barrier = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ);
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[copy_barrier],
                 &[],
                 &[],
             );
@@ -990,6 +1139,7 @@ impl GpuSimulation {
             &self.explosion_pass,
             &self.compute_activity_pass,
             &self.compute_occupancy_pass,
+            &self.compute_dirty_tiles_pass,
             &self.update_sleep_pass,
             &self.mark_active_pass,
             &self.prepare_indirect_pass,
@@ -1090,6 +1240,22 @@ impl GpuSimulation {
                 size: 0,
             },
         );
+        let prev_render_output_buf = std::mem::replace(
+            &mut self.prev_render_output_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
+        let dirty_tile_buf = std::mem::replace(
+            &mut self.dirty_tile_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
         let mark_buf = std::mem::replace(
             &mut self.mark_buffer,
             GpuBuffer {
@@ -1132,6 +1298,8 @@ impl GpuSimulation {
         buffer::destroy_buffer(ctx, sleep_counter_buf);
         buffer::destroy_buffer(ctx, sleep_state_buf);
         buffer::destroy_buffer(ctx, brick_occupancy_buf);
+        buffer::destroy_buffer(ctx, prev_render_output_buf);
+        buffer::destroy_buffer(ctx, dirty_tile_buf);
         buffer::destroy_buffer(ctx, mark_buf);
         buffer::destroy_buffer(ctx, active_cells_buf);
         buffer::destroy_buffer(ctx, active_count_buf);
