@@ -74,17 +74,17 @@ pub fn update_cell(
     // Solid boundary conditions: damp velocity at cells with solid contributions.
     // The solid flag is written by P2G into force_pad.w (the pad slot).
     // Deep inside solid → fully zero velocity.
-    // At boundary (mixed solid+fluid) → strongly damp but allow some flow.
-    // Pure fluid → unaffected.
+    // At boundary (mixed solid+fluid) → lightly damp to prevent penetration
+    // while still allowing fluid to flow along surfaces.
     let solid_flag = cell.force_pad.w;
-    if solid_flag > 2.0 {
+    if solid_flag > 6.0 {
         // Deep inside solid — fully zero velocity
         vx = 0.0;
         vy = 0.0;
         vz = 0.0;
-    } else if solid_flag > 0.5 {
-        // At boundary — strongly damp velocity but allow some flow
-        let damp = 1.0 - (solid_flag / 3.0).min(0.9);
+    } else if solid_flag > 2.0 {
+        // At boundary — mild damp, fluid can still slide along surfaces
+        let damp = 1.0 - ((solid_flag - 2.0) / 8.0).min(0.7);
         vx *= damp;
         vy *= damp;
         vz *= damp;

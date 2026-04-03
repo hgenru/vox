@@ -58,15 +58,15 @@ pub fn apply_boundary(
 
 /// Apply solid boundary damping based on the solid flag accumulated by P2G.
 ///
-/// Deep inside solid (flag > 2.0): fully zero velocity.
-/// At boundary (flag > 0.5): strongly damp but allow some flow.
+/// Deep inside solid (flag > 6.0): fully zero velocity.
+/// At boundary (flag > 2.0): mild damp — fluid can slide along surfaces.
 /// Helper to keep the main update logic concise (trap #15).
 pub fn apply_solid_damping(vx: f32, vy: f32, vz: f32, solid_flag: f32) -> (f32, f32, f32) {
-    if solid_flag > 2.0 {
+    if solid_flag > 6.0 {
         return (0.0, 0.0, 0.0);
     }
-    if solid_flag > 0.5 {
-        let damp = 1.0 - (solid_flag / 3.0).min(0.9);
+    if solid_flag > 2.0 {
+        let damp = 1.0 - ((solid_flag - 2.0) / 8.0).min(0.7);
         return (vx * damp, vy * damp, vz * damp);
     }
     (vx, vy, vz)
