@@ -81,7 +81,7 @@ pub fn write_voxel(
                     let w = wx * wy * wz;
 
                     // Only write if weight is significant
-                    if w > 0.1 {
+                    if w > 0.3 {
                         let idx =
                             (cz * grid_size * grid_size + cy * grid_size + cx) as usize;
                         // Simple last-write-wins, but with splatting it's much smoother
