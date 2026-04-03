@@ -204,6 +204,26 @@ fn textured_material_color(material_id: u32, vx: i32, vy: i32, vz: i32, grid_siz
             dark.y + (bright.y - dark.y) * noise,
             dark.z + (bright.z - dark.z) * noise,
         )
+    } else if material_id == 3 {
+        // Wood: grain pattern with brown variation
+        let noise = value_noise(vx as f32 * 0.5, vy as f32 * 2.0, vz as f32 * 0.5);
+        let noise2 = value_noise(vx as f32 * 3.0, vy as f32 * 0.3, vz as f32 * 3.0);
+        let light = Vec3::new(0.6, 0.4, 0.2);
+        let dark = Vec3::new(0.4, 0.25, 0.1);
+        let t = noise * 0.6 + noise2 * 0.4;
+        let color = Vec3::new(
+            dark.x + (light.x - dark.x) * t,
+            dark.y + (light.y - dark.y) * t,
+            dark.z + (light.z - dark.z) * t,
+        );
+        let h = hash3(vx, vy, vz);
+        let offset = (h - 0.5) * 0.04;
+        Vec3::new(color.x + offset, color.y + offset, color.z + offset)
+    } else if material_id == 4 {
+        // Ash: gray with subtle variation
+        let h = hash3(vx, vy, vz);
+        let base = 0.4 + (h - 0.5) * 0.08;
+        Vec3::new(base, base, base)
     } else {
         // Unknown: magenta
         Vec3::new(1.0, 0.0, 1.0)
@@ -697,9 +717,19 @@ pub fn render_pixel(
             lit_color.z + base_color.z * lava_light.z,
         );
 
-        // Add emissive glow for lava (material_id == 2)
+        // Add emissive glow for lava (material_id == 2) and burning wood (material_id == 3)
         let final_color = if hit_material == 2 {
             let emissive = Vec3::new(1.0, 0.6, 0.1) * 0.8;
+            Vec3::new(
+                lit_color.x + emissive.x,
+                lit_color.y + emissive.y,
+                lit_color.z + emissive.z,
+            )
+        } else if hit_material == 3 {
+            // Burning wood: emissive orange glow based on temperature
+            // Temperature is encoded in the voxel; approximate by using
+            // a moderate glow since we know wood on fire has T > 300
+            let emissive = Vec3::new(1.0, 0.4, 0.05) * 0.5;
             Vec3::new(
                 lit_color.x + emissive.x,
                 lit_color.y + emissive.y,
