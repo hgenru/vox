@@ -53,11 +53,29 @@ pub fn apply_explosion(particle: &mut Particle, center: Vec4, radius: f32, stren
         particle.vel_temp.w,
     );
 
-    // Accumulate damage on solid-phase particles
+    // Also push position directly (solids skip velocity update in G2P)
+    particle.pos_mass = Vec4::new(
+        particle.pos_mass.x + impulse.x * 0.01,
+        particle.pos_mass.y + impulse.y * 0.01,
+        particle.pos_mass.z + impulse.z * 0.01,
+        particle.pos_mass.w,
+    );
+
+    // Solid particles near blast center: convert to liquid (debris)
+    // so they start moving via normal physics
     if particle.ids.y == 0 {
-        let damage_add = (strength * falloff * 0.01) as u32;
+        let damage_add = (strength * falloff * 0.1) as u32;
         let new_damage = particle.ids.z + damage_add;
         particle.ids.z = if new_damage > 255 { 255 } else { new_damage };
+
+        // High damage → become liquid debris (phase 1)
+        if particle.ids.z > 100 {
+            particle.ids.y = 1; // solid → liquid
+            // Reset F = Identity (trap #8)
+            particle.f_col0 = Vec4::new(1.0, 0.0, 0.0, 0.0);
+            particle.f_col1 = Vec4::new(0.0, 1.0, 0.0, 0.0);
+            particle.f_col2 = Vec4::new(0.0, 0.0, 1.0, 0.0);
+        }
     }
 }
 
