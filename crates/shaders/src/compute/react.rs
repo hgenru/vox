@@ -6,8 +6,9 @@
 //! Reactions:
 //! - Water (material_id=1, phase=1) + adjacent Lava (material_id=2) -> Steam (material_id=1, phase=2, temp=100)
 //! - Lava (material_id=2, phase=1) + adjacent Water (material_id=1) -> Stone (material_id=0, phase=0, temp=300)
+//! - Wood (material_id=3) with T > 300 -> heats up, accumulates damage -> Ash (material_id=4)
 
-use crate::types::Particle;
+use crate::types::{Particle, MAT_ASH, MAT_WOOD, DT};
 use spirv_std::glam::{UVec3, UVec4, Vec4};
 use spirv_std::spirv;
 
@@ -82,23 +83,32 @@ pub fn particle_hash(idx: u32, frame_offset: u32) -> u32 {
 /// Checks 6 face-neighbors in the voxel buffer and applies:
 /// - Water + adjacent Lava -> Steam (water boils: material_id=1, phase=2, temp=100)
 /// - Lava + adjacent Water -> Stone (lava cools: material_id=0, phase=0, temp=300)
+/// - Wood with T > 300 -> heats up, accumulates damage -> Ash when fully burnt
 ///
-/// Reactions are rate-limited: only ~1.5% chance per particle per frame to avoid
-/// instant mass conversion and visual flickering.
+/// Liquid reactions are rate-limited: only ~1.5% chance per particle per frame to avoid
+/// instant mass conversion and visual flickering. Wood burning runs every frame.
 pub fn react_particle(
     particle: &mut Particle,
     voxels: &[UVec4],
     grid_size: u32,
     particle_index: u32,
 ) {
-    // Rate-limit reactions: only 1/64 chance (~1.5%) per particle per frame.
+    let material_id = particle.ids.x;
+    let temperature = particle.vel_temp.w;
+
+    // Wood burning: runs every frame (not rate-limited) for smooth progression
+    if material_id == MAT_WOOD && temperature > 300.0 {
+        react_wood_burning(particle);
+        return;
+    }
+
+    // Rate-limit liquid reactions: only 1/64 chance (~1.5%) per particle per frame.
     // This spreads conversions over many frames for gradual visual transition.
     let hash = particle_hash(particle_index, 0);
     if hash % 64 != 0 {
         return;
     }
 
-    let material_id = particle.ids.x;
     let phase = particle.ids.y;
 
     // Only react liquids (phase == 1)
@@ -153,6 +163,42 @@ pub fn react_particle(
             particle.vel_temp.y,
             particle.vel_temp.z,
             300.0,
+        );
+        // Reset deformation gradient (trap #8)
+        particle.f_col0 = Vec4::new(1.0, 0.0, 0.0, 0.0);
+        particle.f_col1 = Vec4::new(0.0, 1.0, 0.0, 0.0);
+        particle.f_col2 = Vec4::new(0.0, 0.0, 1.0, 0.0);
+    }
+}
+
+/// Process wood burning: temperature rises, damage accumulates, converts to ash.
+///
+/// Wood with temperature above 300 is on fire. Each frame the temperature
+/// increases (self-sustaining combustion) and damage (ids.z) accumulates.
+/// When damage reaches 200 the particle converts to ash.
+fn react_wood_burning(particle: &mut Particle) {
+    // Wood is on fire — heat up further (self-sustaining combustion)
+    particle.vel_temp = Vec4::new(
+        particle.vel_temp.x,
+        particle.vel_temp.y,
+        particle.vel_temp.z,
+        particle.vel_temp.w + 50.0 * DT,
+    );
+
+    // Accumulate damage (stored in ids.z)
+    let damage = particle.ids.z + 1;
+    particle.ids.z = damage;
+
+    // When fully burnt -> become ash
+    if damage >= 200 {
+        particle.ids.x = MAT_ASH;
+        particle.ids.y = 0; // solid phase
+        particle.ids.z = 0; // reset damage
+        particle.vel_temp = Vec4::new(
+            particle.vel_temp.x,
+            particle.vel_temp.y,
+            particle.vel_temp.z,
+            200.0, // still warm
         );
         // Reset deformation gradient (trap #8)
         particle.f_col0 = Vec4::new(1.0, 0.0, 0.0, 0.0);

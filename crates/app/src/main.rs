@@ -18,8 +18,8 @@ use glam::Vec3;
 use gpu_core::VulkanContext;
 use server::{GpuSimulation, ToolbarPushConstants, TOOLBAR_MAX_MATERIALS};
 use shared::{
-    GRID_SIZE, MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_LIQUID, PHASE_SOLID, Particle,
-    RENDER_HEIGHT, RENDER_WIDTH,
+    GRID_SIZE, MAT_ASH, MAT_LAVA, MAT_STONE, MAT_WATER, MAT_WOOD, PHASE_LIQUID, PHASE_SOLID,
+    Particle, RENDER_HEIGHT, RENDER_WIDTH,
 };
 use winit::{
     application::ApplicationHandler,
@@ -70,6 +70,20 @@ fn material_palette() -> Vec<MaterialSlot> {
             phase: PHASE_LIQUID,
             temperature: 2000.0,
             color: glam::Vec4::new(1.0, 0.3, 0.0, 1.0),
+        },
+        MaterialSlot {
+            name: "Wood",
+            mat_id: MAT_WOOD,
+            phase: PHASE_SOLID,
+            temperature: 0.0,
+            color: glam::Vec4::new(0.55, 0.35, 0.15, 1.0),
+        },
+        MaterialSlot {
+            name: "Ash",
+            mat_id: MAT_ASH,
+            phase: PHASE_SOLID,
+            temperature: 0.0,
+            color: glam::Vec4::new(0.4, 0.4, 0.4, 1.0),
         },
     ]
 }
@@ -507,6 +521,14 @@ impl ApplicationHandler for App {
                             winit::keyboard::KeyCode::Digit3 if self.palette.len() > 2 => {
                                 self.selected_material = 2;
                                 tracing::info!("Selected: {}", self.palette[2].name);
+                            }
+                            winit::keyboard::KeyCode::Digit4 if self.palette.len() > 3 => {
+                                self.selected_material = 3;
+                                tracing::info!("Selected: {}", self.palette[3].name);
+                            }
+                            winit::keyboard::KeyCode::Digit5 if self.palette.len() > 4 => {
+                                self.selected_material = 4;
+                                tracing::info!("Selected: {}", self.palette[4].name);
                             }
                             _ => {}
                         }

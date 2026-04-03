@@ -64,3 +64,10 @@ pub const DT: f32 = 0.001;
 
 /// Gravity acceleration (m/s^2, negative Y).
 pub const GRAVITY: f32 = -9.81;
+
+/// Material ID constants (synced with shared::material).
+pub const MAT_WOOD: u32 = 3;
+pub const MAT_ASH: u32 = 4;
+
+/// Number of materials in the table (synced with shared::material).
+pub const MATERIAL_COUNT: usize = 5;

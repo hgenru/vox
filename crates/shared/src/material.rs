@@ -25,6 +25,8 @@ pub struct MaterialParams {
 pub const MAT_STONE: u32 = 0;
 pub const MAT_WATER: u32 = 1;
 pub const MAT_LAVA: u32 = 2;
+pub const MAT_WOOD: u32 = 3;
+pub const MAT_ASH: u32 = 4;
 
 /// Phase constants.
 pub const PHASE_SOLID: u32 = 0;
@@ -32,7 +34,7 @@ pub const PHASE_LIQUID: u32 = 1;
 pub const PHASE_GAS: u32 = 2;
 
 /// Number of materials in the table.
-pub const MATERIAL_COUNT: usize = 3;
+pub const MATERIAL_COUNT: usize = 5;
 
 /// Build the default material parameter table.
 ///
@@ -106,6 +108,50 @@ pub fn default_material_table() -> [MaterialParams; MATERIAL_COUNT] {
             ),
             color: Vec4::new(1.0, 0.3, 0.0, 0.0), // orange-red
         },
+        // Wood (solid, flammable)
+        MaterialParams {
+            elastic: Vec4::new(
+                1e5,   // youngs_modulus
+                0.3,   // poissons_ratio
+                5e3,   // yield_stress
+                0.0,   // viscosity (solid — not used)
+            ),
+            thermal: Vec4::new(
+                f32::MAX, // melting_point (wood doesn't melt)
+                f32::MAX, // boiling_point
+                0.2,      // heat_conductivity
+                2000.0,   // specific_heat
+            ),
+            visual: Vec4::new(
+                600.0, // density (kg/m³)
+                300.0, // emissive_temp (glows when burning)
+                1.0,   // opacity
+                0.0,   // pad
+            ),
+            color: Vec4::new(0.55, 0.35, 0.15, 0.0), // brown
+        },
+        // Ash (solid, crumbly)
+        MaterialParams {
+            elastic: Vec4::new(
+                1e3,   // youngs_modulus (weak)
+                0.2,   // poissons_ratio
+                100.0, // yield_stress (very crumbly)
+                0.0,   // viscosity (solid — not used)
+            ),
+            thermal: Vec4::new(
+                f32::MAX, // melting_point
+                f32::MAX, // boiling_point
+                0.1,      // heat_conductivity
+                800.0,    // specific_heat
+            ),
+            visual: Vec4::new(
+                200.0,    // density (lightweight)
+                f32::MAX, // emissive_temp (ash doesn't glow)
+                1.0,      // opacity
+                0.0,      // pad
+            ),
+            color: Vec4::new(0.4, 0.4, 0.4, 0.0), // gray
+        },
     ]
 }
 
@@ -130,15 +176,15 @@ mod tests {
     fn material_table_uniform_buffer_size() {
         let table = default_material_table();
         let total_bytes = size_of::<MaterialParams>() * table.len();
-        // 3 materials × 64 bytes = 192 bytes (fits in uniform buffer)
-        assert_eq!(total_bytes, 192);
+        // 5 materials × 64 bytes = 320 bytes (fits in uniform buffer)
+        assert_eq!(total_bytes, 320);
     }
 
     #[test]
     fn material_table_bytemuck_cast() {
         let table = default_material_table();
         let bytes: &[u8] = bytemuck::cast_slice(&table);
-        assert_eq!(bytes.len(), 192);
+        assert_eq!(bytes.len(), 320);
     }
 
     #[test]
@@ -159,5 +205,21 @@ mod tests {
         let table = default_material_table();
         assert!(table[MAT_LAVA as usize].elastic.w > 1.0); // very viscous
         assert!(table[MAT_LAVA as usize].visual.y < 1000.0); // emissive
+    }
+
+    #[test]
+    fn wood_is_material_three() {
+        let table = default_material_table();
+        assert!(table[MAT_WOOD as usize].elastic.x > 0.0); // has stiffness
+        assert_eq!(table[MAT_WOOD as usize].visual.y, 300.0); // emissive when burning
+        assert!((table[MAT_WOOD as usize].color.x - 0.55).abs() < 0.01); // brown
+    }
+
+    #[test]
+    fn ash_is_material_four() {
+        let table = default_material_table();
+        assert!(table[MAT_ASH as usize].elastic.z < 200.0); // crumbly
+        assert_eq!(table[MAT_ASH as usize].visual.x, 200.0); // lightweight
+        assert!((table[MAT_ASH as usize].color.x - 0.4).abs() < 0.01); // gray
     }
 }
