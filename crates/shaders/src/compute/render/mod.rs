@@ -113,6 +113,73 @@ fn shade_voxel(
     apply_emissive(lit_color, hit_material, hit_phase, temperature)
 }
 
+/// Compute the number of voxel steps to skip to exit the current brick along one axis.
+///
+/// Given the current voxel coordinate and step direction, returns the distance
+/// (in voxels) to the far edge of the 8-voxel brick boundary.
+fn brick_exit_steps(voxel_coord: i32, step: i32) -> i32 {
+    if step > 0 {
+        let next_boundary = ((voxel_coord >> 3) + 1) << 3;
+        next_boundary - voxel_coord
+    } else {
+        let brick_start = (voxel_coord >> 3) << 3;
+        voxel_coord - brick_start + 1
+    }
+}
+
+/// Check if a voxel is inside an empty brick and compute skip offsets.
+///
+/// Returns (delta_vx, delta_vy, delta_vz, delta_tx, delta_ty, delta_tz).
+/// All zeros if the brick is occupied (no skip). Otherwise, the deltas advance
+/// the ray past the empty brick along the axis with the nearest exit.
+fn check_brick_skip(
+    vx: i32,
+    vy: i32,
+    vz: i32,
+    step_x: i32,
+    step_y: i32,
+    step_z: i32,
+    t_max_x: f32,
+    t_max_y: f32,
+    t_max_z: f32,
+    t_delta_x: f32,
+    t_delta_y: f32,
+    t_delta_z: f32,
+    bricks_per_axis: u32,
+    brick_occupied: &[u32],
+) -> (i32, i32, i32, f32, f32, f32) {
+    let bx = (vx as u32) >> 3;
+    let by = (vy as u32) >> 3;
+    let bz = (vz as u32) >> 3;
+    let bpa = bricks_per_axis;
+
+    if bx >= bpa || by >= bpa || bz >= bpa {
+        return (0, 0, 0, 0.0, 0.0, 0.0);
+    }
+
+    let brick_idx = (bz * bpa * bpa + by * bpa + bx) as usize;
+    if brick_occupied[brick_idx] != 0 {
+        return (0, 0, 0, 0.0, 0.0, 0.0);
+    }
+
+    // Brick is empty: advance ray to exit the brick.
+    let sx = brick_exit_steps(vx, step_x);
+    let sy = brick_exit_steps(vy, step_y);
+    let sz = brick_exit_steps(vz, step_z);
+
+    let t_exit_x = t_max_x + (sx - 1) as f32 * t_delta_x;
+    let t_exit_y = t_max_y + (sy - 1) as f32 * t_delta_y;
+    let t_exit_z = t_max_z + (sz - 1) as f32 * t_delta_z;
+
+    if t_exit_x <= t_exit_y && t_exit_x <= t_exit_z {
+        (sx * step_x, 0, 0, sx as f32 * t_delta_x, 0.0, 0.0)
+    } else if t_exit_y <= t_exit_z {
+        (0, sy * step_y, 0, 0.0, sy as f32 * t_delta_y, 0.0)
+    } else {
+        (0, 0, sz * step_z, 0.0, 0.0, sz as f32 * t_delta_z)
+    }
+}
+
 /// Perform DDA ray march through the voxel grid and write pixel color.
 ///
 /// This is the main per-pixel function, separated from the entry point
@@ -124,6 +191,7 @@ pub fn render_pixel(
     voxels: &[UVec4],
     output: &mut [u32],
     materials: &[MaterialParams],
+    brick_occupied: &[u32],
 ) {
     let width = push.width;
     let height = push.height;
@@ -263,9 +331,31 @@ pub fn render_pixel(
         Vec3::new(0.2, 0.4, 0.8)
     };
 
+    let bricks_per_axis = grid_size >> 3; // grid_size / 8
+
     while i < max_steps {
         // Check current voxel
         if vx >= 0 && vx < gs && vy >= 0 && vy < gs && vz >= 0 && vz < gs {
+            // Brick-level skip: if the entire 8x8x8 brick is empty, advance past it
+            let (skip_vx, skip_vy, skip_vz, skip_tx, skip_ty, skip_tz) = check_brick_skip(
+                vx, vy, vz,
+                step_x, step_y, step_z,
+                t_max_x, t_max_y, t_max_z,
+                t_delta_x, t_delta_y, t_delta_z,
+                bricks_per_axis,
+                brick_occupied,
+            );
+            if skip_vx != 0 || skip_vy != 0 || skip_vz != 0 {
+                vx += skip_vx;
+                vy += skip_vy;
+                vz += skip_vz;
+                t_max_x += skip_tx;
+                t_max_y += skip_ty;
+                t_max_z += skip_tz;
+                i += 1;
+                continue;
+            }
+
             let idx = (vz as u32 * grid_size * grid_size + vy as u32 * grid_size + vx as u32) as usize;
             let voxel = voxels[idx];
             if voxel.w > 0 {
@@ -348,6 +438,7 @@ pub fn render_pixel(
 /// Descriptor set 0, binding 0: storage buffer of `UVec4` (voxel grid, read).
 /// Descriptor set 0, binding 1: storage buffer of `u32` (pixel output, write).
 /// Descriptor set 0, binding 2: storage buffer of `MaterialParams` (material table, read).
+/// Descriptor set 0, binding 3: storage buffer of `u32` (brick_occupied map, read).
 /// Push constants: `RenderPushConstants`.
 #[spirv(compute(threads(8, 8, 1)))]
 pub fn render_voxels(
@@ -356,6 +447,7 @@ pub fn render_voxels(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] voxels: &[UVec4],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] output: &mut [u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] materials: &[MaterialParams],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] brick_occupied: &[u32],
 ) {
-    render_pixel(id.x, id.y, push, voxels, output, materials);
+    render_pixel(id.x, id.y, push, voxels, output, materials, brick_occupied);
 }
