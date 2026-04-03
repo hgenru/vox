@@ -191,7 +191,7 @@ fn create_island_particles() -> Vec<Particle> {
         }
     }
 
-    // 2. Ocean water — shoreline band only (1 PPC to keep count low)
+    // 2. Ocean water — shoreline band, 1 layer deep, 8 PPC for proper MPM flow
     let cx = gs as f32 * 0.5;
     let cz = gs as f32 * 0.5;
     let island_radius = gs as f32 * 0.375;
@@ -210,36 +210,35 @@ fn create_island_particles() -> Vec<Particle> {
             }
             let terrain_h = island_height(fx, fz);
             if terrain_h < water_level as f32 {
-                let water_start = terrain_h.ceil() as i32;
-                for y in water_start..water_level {
-                    // 1 particle per cell — sufficient at 256³ resolution
-                    particles.push(Particle::new(
-                        Vec3::new(fx, y as f32 + 0.5, fz),
-                        1.0, MAT_WATER, PHASE_LIQUID,
-                    ));
+                // Only spawn the top 1 layer of water (8 PPC for proper MPM fluid behavior)
+                let water_top = water_level;
+                let water_bottom = (water_top - 1).max(terrain_h.ceil() as i32);
+                for y in water_bottom..water_top {
+                    spawn_cell(&mut particles, fx - 0.5, y as f32, fz - 0.5, 0.125, MAT_WATER, PHASE_LIQUID);
                 }
             }
         }
     }
 
-    // 3. Lava pool at the volcano summit
+    // 3. Lava pool at the volcano summit — 8 PPC, max 2 layers for proper MPM flow
     let lava_min = (gs as f32 * 0.44) as u32;
     let lava_max = (gs as f32 * 0.56) as u32;
+    let max_lava_layers: i32 = 2;
     for x in lava_min..lava_max {
         for z in lava_min..lava_max {
             let fx = x as f32 + 0.5;
             let fz = z as f32 + 0.5;
             let terrain_h = island_height(fx, fz);
             let lava_top = (terrain_h + gs as f32 * 0.03).min((gs - margin) as f32) as i32;
-            let lava_bottom = terrain_h.ceil() as i32;
+            let lava_bottom = (lava_top - max_lava_layers).max(terrain_h.ceil() as i32);
             for y in lava_bottom..lava_top {
-                // 1 particle per cell to keep count manageable
-                let mut p = Particle::new(
-                    Vec3::new(fx, y as f32 + 0.5, fz),
-                    1.0, MAT_LAVA, PHASE_LIQUID,
-                );
+                spawn_cell(&mut particles, fx - 0.5, y as f32, fz - 0.5, 0.125, MAT_LAVA, PHASE_LIQUID);
+            }
+            // Set temperature on newly spawned lava particles
+            let lava_count = ((lava_top - lava_bottom).max(0) as usize) * 8;
+            let start = particles.len() - lava_count;
+            for p in &mut particles[start..] {
                 p.vel_temp = glam::Vec4::new(0.0, 0.0, 0.0, 2000.0);
-                particles.push(p);
             }
         }
     }
