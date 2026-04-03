@@ -4,8 +4,12 @@
 //!
 //! Creates a window, initializes Vulkan with surface support,
 //! sets up the renderer, and runs the main event loop.
-//! For the MVP, renders a proof-of-life cycling clear color while
-//! running the GPU MPM simulation each frame.
+//!
+//! Features:
+//! - Island scene with mountain, lake, and lava flow
+//! - FPS camera with walk/fly mode toggle (F key)
+//! - Material toolbar with number key selection (1-3)
+//! - Left click spawns selected material, right click removes
 //!
 //! Supports headless mode for automated visual testing:
 //! ```bash
@@ -17,13 +21,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use client::{Camera, Renderer, renderer::required_instance_extensions};
+use client::{PlayerController, Camera, Renderer, renderer::required_instance_extensions};
 use glam::Vec3;
 use gpu_core::VulkanContext;
-use server::GpuSimulation;
+use server::{GpuSimulation, ToolbarPushConstants, TOOLBAR_MAX_MATERIALS};
 use shared::{
-    MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_LIQUID, PHASE_SOLID, Particle, RENDER_HEIGHT,
-    RENDER_WIDTH,
+    GRID_SIZE, MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_LIQUID, PHASE_SOLID, Particle,
+    RENDER_HEIGHT, RENDER_WIDTH,
 };
 use winit::{
     application::ApplicationHandler,
@@ -39,8 +43,49 @@ const DEFAULT_SUBSTEPS: u32 = 4;
 /// Distance from camera eye at which particles are spawned.
 const SPAWN_DISTANCE: f32 = 8.0;
 
-/// Radius for particle removal (middle click).
+/// Radius for particle removal (right click).
 const REMOVE_RADIUS: f32 = 2.0;
+
+/// A spawnable material entry for the toolbar.
+struct MaterialSlot {
+    /// Display name.
+    name: &'static str,
+    /// Material ID (MAT_STONE, MAT_WATER, MAT_LAVA).
+    mat_id: u32,
+    /// Phase (PHASE_SOLID, PHASE_LIQUID).
+    phase: u32,
+    /// Initial temperature for spawned particles.
+    temperature: f32,
+    /// Display color (RGBA, 0..1).
+    color: glam::Vec4,
+}
+
+/// Material palette available in the toolbar.
+fn material_palette() -> Vec<MaterialSlot> {
+    vec![
+        MaterialSlot {
+            name: "Stone",
+            mat_id: MAT_STONE,
+            phase: PHASE_SOLID,
+            temperature: 0.0,
+            color: glam::Vec4::new(0.5, 0.5, 0.5, 1.0),
+        },
+        MaterialSlot {
+            name: "Water",
+            mat_id: MAT_WATER,
+            phase: PHASE_LIQUID,
+            temperature: 0.0,
+            color: glam::Vec4::new(0.2, 0.4, 0.9, 1.0),
+        },
+        MaterialSlot {
+            name: "Lava",
+            mat_id: MAT_LAVA,
+            phase: PHASE_LIQUID,
+            temperature: 2000.0,
+            color: glam::Vec4::new(1.0, 0.3, 0.0, 1.0),
+        },
+    ]
+}
 
 /// Command-line arguments for the app.
 struct Args {
@@ -82,12 +127,62 @@ fn parse_args() -> Args {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Island scene generation
+// ---------------------------------------------------------------------------
+
+/// Compute terrain height at a given (x, z) world position.
+///
+/// Returns the Y coordinate of the terrain surface. The island has:
+/// - Ocean floor at y=2
+/// - Gentle island slopes rising from the shore
+/// - Central volcano peak reaching ~y=19
+fn island_height(x: f32, z: f32) -> f32 {
+    let cx = 16.0;
+    let cz = 16.0;
+    let dx = x - cx;
+    let dz = z - cz;
+    let dist = (dx * dx + dz * dz).sqrt();
+
+    let base = 2.0; // ocean floor
+
+    // Island shape: smooth cosine falloff from center
+    let island_radius = 12.0;
+    if dist > island_radius {
+        return base;
+    }
+
+    let t = dist / island_radius;
+    // Gentle hill: rises ~6 units at center, smooth edges
+    let island_rise = (1.0 - t * t) * 6.0;
+
+    // Volcano peak: steep rise in center ~4 unit radius
+    let peak_radius = 4.0;
+    let peak_rise = if dist < peak_radius {
+        let pt = dist / peak_radius;
+        (1.0 - pt * pt) * 11.0
+    } else {
+        0.0
+    };
+
+    base + island_rise + peak_rise
+}
+
+/// Water level for the island scene.
+const WATER_LEVEL: f32 = 5.0;
+
 /// Spawn 8 particles (2x2x2 sub-grid) within a single cell.
 ///
 /// Distributes particles at quarter-cell offsets for smoother fluid behavior.
-/// This eliminates grid-seam artifacts caused by particles clustering at
-/// grid nodes when using only 1 particle per cell.
-fn spawn_cell(particles: &mut Vec<Particle>, x: f32, y: f32, z: f32, mass_per_particle: f32, mat: u32, phase: u32) {
+fn spawn_cell(
+    particles: &mut Vec<Particle>,
+    x: f32,
+    y: f32,
+    z: f32,
+    mass_per_particle: f32,
+    mat: u32,
+    phase: u32,
+) {
     for dx in 0..2u32 {
         for dy in 0..2u32 {
             for dz in 0..2u32 {
@@ -102,75 +197,89 @@ fn spawn_cell(particles: &mut Vec<Particle>, x: f32, y: f32, z: f32, mass_per_pa
     }
 }
 
-/// Create the initial set of particles for the MVP demo.
+/// Create the initial set of particles for the island demo scene.
 ///
-/// Scene: hollow ellipsoidal cave carved from a stone block,
-/// with a water lake at the bottom and a lava stream dripping
-/// from a ceiling crack. Demonstrates water-lava reaction
-/// (stone + steam), temperature, and phase transitions.
-///
-/// Stone uses 1 particle per cell (solid, pinned). Water and lava use
-/// 8 particles per cell (2x2x2 sub-grid) for smoother fluid behavior.
-fn create_initial_particles() -> Vec<Particle> {
+/// Scene: volcanic island surrounded by ocean. Stone terrain with a
+/// central peak, water ocean around the edges, and a lava pool at the
+/// volcano summit flowing down the slope.
+fn create_island_particles() -> Vec<Particle> {
     let mut particles = Vec::new();
-    let center = Vec3::new(16.0, 12.0, 16.0);
-    let radii = Vec3::new(10.0, 8.0, 10.0); // ellipsoid radii
 
-    // 1. Stone shell: fill solid block, skip interior of ellipsoid (= cave)
+    // 1. Terrain: stone particles following the heightmap
     for x in 2..30 {
         for z in 2..30 {
-            for y in 2..28 {
-                let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-                let d = (pos - center) / radii;
-                let dist_sq = d.x * d.x + d.y * d.y + d.z * d.z;
+            let fx = x as f32 + 0.5;
+            let fz = z as f32 + 0.5;
+            let height = island_height(fx, fz);
+            let max_y = height.ceil() as i32;
 
-                if dist_sq > 1.0 {
-                    // Outside ellipsoid = stone wall
-                    particles.push(Particle::new(pos, 1.0, MAT_STONE, PHASE_SOLID));
+            for y in 2..max_y.min(30) {
+                particles.push(Particle::new(
+                    Vec3::new(fx, y as f32 + 0.5, fz),
+                    1.0,
+                    MAT_STONE,
+                    PHASE_SOLID,
+                ));
+            }
+        }
+    }
+
+    // 2. Ocean water around the island (where terrain is below water level)
+    for x in 2..30 {
+        for z in 2..30 {
+            let fx = x as f32 + 0.5;
+            let fz = z as f32 + 0.5;
+            let terrain_h = island_height(fx, fz);
+
+            // Only place water where terrain is below water level
+            if terrain_h < WATER_LEVEL {
+                let water_start = terrain_h.ceil() as i32;
+                let water_end = WATER_LEVEL as i32;
+                for y in water_start..water_end {
+                    spawn_cell(
+                        &mut particles,
+                        x as f32,
+                        y as f32,
+                        z as f32,
+                        0.125,
+                        MAT_WATER,
+                        PHASE_LIQUID,
+                    );
                 }
             }
         }
     }
 
-    // 2. Water lake at bottom of cave (8 PPC for smooth fluid)
-    for x in 7..25 {
-        for z in 7..25 {
-            for y in 4..7 {
-                let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-                let d = (pos - center) / radii;
-                let dist_sq = d.x * d.x + d.y * d.y + d.z * d.z;
-
-                if dist_sq < 1.0 {
-                    // Inside cave = water, 8 particles per cell
-                    spawn_cell(&mut particles, x as f32, y as f32, z as f32, 0.125, MAT_WATER, PHASE_LIQUID);
-                }
-            }
-        }
-    }
-
-    // 3. Lava stream from ceiling crack (8 PPC for smooth fluid)
+    // 3. Lava pool at the volcano summit (small pool at top, flows down one side)
     for x in 14..18 {
         for z in 14..18 {
-            for y in 18..26 {
-                let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-                let d = (pos - center) / radii;
-                let dist_sq = d.x * d.x + d.y * d.y + d.z * d.z;
+            let fx = x as f32 + 0.5;
+            let fz = z as f32 + 0.5;
+            let terrain_h = island_height(fx, fz);
+            let lava_top = (terrain_h + 2.0).min(28.0) as i32;
+            let lava_bottom = terrain_h.ceil() as i32;
 
-                // Only place lava where there's no stone (inside cave or near surface)
-                if dist_sq < 1.2 {
-                    let start = particles.len();
-                    spawn_cell(&mut particles, x as f32, y as f32, z as f32, 0.125, MAT_LAVA, PHASE_LIQUID);
-                    // Set lava temperature to 2000K (above melting point, stays liquid and glows)
-                    for p in &mut particles[start..] {
-                        p.vel_temp = glam::Vec4::new(0.0, 0.0, 0.0, 2000.0);
-                    }
+            for y in lava_bottom..lava_top {
+                let start = particles.len();
+                spawn_cell(
+                    &mut particles,
+                    x as f32,
+                    y as f32,
+                    z as f32,
+                    0.125,
+                    MAT_LAVA,
+                    PHASE_LIQUID,
+                );
+                // Set lava temperature
+                for p in &mut particles[start..] {
+                    p.vel_temp = glam::Vec4::new(0.0, 0.0, 0.0, 2000.0);
                 }
             }
         }
     }
 
     tracing::info!(
-        "Scene: {} stone + {} water + {} lava = {} total",
+        "Island scene: {} stone + {} water + {} lava = {} total",
         particles
             .iter()
             .filter(|p| p.material_id() == MAT_STONE)
@@ -189,6 +298,25 @@ fn create_initial_particles() -> Vec<Particle> {
     particles
 }
 
+/// Generate the CPU-side heightmap for player ground collision.
+///
+/// Returns a flat `Vec<f32>` of size `GRID_SIZE * GRID_SIZE`, indexed as
+/// `heightmap[z * GRID_SIZE + x]`.
+fn generate_heightmap() -> Vec<f32> {
+    let size = GRID_SIZE;
+    let mut heightmap = vec![0.0f32; (size * size) as usize];
+    for z in 0..size {
+        for x in 0..size {
+            heightmap[(z * size + x) as usize] = island_height(x as f32 + 0.5, z as f32 + 0.5);
+        }
+    }
+    heightmap
+}
+
+// ---------------------------------------------------------------------------
+// Headless mode
+// ---------------------------------------------------------------------------
+
 /// Run the engine in headless mode: simulate, render, and save a PNG.
 fn run_headless(args: &Args) -> Result<()> {
     tracing::info!(
@@ -201,11 +329,11 @@ fn run_headless(args: &Args) -> Result<()> {
     let ctx = VulkanContext::new()?;
     let mut sim = GpuSimulation::new(&ctx)?;
 
-    let particles = create_initial_particles();
+    let particles = create_island_particles();
     tracing::info!("Created {} initial particles", particles.len());
     sim.init_particles(&ctx, &particles)?;
 
-    // Run simulation frames (multiple substeps per frame for faster sim)
+    // Run simulation frames
     for i in 0..args.frames {
         ctx.execute_one_shot(|cmd| {
             for _ in 0..args.substeps {
@@ -217,25 +345,24 @@ fn run_headless(args: &Args) -> Result<()> {
         }
     }
 
-    // Render final frame with camera inside the cave
-    let eye = [16.0_f32, 10.0, 26.0];
+    // Render final frame: camera on the shore looking at the volcano
+    let eye = [24.0_f32, 12.0, 24.0];
     let target = [16.0_f32, 8.0, 16.0];
     ctx.execute_one_shot(|cmd| {
         sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye, target);
+        sim.finalize_render(cmd);
     })?;
 
-    // Readback render output buffer
+    // Readback and save
     let pixel_count = (RENDER_WIDTH as usize) * (RENDER_HEIGHT as usize) * 4;
     let pixels: Vec<u8> =
         gpu_core::buffer::readback::<u8>(&ctx, sim.render_output_gpu_buffer(), pixel_count)?;
 
-    // Convert BGRA to RGBA for PNG
     let mut rgba = pixels;
     for pixel in rgba.chunks_exact_mut(4) {
-        pixel.swap(0, 2); // swap B and R
+        pixel.swap(0, 2); // BGRA → RGBA
     }
 
-    // Save PNG
     let output_path = args.output.as_deref().unwrap_or("screenshot.png");
     let img = image::RgbaImage::from_raw(RENDER_WIDTH, RENDER_HEIGHT, rgba)
         .ok_or_else(|| anyhow::anyhow!("Failed to create image from pixel data"))?;
@@ -247,42 +374,47 @@ fn run_headless(args: &Args) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Windowed application
+// ---------------------------------------------------------------------------
+
 /// Application state for the winit event loop.
 struct App {
-    /// The winit window (created on first `resumed` call).
     window: Option<Arc<Window>>,
-    /// Vulkan context (created alongside the window).
     ctx: Option<VulkanContext>,
-    /// Renderer (surface + swapchain + frame management).
     renderer: Option<Renderer>,
-    /// GPU simulation (created on resume, after particles are uploaded).
     sim: Option<GpuSimulation>,
-    /// Initial particles (stored until GPU simulation is ready).
     particles: Vec<Particle>,
-    /// FPS camera for WASD + mouse look.
-    camera: Camera,
-    /// Set of currently pressed physical keys for continuous movement.
+    player: PlayerController,
     pressed_keys: HashSet<PhysicalKey>,
-    /// Whether the mouse cursor is captured for camera look.
     cursor_captured: bool,
-    /// Last known cursor position in pixels (for spawn ray calculation).
-    cursor_position: (f32, f32),
-    /// Timestamp of the last frame for delta-time calculation.
     last_frame_time: Instant,
-    /// Number of simulation substeps per frame.
     substeps: u32,
+    /// Currently selected material slot index.
+    selected_material: usize,
+    /// Material palette for the toolbar.
+    palette: Vec<MaterialSlot>,
 }
 
 impl App {
     fn new(substeps: u32) -> Self {
-        let particles = create_initial_particles();
+        let particles = create_island_particles();
         tracing::info!("Created {} initial particles", particles.len());
 
-        // Camera inside the cave, looking toward the center/water lake
+        // Camera on the shore, looking at the volcano
         let camera = Camera::look_at(
-            Vec3::new(16.0, 10.0, 26.0),  // inside cave, near wall
-            Vec3::new(16.0, 8.0, 16.0),   // looking at center/water
+            Vec3::new(24.0, 12.0, 24.0), // shore position
+            Vec3::new(16.0, 10.0, 16.0),  // looking at volcano
         );
+        let mut player = PlayerController::new(camera);
+
+        // Set up heightmap for ground collision
+        let heightmap = generate_heightmap();
+        if let Err(e) = player.set_heightmap(heightmap, GRID_SIZE) {
+            tracing::warn!("Failed to set heightmap: {}", e);
+        }
+
+        let palette = material_palette();
 
         Self {
             window: None,
@@ -290,12 +422,13 @@ impl App {
             renderer: None,
             sim: None,
             particles,
-            camera,
+            player,
             pressed_keys: HashSet::new(),
             cursor_captured: false,
-            cursor_position: (0.0, 0.0),
             last_frame_time: Instant::now(),
             substeps,
+            selected_material: 0,
+            palette,
         }
     }
 
@@ -318,42 +451,46 @@ impl App {
     }
 
     /// Spawn a small cube of particles at the camera's aim point.
-    ///
-    /// Creates a 2x2x2 block of particles at `camera.eye() + forward * SPAWN_DISTANCE`.
-    /// `mat` and `phase` define the material type. `temperature` sets initial temperature.
-    fn spawn_particles(&mut self, mat: u32, phase: u32, temperature: f32) {
+    fn spawn_particles(&mut self) {
         let (ctx, sim) = match (self.ctx.as_ref(), self.sim.as_mut()) {
             (Some(c), Some(s)) => (c, s),
             _ => return,
         };
 
-        let center = self.camera.eye() + self.camera.forward() * SPAWN_DISTANCE;
+        let slot = &self.palette[self.selected_material];
+        let center = self.player.camera.eye() + self.player.camera.forward() * SPAWN_DISTANCE;
         let mut new_particles = Vec::new();
-        spawn_cell(&mut new_particles, center.x - 0.5, center.y - 0.5, center.z - 0.5, 0.125, mat, phase);
+        spawn_cell(
+            &mut new_particles,
+            center.x - 0.5,
+            center.y - 0.5,
+            center.z - 0.5,
+            0.125,
+            slot.mat_id,
+            slot.phase,
+        );
 
-        // Set temperature on all spawned particles
-        if temperature != 0.0 {
+        if slot.temperature != 0.0 {
             for p in &mut new_particles {
-                p.vel_temp = glam::Vec4::new(0.0, 0.0, 0.0, temperature);
+                p.vel_temp = glam::Vec4::new(0.0, 0.0, 0.0, slot.temperature);
             }
         }
 
         if let Err(e) = sim.add_particles(ctx, &new_particles) {
             tracing::warn!("Failed to spawn particles: {}", e);
+        } else {
+            tracing::debug!("Spawned {} at aim point", slot.name);
         }
     }
 
-    /// Remove particles near the camera's aim point within [`REMOVE_RADIUS`].
-    ///
-    /// Reads back all particles, filters out those within the radius of the
-    /// aim point, and re-uploads. Expensive but acceptable for MVP.
+    /// Remove particles near the camera's aim point.
     fn remove_particles(&mut self) {
         let (ctx, sim) = match (self.ctx.as_ref(), self.sim.as_mut()) {
             (Some(c), Some(s)) => (c, s),
             _ => return,
         };
 
-        let center = self.camera.eye() + self.camera.forward() * SPAWN_DISTANCE;
+        let center = self.player.camera.eye() + self.player.camera.forward() * SPAWN_DISTANCE;
         let radius_sq = REMOVE_RADIUS * REMOVE_RADIUS;
 
         match sim.readback_particles(ctx) {
@@ -377,26 +514,43 @@ impl App {
         }
     }
 
+    /// Build toolbar push constants from current state.
+    fn toolbar_push_constants(&self) -> ToolbarPushConstants {
+        let mut colors = [glam::Vec4::ZERO; TOOLBAR_MAX_MATERIALS];
+        for (i, slot) in self.palette.iter().enumerate() {
+            if i < TOOLBAR_MAX_MATERIALS {
+                colors[i] = slot.color;
+            }
+        }
+        ToolbarPushConstants {
+            screen_width: RENDER_WIDTH,
+            screen_height: RENDER_HEIGHT,
+            selected_index: self.selected_material as u32,
+            material_count: self.palette.len().min(TOOLBAR_MAX_MATERIALS) as u32,
+            colors,
+        }
+    }
+
     /// Process continuous key movement based on currently pressed keys.
     fn update_movement(&mut self, dt: f32) {
         let keys: Vec<PhysicalKey> = self.pressed_keys.iter().copied().collect();
         for key in keys {
             if let PhysicalKey::Code(code) = key {
-                self.camera.process_keyboard(code, dt);
+                self.player.process_keyboard(code, dt);
             }
         }
+        self.player.update(dt);
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // Only create the window once
         if self.window.is_some() {
             return;
         }
 
         let attrs = WindowAttributes::default()
-            .with_title("VOX Engine")
+            .with_title("VOX Engine — Island Demo")
             .with_inner_size(winit::dpi::PhysicalSize::new(RENDER_WIDTH, RENDER_HEIGHT));
 
         let window = match event_loop.create_window(attrs) {
@@ -414,11 +568,9 @@ impl ApplicationHandler for App {
             window.inner_size().height
         );
 
-        // Update camera aspect from actual window size
         let size = window.inner_size();
-        self.camera.update_aspect(size.width, size.height);
+        self.player.camera.update_aspect(size.width, size.height);
 
-        // Create Vulkan context with surface extensions
         let ctx =
             match VulkanContext::new_with_instance_extensions(required_instance_extensions()) {
                 Ok(c) => c,
@@ -429,7 +581,6 @@ impl ApplicationHandler for App {
                 }
             };
 
-        // Create renderer (surface + swapchain)
         let renderer = match Renderer::new(&ctx, &window) {
             Ok(r) => r,
             Err(e) => {
@@ -439,7 +590,6 @@ impl ApplicationHandler for App {
             }
         };
 
-        // Create GPU simulation and upload initial particles
         let mut sim = match GpuSimulation::new(&ctx) {
             Ok(s) => s,
             Err(e) => {
@@ -490,7 +640,7 @@ impl ApplicationHandler for App {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.notify_resized(new_size.width, new_size.height);
                 }
-                self.camera.update_aspect(new_size.width, new_size.height);
+                self.player.camera.update_aspect(new_size.width, new_size.height);
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
@@ -503,18 +653,40 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                // Escape releases cursor
                 if event.state == ElementState::Pressed {
-                    if let PhysicalKey::Code(winit::keyboard::KeyCode::Escape) =
-                        event.physical_key
-                    {
-                        self.release_cursor();
+                    if let PhysicalKey::Code(code) = event.physical_key {
+                        match code {
+                            // Escape releases cursor
+                            winit::keyboard::KeyCode::Escape => {
+                                self.release_cursor();
+                            }
+                            // F toggles fly/walk mode
+                            winit::keyboard::KeyCode::KeyF => {
+                                self.player.toggle_fly_mode();
+                            }
+                            // Number keys select material
+                            winit::keyboard::KeyCode::Digit1 => {
+                                if !self.palette.is_empty() {
+                                    self.selected_material = 0;
+                                    tracing::info!("Selected: {}", self.palette[0].name);
+                                }
+                            }
+                            winit::keyboard::KeyCode::Digit2 => {
+                                if self.palette.len() > 1 {
+                                    self.selected_material = 1;
+                                    tracing::info!("Selected: {}", self.palette[1].name);
+                                }
+                            }
+                            winit::keyboard::KeyCode::Digit3 => {
+                                if self.palette.len() > 2 {
+                                    self.selected_material = 2;
+                                    tracing::info!("Selected: {}", self.palette[2].name);
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
-            }
-
-            WindowEvent::CursorMoved { position, .. } => {
-                self.cursor_position = (position.x as f32, position.y as f32);
             }
 
             WindowEvent::MouseInput {
@@ -523,18 +695,13 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 if !self.cursor_captured {
-                    // First click captures the cursor
                     self.capture_cursor();
                 } else {
-                    // While captured, clicks spawn or remove material
                     match button {
                         MouseButton::Left => {
-                            self.spawn_particles(MAT_WATER, PHASE_LIQUID, 0.0);
+                            self.spawn_particles();
                         }
                         MouseButton::Right => {
-                            self.spawn_particles(MAT_LAVA, PHASE_LIQUID, 2000.0);
-                        }
-                        MouseButton::Middle => {
                             self.remove_particles();
                         }
                         _ => {}
@@ -542,22 +709,40 @@ impl ApplicationHandler for App {
                 }
             }
 
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.cursor_captured && !self.palette.is_empty() {
+                    let scroll = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 120.0,
+                    };
+                    let len = self.palette.len();
+                    if scroll > 0.0 {
+                        self.selected_material = (self.selected_material + len - 1) % len;
+                    } else if scroll < 0.0 {
+                        self.selected_material = (self.selected_material + 1) % len;
+                    }
+                    tracing::info!(
+                        "Selected: {}",
+                        self.palette[self.selected_material].name
+                    );
+                }
+            }
+
             WindowEvent::RedrawRequested => {
-                // Calculate delta time
                 let now = Instant::now();
                 let dt = now.duration_since(self.last_frame_time).as_secs_f32();
                 self.last_frame_time = now;
 
-                // Process continuous movement from held keys
                 self.update_movement(dt);
 
                 if let (Some(renderer), Some(ctx), Some(sim)) =
                     (self.renderer.as_mut(), self.ctx.as_ref(), self.sim.as_ref())
                 {
-                    // Run simulation substeps + render to buffer
                     let substeps = self.substeps;
-                    let eye = self.camera.eye();
-                    let target = self.camera.target();
+                    let eye = self.player.camera.eye();
+                    let target = self.player.camera.target();
+                    let toolbar_pc = self.toolbar_push_constants();
+
                     if let Err(e) = ctx.execute_one_shot(|cmd| {
                         for _ in 0..substeps {
                             sim.step(cmd);
@@ -569,11 +754,12 @@ impl ApplicationHandler for App {
                             [eye.x, eye.y, eye.z],
                             [target.x, target.y, target.z],
                         );
+                        sim.render_toolbar(cmd, &toolbar_pc);
+                        sim.finalize_render(cmd);
                     }) {
                         tracing::error!("Simulation/render error: {}", e);
                     }
 
-                    // Copy render output buffer to swapchain and present
                     match renderer.draw_frame_with_buffer(
                         ctx,
                         sim.render_output_buffer(),
@@ -600,7 +786,7 @@ impl ApplicationHandler for App {
     ) {
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
             if self.cursor_captured {
-                self.camera.process_mouse(dx as f32, dy as f32);
+                self.player.process_mouse(dx as f32, dy as f32);
             }
         }
     }
@@ -613,7 +799,6 @@ impl ApplicationHandler for App {
 }
 
 fn main() -> Result<()> {
-    // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

@@ -4,7 +4,7 @@
 //!
 //! Owns [`GpuSimulation`], which manages GPU buffers, compute pipelines,
 //! and the dispatch chain for the MPM simulation:
-//! `clear_grid -> P2G -> grid_update -> G2P -> clear_voxels -> voxelize -> react`.
+//! `clear_grid -> P2G -> grid_update -> G2P -> (clear_voxels -> voxelize)`.
 //!
 //! All shaders are compiled to a single SPIR-V module at build time via
 //! `spirv-builder` in `build.rs`.
@@ -85,20 +85,6 @@ pub struct VoxelizePushConstants {
     pub _pad1: u32,
 }
 
-/// Push constants for the react shader.
-#[repr(C)]
-#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
-pub struct ReactPushConstants {
-    /// Grid dimension (cells per axis).
-    pub grid_size: u32,
-    /// Total number of active particles.
-    pub num_particles: u32,
-    /// Padding.
-    pub _pad0: u32,
-    /// Padding.
-    pub _pad1: u32,
-}
-
 /// Push constants for the render shader.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
@@ -115,6 +101,42 @@ pub struct RenderPushConstants {
     pub eye: glam::Vec4,
     /// Camera target position (xyz) + padding (w).
     pub target: glam::Vec4,
+}
+
+/// Push constants for the react shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct ReactPushConstants {
+    /// Grid dimension (cells per axis).
+    pub grid_size: u32,
+    /// Total number of active particles.
+    pub num_particles: u32,
+    /// Padding.
+    pub _pad0: u32,
+    /// Padding.
+    pub _pad1: u32,
+}
+
+/// Maximum number of material slots in the toolbar.
+pub const TOOLBAR_MAX_MATERIALS: usize = 8;
+
+/// Push constants for the toolbar overlay shader.
+///
+/// Must match `ToolbarParams` in `shaders/src/compute/toolbar_overlay.rs`.
+/// Total size: 16 bytes (header) + 128 bytes (8 x Vec4 colors) = 144 bytes.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct ToolbarPushConstants {
+    /// Render target width in pixels.
+    pub screen_width: u32,
+    /// Render target height in pixels.
+    pub screen_height: u32,
+    /// Index of the currently selected material slot (0-based).
+    pub selected_index: u32,
+    /// Number of material slots to display.
+    pub material_count: u32,
+    /// RGBA colors for each material slot (up to 8).
+    pub colors: [glam::Vec4; TOOLBAR_MAX_MATERIALS],
 }
 
 // ---------------------------------------------------------------------------
@@ -170,8 +192,9 @@ pub struct GpuSimulation {
     g2p_pass: ComputePass,
     clear_voxels_pass: ComputePass,
     voxelize_pass: ComputePass,
-    react_pass: ComputePass,
     render_pass: ComputePass,
+    toolbar_overlay_pass: ComputePass,
+    react_pass: ComputePass,
 
     // Shader module (kept alive for pipeline lifetime)
     shader_module: vk::ShaderModule,
@@ -242,13 +265,13 @@ impl GpuSimulation {
         )?;
 
         // -- Descriptor pool --
-        // 8 passes, max 2 bindings each = up to 16 storage buffer descriptors
+        // 9 passes, max 2 bindings each = up to 18 storage buffer descriptors
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 16,
+            descriptor_count: 18,
         }];
         let descriptor_pool =
-            pipeline::create_descriptor_pool(ctx, &pool_sizes, 8, "sim-descriptor-pool")?;
+            pipeline::create_descriptor_pool(ctx, &pool_sizes, 9, "sim-descriptor-pool")?;
 
         // -- Create each compute pass --
         // Entry point names are fully qualified module paths in rust-gpu SPIR-V.
@@ -312,16 +335,6 @@ impl GpuSimulation {
             "voxelize",
         )?;
 
-        let react_pass = Self::create_pass(
-            ctx,
-            shader_module,
-            c"compute::react::react",
-            &[&particle_buffer, &voxel_buffer],
-            mem::size_of::<ReactPushConstants>() as u32,
-            descriptor_pool,
-            "react",
-        )?;
-
         let render_pass = Self::create_pass(
             ctx,
             shader_module,
@@ -330,6 +343,26 @@ impl GpuSimulation {
             mem::size_of::<RenderPushConstants>() as u32,
             descriptor_pool,
             "render",
+        )?;
+
+        let toolbar_overlay_pass = Self::create_pass(
+            ctx,
+            shader_module,
+            c"compute::toolbar_overlay::toolbar_overlay",
+            &[&render_output_buffer],
+            mem::size_of::<ToolbarPushConstants>() as u32,
+            descriptor_pool,
+            "toolbar-overlay",
+        )?;
+
+        let react_pass = Self::create_pass(
+            ctx,
+            shader_module,
+            c"compute::react::react",
+            &[&particle_buffer, &voxel_buffer],
+            mem::size_of::<ReactPushConstants>() as u32,
+            descriptor_pool,
+            "react",
         )?;
 
         tracing::info!("GpuSimulation created successfully");
@@ -345,8 +378,9 @@ impl GpuSimulation {
             g2p_pass,
             clear_voxels_pass,
             voxelize_pass,
-            react_pass,
             render_pass,
+            toolbar_overlay_pass,
+            react_pass,
             shader_module,
             descriptor_pool,
             num_particles: 0,
@@ -371,7 +405,7 @@ impl GpuSimulation {
     ///
     /// The command buffer must already be in the recording state.
     /// The dispatch chain is:
-    /// `clear_grid -> P2G -> grid_update -> G2P -> clear_voxels -> voxelize -> react`.
+    /// `clear_grid -> P2G -> grid_update -> G2P -> clear_voxels -> voxelize`.
     ///
     /// Memory barriers are inserted between each dispatch to ensure
     /// correct ordering of shader reads and writes.
@@ -498,7 +532,6 @@ impl GpuSimulation {
             return Err(ServerError::TooManyParticles(new_total));
         }
 
-        // Read back existing particles
         let mut all_particles = self.readback_particles(ctx)?;
         all_particles.extend_from_slice(new_particles);
 
@@ -593,8 +626,34 @@ impl GpuSimulation {
             1,
             bytemuck::bytes_of(&push),
         );
+    }
 
-        // Barrier: ensure render writes are complete before buffer-to-image copy
+    /// Record a toolbar overlay dispatch into the given command buffer.
+    ///
+    /// Draws a material selection toolbar on top of the render output buffer.
+    /// Must be called after [`render`]. The command buffer must be in recording state.
+    pub fn render_toolbar(&self, cmd: vk::CommandBuffer, push: &ToolbarPushConstants) {
+        // Barrier: ensure render writes are visible before toolbar reads/writes
+        Self::barrier(cmd, &self.device);
+
+        let wg_x = (push.screen_width + 7) / 8;
+        let wg_y = (push.screen_height + 7) / 8;
+
+        self.dispatch(
+            cmd,
+            &self.toolbar_overlay_pass,
+            wg_x,
+            wg_y,
+            1,
+            bytemuck::bytes_of(push),
+        );
+    }
+
+    /// Insert a final barrier to ensure all render output writes are complete
+    /// before the buffer is copied to the swapchain.
+    ///
+    /// Must be called after [`render`] and [`render_toolbar`] (if used).
+    pub fn finalize_render(&self, cmd: vk::CommandBuffer) {
         let memory_barrier = vk::MemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::SHADER_WRITE)
             .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
@@ -751,8 +810,9 @@ impl GpuSimulation {
             &self.g2p_pass,
             &self.clear_voxels_pass,
             &self.voxelize_pass,
-            &self.react_pass,
             &self.render_pass,
+            &self.toolbar_overlay_pass,
+            &self.react_pass,
         ];
         for pass in passes {
             pipeline::destroy_pipeline(ctx, pass.pipeline);
@@ -826,6 +886,8 @@ mod tests {
         assert_eq!(mem::size_of::<ReactPushConstants>(), 16);
         // RenderPushConstants: 4 u32s (16 bytes) + 2 Vec4s (32 bytes) = 48 bytes
         assert_eq!(mem::size_of::<RenderPushConstants>(), 48);
+        // ToolbarPushConstants: 4 u32s (16 bytes) + 8 Vec4s (128 bytes) = 144 bytes
+        assert_eq!(mem::size_of::<ToolbarPushConstants>(), 144);
     }
 
     #[test]
