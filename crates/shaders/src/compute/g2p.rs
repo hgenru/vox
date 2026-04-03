@@ -159,6 +159,12 @@ pub fn gather_particle(
     c_col1 *= apic_scale;
     c_col2 *= apic_scale;
 
+    // Thermal diffusion: blend grid temp with particle temp for gradual transfer.
+    // Full grid temp = instant equalization (too fast). Blend ratio controls diffusion speed.
+    let thermal_blend = 0.001_f32; // 0.1% from grid per step = very slow heating/cooling
+    let old_temp = particle.vel_temp.w;
+    new_temp = old_temp + thermal_blend * (new_temp - old_temp);
+
     // PIC/FLIP blend
     // True FLIP requires old grid velocities which we don't store.
     // Instead, use a weighted blend of PIC (grid velocity) and the particle's
@@ -303,9 +309,21 @@ pub fn apply_phase_transitions(particle: &mut Particle) {
         6 => {
             if phase == 0 && temp > 150.0 {
                 new_phase = 2; // solid -> gas (explosion)
-                // Boost temp for massive EOS pressure
+                // Explosion: massive outward velocity from particle position.
+                // Hash position to get pseudo-random direction for each particle.
+                let px = particle.pos_mass.x;
+                let py = particle.pos_mass.y;
+                let pz = particle.pos_mass.z;
+                // Simple hash for direction variation
+                let hx = ((px * 73.17) % 2.0) - 1.0;
+                let hy = ((py * 127.31) % 2.0) - 0.5; // bias upward
+                let hz = ((pz * 91.53) % 2.0) - 1.0;
+                let explosion_speed = 500.0_f32;
                 particle.vel_temp = Vec4::new(
-                    particle.vel_temp.x, particle.vel_temp.y, particle.vel_temp.z, 3000.0
+                    hx * explosion_speed,
+                    hy.abs() * explosion_speed + 200.0, // always some upward
+                    hz * explosion_speed,
+                    3000.0,
                 );
                 // Reset F (trap #8)
                 particle.f_col0 = Vec4::new(1.0, 0.0, 0.0, 0.0);

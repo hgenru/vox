@@ -71,7 +71,15 @@ pub fn compute_stress(particle: &Particle, materials: &[MaterialParams]) -> [Vec
             (20.0_f32, mat.elastic.w)
         };
 
-        let pressure = bulk * (j - 1.0);
+        // Temperature-dependent pressure for gas (ideal gas law approximation).
+        // Hot gas expands: pressure increases with temperature.
+        let temp = particle.vel_temp.w;
+        let thermal_pressure = if phase == 2 && temp > 100.0 {
+            temp * 1.0  // hot gas creates strong expansion pressure
+        } else {
+            0.0
+        };
+        let pressure = bulk * (j - 1.0) + thermal_pressure;
 
         // Viscous stress: approximated from APIC C matrix (velocity gradient).
         // D = 0.5 * (C + C^T), then deviatoric part opposes shearing flow.
