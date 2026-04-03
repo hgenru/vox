@@ -20,7 +20,7 @@ use gpu_core::{
 };
 use shared::{
     GRID_CELL_COUNT, GRID_SIZE, GridCell, MAX_PARTICLES, Particle, RENDER_HEIGHT, RENDER_WIDTH,
-    WorldConfig,
+    material::{self, MATERIAL_COUNT, MaterialParams},
 };
 
 /// Compiled SPIR-V shader module bytes, included at compile time.
@@ -199,10 +199,7 @@ pub struct GpuSimulation {
     grid_buffer: GpuBuffer,
     voxel_buffer: GpuBuffer,
     render_output_buffer: GpuBuffer,
-    world_config_buffer: GpuBuffer,
-
-    // Cached world configuration
-    world_config: WorldConfig,
+    material_buffer: GpuBuffer,
 
     // Compute passes
     clear_grid_pass: ComputePass,
@@ -284,27 +281,30 @@ impl GpuSimulation {
             "render-output-buffer",
         )?;
 
-        // -- World config uniform buffer --
-        let world_config = WorldConfig::default();
-        let world_config_buf_size = mem::size_of::<WorldConfig>() as vk::DeviceSize;
-        let world_config_buffer = buffer::create_device_local_buffer(
+        // Material params buffer: MATERIAL_COUNT * 64 bytes
+        let material_buf_size =
+            (MATERIAL_COUNT * mem::size_of::<MaterialParams>()) as vk::DeviceSize;
+        let material_buffer = buffer::create_device_local_buffer(
             ctx,
-            world_config_buf_size,
-            vk::BufferUsageFlags::UNIFORM_BUFFER,
-            "world-config-buffer",
+            material_buf_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            "material-buffer",
         )?;
-        buffer::upload(
-            ctx,
-            core::slice::from_ref(&world_config),
-            &world_config_buffer,
-        )?;
-        tracing::info!("Uploaded default WorldConfig to GPU");
+
+        // Upload default material table
+        let material_table = material::default_material_table();
+        buffer::upload(ctx, &material_table, &material_buffer)?;
+        tracing::info!(
+            "Uploaded {} materials ({} bytes) to GPU",
+            MATERIAL_COUNT,
+            material_buf_size
+        );
 
         // -- Descriptor pool --
-        // 10 passes, max 2 bindings each = up to 20 storage buffer descriptors
+        // 10 passes, max 3 bindings each = up to 30 storage buffer descriptors
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 20,
+            descriptor_count: 30,
         }];
         let descriptor_pool =
             pipeline::create_descriptor_pool(ctx, &pool_sizes, 10, "sim-descriptor-pool")?;
@@ -325,7 +325,7 @@ impl GpuSimulation {
             ctx,
             shader_module,
             c"compute::p2g::p2g",
-            &[&particle_buffer, &grid_buffer],
+            &[&particle_buffer, &grid_buffer, &material_buffer],
             mem::size_of::<P2gPushConstants>() as u32,
             descriptor_pool,
             "p2g",
@@ -375,7 +375,7 @@ impl GpuSimulation {
             ctx,
             shader_module,
             c"compute::render::render_voxels",
-            &[&voxel_buffer, &render_output_buffer],
+            &[&voxel_buffer, &render_output_buffer, &material_buffer],
             mem::size_of::<RenderPushConstants>() as u32,
             descriptor_pool,
             "render",
@@ -418,6 +418,7 @@ impl GpuSimulation {
             grid_buffer,
             voxel_buffer,
             render_output_buffer,
+            material_buffer,
             clear_grid_pass,
             p2g_pass,
             grid_update_pass,
@@ -431,8 +432,6 @@ impl GpuSimulation {
             shader_module,
             descriptor_pool,
             num_particles: 0,
-            world_config_buffer,
-            world_config,
             device: ctx.device.clone(),
         })
     }
@@ -621,27 +620,6 @@ impl GpuSimulation {
     /// Returns the current number of active particles.
     pub fn num_particles(&self) -> u32 {
         self.num_particles
-    }
-
-    /// Returns the current [`WorldConfig`].
-    pub fn world_config(&self) -> &WorldConfig {
-        &self.world_config
-    }
-
-    /// Update the world configuration on the GPU.
-    ///
-    /// Uploads the new config to the uniform buffer via a staging buffer.
-    /// This is a synchronous operation that stalls the GPU pipeline.
-    pub fn update_world_config(&mut self, ctx: &VulkanContext, config: &WorldConfig) -> Result<()> {
-        self.world_config = *config;
-        buffer::upload(ctx, core::slice::from_ref(config), &self.world_config_buffer)?;
-        tracing::info!("Updated WorldConfig on GPU");
-        Ok(())
-    }
-
-    /// Returns a reference to the world config [`GpuBuffer`].
-    pub fn world_config_buffer(&self) -> &GpuBuffer {
-        &self.world_config_buffer
     }
 
     /// Returns a reference to the particle buffer.
@@ -977,8 +955,8 @@ impl GpuSimulation {
                 size: 0,
             },
         );
-        let world_config_buf = std::mem::replace(
-            &mut self.world_config_buffer,
+        let material_buf = std::mem::replace(
+            &mut self.material_buffer,
             GpuBuffer {
                 buffer: vk::Buffer::null(),
                 allocation: None,
@@ -989,7 +967,7 @@ impl GpuSimulation {
         buffer::destroy_buffer(ctx, grid_buf);
         buffer::destroy_buffer(ctx, voxel_buf);
         buffer::destroy_buffer(ctx, render_output_buf);
-        buffer::destroy_buffer(ctx, world_config_buf);
+        buffer::destroy_buffer(ctx, material_buf);
     }
 }
 
