@@ -249,7 +249,7 @@ pub fn grid_update(grid: &mut [GridCell], dt: f32) {
 /// - `dt`: timestep
 pub fn g2p(particles: &mut [Particle], grid: &[GridCell], dt: f32) {
     let gs = GRID_SIZE as f32;
-    let pic_blend = 0.95_f32; // PIC/FLIP blend factor
+    let pic_blend = 0.7_f32; // PIC/FLIP blend factor
 
     for particle in particles.iter_mut() {
         let pos = particle.position();
@@ -313,13 +313,22 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], dt: f32) {
         }
 
         // PIC/FLIP blend
-        // FLIP: vel_new = old_vel + (grid_vel - grid_old_vel)
-        // For simplicity, we use pure PIC with a small FLIP component
-        let vel_flip = old_vel + (new_vel - old_vel); // This simplifies to new_vel for now
-        let blended_vel = pic_blend * new_vel + (1.0 - pic_blend) * vel_flip;
+        // True FLIP requires old grid velocities which we don't store.
+        // Instead, blend PIC (grid velocity) with old particle velocity
+        // to reduce excessive damping while maintaining stability.
+        let blended_vel = pic_blend * new_vel + (1.0 - pic_blend) * old_vel;
+
+        // Gas buoyancy: counteract most of gravity and add slight upward force
+        // so steam rises and persists visually instead of falling immediately.
+        let mut final_vel = blended_vel;
+        if particle.phase() == 2 {
+            final_vel.y += (-GRAVITY) * 0.7 * dt;
+            final_vel.x *= 0.98;
+            final_vel.z *= 0.98;
+        }
 
         // Update velocity
-        particle.set_velocity(blended_vel);
+        particle.set_velocity(final_vel);
 
         // Update APIC C matrix
         particle.set_affine_momentum(new_c);
@@ -330,7 +339,7 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], dt: f32) {
         particle.set_deformation_gradient(f_new);
 
         // Advect position
-        let new_pos = pos + blended_vel * dt;
+        let new_pos = pos + final_vel * dt;
 
         // Clamp to grid bounds
         let margin = 2.0 / gs;

@@ -26,8 +26,8 @@ pub struct G2pPushConstants {
 }
 
 /// PIC/FLIP blend ratio (0.0 = pure FLIP, 1.0 = pure PIC).
-/// 0.95 PIC is typical for stable MPM.
-const PIC_RATIO: f32 = 0.95;
+/// 0.7 PIC balances stability with fluid-like flow (less viscous damping).
+const PIC_RATIO: f32 = 0.7;
 
 /// Gather velocity from the grid and update one particle.
 ///
@@ -111,9 +111,22 @@ pub fn gather_particle(
     c_col2 *= apic_scale;
 
     // PIC/FLIP blend
-    let flip_vel = old_vel + (pic_vel - old_vel); // This simplifies but conceptually: old_vel + (new_grid_vel - old_grid_vel)
-    // Since we don't store old grid velocity, use pure PIC with small FLIP correction
-    let new_vel = PIC_RATIO * pic_vel + (1.0 - PIC_RATIO) * flip_vel;
+    // True FLIP requires old grid velocities which we don't store.
+    // Instead, use a weighted blend of PIC (grid velocity) and the particle's
+    // old velocity to reduce excessive damping while maintaining stability.
+    let mut new_vel = PIC_RATIO * pic_vel + (1.0 - PIC_RATIO) * old_vel;
+
+    // Gas buoyancy: counteract most of gravity and add slight upward force
+    // so steam rises and persists visually instead of falling immediately.
+    let phase = particle.ids.y;
+    if phase == 2 {
+        // Counteract 70% of gravity (gravity is negative, so add positive Y)
+        // and add a small buoyancy boost. Also damp horizontal velocity slightly
+        // to keep steam from flying out of bounds too fast.
+        new_vel.y += 9.81 * 0.7 * dt;
+        new_vel.x *= 0.98;
+        new_vel.z *= 0.98;
+    }
 
     // Update deformation gradient: F_new = (I + dt * C) * F_old
     let f0 = particle.f_col0.truncate();
@@ -150,9 +163,6 @@ pub fn gather_particle(
     new_pos.x = new_pos.x.clamp(margin, upper);
     new_pos.y = new_pos.y.clamp(margin, upper);
     new_pos.z = new_pos.z.clamp(margin, upper);
-
-    // Phase constant: solid = 0
-    let phase = particle.ids.y;
 
     // Solids: update F and C for stress computation but skip position/velocity advection.
     // This prevents stone floor particles from drifting toward grid cell boundaries (#45).

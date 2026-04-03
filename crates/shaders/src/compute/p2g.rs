@@ -52,7 +52,7 @@ pub fn compute_stress(particle: &Particle) -> [Vec3; 3] {
     if phase == 1 || phase == 2 {
         // Liquid / Gas: pressure-only stress (EOS)
         // Bulk modulus: lower for gas, higher for liquid
-        let bulk = if phase == 1 { 50.0_f32 } else { 5.0_f32 };
+        let bulk = if phase == 1 { 20.0_f32 } else { 2.0_f32 };
         let pressure = bulk * (j - 1.0);
         // Cauchy stress = -p * I (isotropic pressure)
         let s = -pressure;
