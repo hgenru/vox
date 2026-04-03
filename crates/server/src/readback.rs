@@ -47,6 +47,14 @@ impl GpuSimulation {
         self.render_output_buffer.buffer
     }
 
+    /// Returns a reference to the activity map buffer (for readback/debug).
+    ///
+    /// The buffer contains one `u32` per brick, where each entry holds the
+    /// number of active particles in that brick after the last `step_physics`.
+    pub fn activity_map_buffer(&self) -> &GpuBuffer {
+        &self.activity_map_buffer
+    }
+
     /// Returns a reference to the render output [`GpuBuffer`].
     ///
     /// Useful for readback operations (e.g., headless screenshot).
