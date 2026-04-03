@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use client::{Camera, PlayerController, Renderer, renderer::required_instance_extensions};
+use content::MaterialDatabase;
 use glam::Vec3;
 use gpu_core::VulkanContext;
 use server::{GpuSimulation, ToolbarPushConstants, TOOLBAR_MAX_MATERIALS};
@@ -50,6 +51,7 @@ pub(crate) struct App {
     selected_material: usize,
     palette: Vec<MaterialSlot>,
     pending_explosion: Option<[f32; 3]>,
+    material_db: Option<MaterialDatabase>,
 }
 
 impl App {
@@ -57,6 +59,21 @@ impl App {
     pub(crate) fn new(substeps: u32) -> Self {
         let particles = create_island_particles();
         tracing::info!("Created {} initial particles", particles.len());
+
+        // Try loading materials from RON file, fall back to hardcoded defaults
+        let material_db = match content::load_material_database("assets/materials.ron") {
+            Ok(db) => {
+                tracing::info!("Loaded material database from assets/materials.ron");
+                Some(db)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load assets/materials.ron, using hardcoded defaults: {}",
+                    e
+                );
+                None
+            }
+        };
 
         let gs = GRID_SIZE as f32;
         let camera = Camera::look_at(
@@ -79,6 +96,7 @@ impl App {
             selected_material: 0,
             palette: material_palette(),
             pending_explosion: None,
+            material_db,
         }
     }
 
@@ -217,7 +235,13 @@ impl ApplicationHandler for App {
             Ok(r) => r,
             Err(e) => { tracing::error!("Failed to create Renderer: {}", e); event_loop.exit(); return; }
         };
-        let mut sim = match GpuSimulation::new(&ctx) {
+        let mut sim = match if let Some(db) = &self.material_db {
+            let materials = db.material_params();
+            let (transitions, count) = db.phase_transition_rules();
+            GpuSimulation::new_with_materials(&ctx, &materials, &transitions, count)
+        } else {
+            GpuSimulation::new(&ctx)
+        } {
             Ok(s) => s,
             Err(e) => { tracing::error!("Failed to create GpuSimulation: {}", e); event_loop.exit(); return; }
         };

@@ -1,0 +1,256 @@
+// Material database for the VOX voxel engine.
+//
+// Float sentinel values:
+//   3.4028235e38  = f32::MAX (material doesn't melt/boil/glow)
+//  -3.4028235e38  = f32::MIN (always triggers if below temp_max)
+(
+    materials: [
+        // 0: Stone (solid)
+        (
+            name: "Stone",
+            id: 0,
+            default_phase: Solid,
+            elastic: (
+                youngs_modulus: 1e6,
+                poissons_ratio: 0.3,
+                yield_stress: 1e4,
+                viscosity: 0.0,
+            ),
+            thermal: (
+                melting_point: 1500.0,
+                boiling_point: 3.4028235e38,
+                heat_conductivity: 1.0,
+                specific_heat: 800.0,
+            ),
+            visual: (
+                density: 2700.0,
+                emissive_temp: 3.4028235e38,
+                opacity: 1.0,
+                color: (0.5, 0.5, 0.5),
+            ),
+        ),
+        // 1: Water (liquid)
+        (
+            name: "Water",
+            id: 1,
+            default_phase: Liquid,
+            elastic: (
+                youngs_modulus: 0.0,
+                poissons_ratio: 0.0,
+                yield_stress: 0.0,
+                viscosity: 1e-3,
+            ),
+            thermal: (
+                melting_point: 0.0,
+                boiling_point: 100.0,
+                heat_conductivity: 0.6,
+                specific_heat: 4186.0,
+            ),
+            visual: (
+                density: 1000.0,
+                emissive_temp: 3.4028235e38,
+                opacity: 0.3,
+                color: (0.2, 0.4, 0.9),
+            ),
+        ),
+        // 2: Lava (liquid, hot)
+        (
+            name: "Lava",
+            id: 2,
+            default_phase: Liquid,
+            elastic: (
+                youngs_modulus: 0.0,
+                poissons_ratio: 0.0,
+                yield_stress: 0.0,
+                viscosity: 100.0,
+            ),
+            thermal: (
+                melting_point: 1500.0,
+                boiling_point: 3.4028235e38,
+                heat_conductivity: 1.5,
+                specific_heat: 1000.0,
+            ),
+            visual: (
+                density: 2500.0,
+                emissive_temp: 800.0,
+                opacity: 1.0,
+                color: (1.0, 0.3, 0.0),
+            ),
+        ),
+        // 3: Wood (solid, flammable)
+        (
+            name: "Wood",
+            id: 3,
+            default_phase: Solid,
+            elastic: (
+                youngs_modulus: 1e5,
+                poissons_ratio: 0.3,
+                yield_stress: 5e3,
+                viscosity: 0.0,
+            ),
+            thermal: (
+                melting_point: 3.4028235e38,
+                boiling_point: 3.4028235e38,
+                heat_conductivity: 0.2,
+                specific_heat: 2000.0,
+            ),
+            visual: (
+                density: 600.0,
+                emissive_temp: 300.0,
+                opacity: 1.0,
+                color: (0.55, 0.35, 0.15),
+            ),
+        ),
+        // 4: Ash (solid, crumbly)
+        (
+            name: "Ash",
+            id: 4,
+            default_phase: Solid,
+            elastic: (
+                youngs_modulus: 1e3,
+                poissons_ratio: 0.2,
+                yield_stress: 100.0,
+                viscosity: 0.0,
+            ),
+            thermal: (
+                melting_point: 3.4028235e38,
+                boiling_point: 3.4028235e38,
+                heat_conductivity: 0.1,
+                specific_heat: 800.0,
+            ),
+            visual: (
+                density: 200.0,
+                emissive_temp: 3.4028235e38,
+                opacity: 1.0,
+                color: (0.4, 0.4, 0.4),
+            ),
+        ),
+        // 5: Ice (solid, brittle)
+        (
+            name: "Ice",
+            id: 5,
+            default_phase: Solid,
+            elastic: (
+                youngs_modulus: 1e6,
+                poissons_ratio: 0.3,
+                yield_stress: 3000.0,
+                viscosity: 0.0,
+            ),
+            thermal: (
+                melting_point: 0.0,
+                boiling_point: 100.0,
+                heat_conductivity: 2.0,
+                specific_heat: 2090.0,
+            ),
+            visual: (
+                density: 917.0,
+                emissive_temp: 3.4028235e38,
+                opacity: 0.6,
+                color: (0.7, 0.85, 0.95),
+            ),
+        ),
+        // 6: Gunpowder (solid, crumbly, explosive)
+        (
+            name: "Gunpowder",
+            id: 6,
+            default_phase: Solid,
+            elastic: (
+                youngs_modulus: 0.0,
+                poissons_ratio: 0.0,
+                yield_stress: 500.0,
+                viscosity: 0.0,
+            ),
+            thermal: (
+                melting_point: 3.4028235e38,
+                boiling_point: 3.4028235e38,
+                heat_conductivity: 5.0,
+                specific_heat: 800.0,
+            ),
+            visual: (
+                density: 1800.0,
+                emissive_temp: 150.0,
+                opacity: 1.0,
+                color: (0.25, 0.2, 0.15),
+            ),
+        ),
+    ],
+
+    phase_transitions: [
+        // Stone (solid) + T > 1500 -> Lava (liquid)
+        (
+            from_material: 0,
+            from_phase: Solid,
+            to_material: 2,
+            to_phase: Liquid,
+            temp_min: 1500.0,
+            temp_max: 3.4028235e38,
+            reset_deformation: true,
+        ),
+        // Water (liquid) + T > 100 -> Steam (gas)
+        (
+            from_material: 1,
+            from_phase: Liquid,
+            to_material: 1,
+            to_phase: Gas,
+            temp_min: 100.0,
+            temp_max: 3.4028235e38,
+            reset_deformation: true,
+        ),
+        // Water (liquid) + T < 0 -> Ice (solid)
+        (
+            from_material: 1,
+            from_phase: Liquid,
+            to_material: 5,
+            to_phase: Solid,
+            temp_min: -3.4028235e38,
+            temp_max: 0.0,
+            reset_deformation: true,
+        ),
+        // Ice (solid) + T > 0 -> Water (liquid)
+        (
+            from_material: 5,
+            from_phase: Solid,
+            to_material: 1,
+            to_phase: Liquid,
+            temp_min: 0.0,
+            temp_max: 3.4028235e38,
+            reset_deformation: true,
+        ),
+        // Lava (liquid) + T < 1500 -> Stone (solid)
+        (
+            from_material: 2,
+            from_phase: Liquid,
+            to_material: 0,
+            to_phase: Solid,
+            temp_min: -3.4028235e38,
+            temp_max: 1500.0,
+            reset_deformation: true,
+        ),
+        // Gunpowder (solid) + T > 150 -> Gas (explosion)
+        (
+            from_material: 6,
+            from_phase: Solid,
+            to_material: 6,
+            to_phase: Gas,
+            temp_min: 150.0,
+            temp_max: 3.4028235e38,
+            reset_deformation: true,
+            explosion: true,
+        ),
+    ],
+
+    reactions: [
+        // Water + Lava -> Stone + Steam
+        (
+            reactant_a: 1,
+            reactant_b: 2,
+            product_a_material: 0,
+            product_a_phase: Solid,
+            product_b_material: 1,
+            product_b_phase: Gas,
+            min_temperature: -3.4028235e38,
+            product_a_temp: 300.0,
+            product_b_temp: 100.0,
+        ),
+    ],
+)

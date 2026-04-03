@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 server = { workspace = true }
 client = { workspace = true }
+content = { workspace = true }
 shared = { workspace = true, features = ["std"] }
 protocol = { workspace = true }
 gpu-core = { workspace = true }

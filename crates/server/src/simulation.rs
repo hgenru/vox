@@ -65,11 +65,26 @@ pub struct GpuSimulation {
 }
 
 impl GpuSimulation {
-    /// Create a new GPU simulation orchestrator.
+    /// Create a new GPU simulation orchestrator with default (hardcoded) material tables.
     ///
     /// Loads the compiled SPIR-V shaders, creates GPU buffers and compute
     /// pipelines. The provided [`VulkanContext`] must outlive this struct.
     pub fn new(ctx: &VulkanContext) -> Result<Self> {
+        let material_table = material::default_material_table();
+        let (reaction_table, num_phase_rules) = reaction::default_phase_transition_table();
+        Self::new_with_materials(ctx, &material_table, &reaction_table, num_phase_rules)
+    }
+
+    /// Create a new GPU simulation orchestrator with externally-provided material tables.
+    ///
+    /// Use this to load data-driven materials from RON files via the `content` crate.
+    /// The provided [`VulkanContext`] must outlive this struct.
+    pub fn new_with_materials(
+        ctx: &VulkanContext,
+        material_table: &[MaterialParams; MATERIAL_COUNT],
+        reaction_table: &[PhaseTransitionRule; MAX_PHASE_RULES],
+        num_phase_rules: usize,
+    ) -> Result<Self> {
         tracing::info!("Creating GpuSimulation");
 
         // -- Shader module --
@@ -127,9 +142,8 @@ impl GpuSimulation {
             "material-buffer",
         )?;
 
-        // Upload default material table
-        let material_table = material::default_material_table();
-        buffer::upload(ctx, &material_table, &material_buffer)?;
+        // Upload material table
+        buffer::upload(ctx, material_table, &material_buffer)?;
         tracing::info!(
             "Uploaded {} materials ({} bytes) to GPU",
             MATERIAL_COUNT,
@@ -146,9 +160,8 @@ impl GpuSimulation {
             "reaction-buffer",
         )?;
 
-        // Upload default phase transition table
-        let (reaction_table, num_phase_rules) = reaction::default_phase_transition_table();
-        buffer::upload(ctx, &reaction_table, &reaction_buffer)?;
+        // Upload phase transition table
+        buffer::upload(ctx, reaction_table, &reaction_buffer)?;
         tracing::info!(
             "Uploaded {} phase transition rules ({} bytes) to GPU",
             num_phase_rules,

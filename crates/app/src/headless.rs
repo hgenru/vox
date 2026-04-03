@@ -14,7 +14,21 @@ use crate::Args;
 pub(crate) fn run_headless(args: &Args) -> Result<()> {
     tracing::info!("Headless mode: {} frames, {} substeps/frame", args.frames, args.substeps);
     let ctx = VulkanContext::new()?;
-    let mut sim = GpuSimulation::new(&ctx)?;
+    let mut sim = match content::load_material_database("assets/materials.ron") {
+        Ok(db) => {
+            tracing::info!("Loaded material database from assets/materials.ron");
+            let materials = db.material_params();
+            let (transitions, count) = db.phase_transition_rules();
+            GpuSimulation::new_with_materials(&ctx, &materials, &transitions, count)?
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load assets/materials.ron, using hardcoded defaults: {}",
+                e
+            );
+            GpuSimulation::new(&ctx)?
+        }
+    };
     let particles = create_island_particles();
     sim.init_particles(&ctx, &particles)?;
 

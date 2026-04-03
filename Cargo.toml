@@ -10,6 +10,7 @@ members = [
     "crates/app",
     "crates/bootstrap-test",
     "crates/shader-builder",
+    "crates/content",
 ]
 # These crates are compiled to SPIR-V by spirv-builder, not native
 exclude = ["crates/shaders", "crates/bootstrap-shader"]
@@ -51,6 +52,7 @@ sim-cpu = { path = "crates/sim-cpu" }
 gpu-core = { path = "crates/gpu-core" }
 server = { path = "crates/server" }
 client = { path = "crates/client" }
+content = { path = "crates/content" }
 
 [profile.dev.build-override]
 opt-level = 3
