@@ -89,6 +89,8 @@ pub struct GpuSimulation {
     // State
     pub(crate) num_particles: u32,
     num_phase_rules: u32,
+    /// Monotonically increasing frame counter for graduated sleep scheduling.
+    frame_number: core::cell::Cell<u32>,
 
     // Reference to context (not owned — caller must keep alive)
     // We store raw device handle for recording commands; the context
@@ -487,6 +489,7 @@ impl GpuSimulation {
             descriptor_pool,
             num_particles: 0,
             num_phase_rules: num_phase_rules as u32,
+            frame_number: core::cell::Cell::new(0),
             device: ctx.device.clone(),
         })
     }
@@ -575,11 +578,12 @@ impl GpuSimulation {
         }
 
         // 3. P2G (particle dispatch)
+        let frame = self.frame_number.get();
         let p2g_pc = P2gPushConstants {
             grid_size,
             dt,
             num_particles,
-            _pad: 0,
+            frame_number: frame,
         };
         passes::dispatch(
             &self.device,
@@ -665,6 +669,10 @@ impl GpuSimulation {
             dt,
             num_particles,
             num_rules: self.num_phase_rules,
+            frame_number: frame,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         };
         passes::dispatch(
             &self.device,
@@ -783,6 +791,9 @@ impl GpuSimulation {
             bytemuck::bytes_of(&occupancy_pc),
         );
         passes::barrier(cmd, &self.device);
+
+        // Increment frame counter for graduated sleep scheduling
+        self.frame_number.set(frame.wrapping_add(1));
     }
 
     /// Run chemical reactions only. Call once per frame after all substeps.

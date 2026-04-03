@@ -23,6 +23,14 @@ pub struct G2pPushConstants {
     pub num_particles: u32,
     /// Number of valid phase transition rules.
     pub num_rules: u32,
+    /// Current simulation frame number (used with tick_period for graduated sleep).
+    pub frame_number: u32,
+    /// Padding to 32-byte alignment.
+    pub _pad0: u32,
+    /// Padding to 32-byte alignment.
+    pub _pad1: u32,
+    /// Padding to 32-byte alignment.
+    pub _pad2: u32,
 }
 
 /// PIC/FLIP blend ratio (0.0 = pure FLIP, 1.0 = pure PIC).
@@ -441,22 +449,42 @@ fn reset_deformation_gradient(particle: &mut Particle) {
     particle.f_col2 = Vec4::new(0.0, 0.0, 1.0, 0.0);
 }
 
-/// Check whether the brick containing a particle position is sleeping.
+/// Check whether a brick should be skipped this frame based on its tick period.
 ///
-/// Computes the brick index from position and looks up the sleep state buffer.
-/// Returns `true` if the brick is marked as sleeping (value != 0).
-/// Out-of-bounds positions return `false` (not sleeping) as a safe default.
-pub fn is_brick_sleeping(pos_x: f32, pos_y: f32, pos_z: f32, sleep_state: &[u32]) -> bool {
+/// - `tick_period == 0`: frozen, always skip.
+/// - `tick_period == 1`: active, never skip.
+/// - Otherwise: skip unless `frame_number % tick_period == 0`.
+///
+/// Split to keep branch count <= 3 per function (trap #15).
+pub fn check_skip(tick_period: u32, frame_number: u32) -> bool {
+    if tick_period == 0 {
+        return true;
+    }
+    if tick_period == 1 {
+        return false;
+    }
+    frame_number % tick_period != 0
+}
+
+/// Check whether the brick containing a particle position should be skipped.
+///
+/// Computes the brick index from position, reads the tick_period from the
+/// sleep_state buffer, and uses `check_skip` with the current frame number
+/// to decide whether to skip this brick's particles.
+///
+/// Out-of-bounds positions return `false` (do not skip) as a safe default.
+pub fn should_skip_brick(pos_x: f32, pos_y: f32, pos_z: f32, sleep_state: &[u32], frame_number: u32) -> bool {
     let brick_size: u32 = 8;
     let bricks_per_axis: u32 = 32; // 256 / 8
     let bx = (pos_x as u32) / brick_size;
     let by = (pos_y as u32) / brick_size;
     let bz = (pos_z as u32) / brick_size;
     if bx >= bricks_per_axis || by >= bricks_per_axis || bz >= bricks_per_axis {
-        return false; // out of bounds = not sleeping
+        return false; // out of bounds = do not skip
     }
     let brick_idx = bz * bricks_per_axis * bricks_per_axis + by * bricks_per_axis + bx;
-    sleep_state[brick_idx as usize] != 0
+    let tick_period = sleep_state[brick_idx as usize];
+    check_skip(tick_period, frame_number)
 }
 
 /// Compute shader entry point: Grid-to-Particle transfer.
@@ -483,9 +511,9 @@ pub fn g2p(
         return;
     }
 
-    // Copy position to locals (trap #21) and check sleep state before gathering
+    // Copy position to locals (trap #21) and check graduated sleep before gathering
     let pos_mass = particles[idx].pos_mass;
-    if is_brick_sleeping(pos_mass.x, pos_mass.y, pos_mass.z, sleep_state) {
+    if should_skip_brick(pos_mass.x, pos_mass.y, pos_mass.z, sleep_state, push.frame_number) {
         return;
     }
 

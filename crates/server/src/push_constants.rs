@@ -15,8 +15,8 @@ pub struct P2gPushConstants {
     pub dt: f32,
     /// Total number of active particles.
     pub num_particles: u32,
-    /// Padding to 16-byte alignment.
-    pub _pad: u32,
+    /// Current simulation frame number (used with tick_period for graduated sleep).
+    pub frame_number: u32,
 }
 
 /// Push constants for the grid update shader.
@@ -45,6 +45,14 @@ pub struct G2pPushConstants {
     pub num_particles: u32,
     /// Number of valid phase transition rules.
     pub num_rules: u32,
+    /// Current simulation frame number (used with tick_period for graduated sleep).
+    pub frame_number: u32,
+    /// Padding to 32-byte alignment.
+    pub _pad0: u32,
+    /// Padding to 32-byte alignment.
+    pub _pad1: u32,
+    /// Padding to 32-byte alignment.
+    pub _pad2: u32,
 }
 
 /// Push constants for the voxelize / clear_voxels shaders.
