@@ -80,8 +80,12 @@ pub fn scan_brick(
 
 /// Compute shader entry point: per-brick occupancy detection.
 ///
+/// Also computes super-brick occupancy: a super-brick is 8x8x8 bricks (64³ voxels).
+/// The super-brick buffer is OR'd from constituent brick occupancy values.
+///
 /// Descriptor set 0, binding 0: storage buffer of `u32` (voxel grid, read).
 /// Descriptor set 0, binding 1: storage buffer of `u32` (brick_occupied, write).
+/// Descriptor set 0, binding 2: storage buffer of `u32` (super_brick_occupied, write via atomicMax).
 /// Push constants: `ComputeOccupancyPushConstants`.
 /// Dispatch with `(ceil(total_bricks / 64), 1, 1)` workgroups.
 #[spirv(compute(threads(64)))]
@@ -90,6 +94,7 @@ pub fn compute_occupancy(
     #[spirv(push_constant)] push: &ComputeOccupancyPushConstants,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] voxels: &[u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] brick_occupied: &mut [u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] super_brick_occupied: &mut [u32],
 ) {
     let idx = id.x;
     let bpa = push.bricks_per_axis;
@@ -105,5 +110,45 @@ pub fn compute_occupancy(
     let bz = idx / (bpa * bpa);
 
     let occupied = scan_brick(bx, by, bz, push.brick_size, push.grid_size, voxels);
-    brick_occupied[idx as usize] = if occupied { 1 } else { 0 };
+    let occ_val = if occupied { 1u32 } else { 0u32 };
+    brick_occupied[idx as usize] = occ_val;
+
+    // Propagate to super-brick occupancy via atomicMax.
+    // Super-bricks are 8x8x8 bricks each (64³ voxels).
+    // For 256³ grid with 32 bricks/axis: super_bricks_per_axis = 32/8 = 4.
+    write_super_brick(bx, by, bz, bpa, occ_val, super_brick_occupied);
+}
+
+/// Propagate a brick's occupancy to its parent super-brick via atomicMax.
+///
+/// Super-bricks group 8x8x8 bricks. If any constituent brick is occupied,
+/// the super-brick is marked as occupied. Uses atomicMax for concurrent writes.
+pub fn write_super_brick(
+    bx: u32,
+    by: u32,
+    bz: u32,
+    bricks_per_axis: u32,
+    occ_val: u32,
+    super_brick_occupied: &mut [u32],
+) {
+    if occ_val == 0 {
+        return;
+    }
+    let sbpa = bricks_per_axis / 8; // super-bricks per axis
+    if sbpa == 0 {
+        return;
+    }
+    let sbx = bx / 8;
+    let sby = by / 8;
+    let sbz = bz / 8;
+    let sb_idx = (sbz * sbpa * sbpa + sby * sbpa + sbx) as usize;
+
+    #[cfg(target_arch = "spirv")]
+    unsafe {
+        spirv_std::arch::atomic_u_max::<u32, 1u32, 0x0u32>(&mut super_brick_occupied[sb_idx], 1);
+    }
+    #[cfg(not(target_arch = "spirv"))]
+    {
+        super_brick_occupied[sb_idx] = 1;
+    }
 }

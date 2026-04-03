@@ -127,6 +127,93 @@ fn brick_exit_steps(voxel_coord: i32, step: i32) -> i32 {
     }
 }
 
+/// Compute the number of voxel steps to skip to exit the current super-brick (64³) along one axis.
+///
+/// Same logic as `brick_exit_steps` but for 64-voxel boundaries instead of 8.
+fn super_brick_exit_steps(voxel_coord: i32, step: i32) -> i32 {
+    if step > 0 {
+        let next_boundary = ((voxel_coord >> 6) + 1) << 6;
+        next_boundary - voxel_coord
+    } else {
+        let sb_start = (voxel_coord >> 6) << 6;
+        voxel_coord - sb_start + 1
+    }
+}
+
+/// Check if a voxel is inside an empty super-brick (64³ = 8x8x8 bricks) and compute skip offsets.
+///
+/// Returns (delta_vx, delta_vy, delta_vz, delta_tx, delta_ty, delta_tz).
+/// All zeros if the super-brick is occupied (no skip). Otherwise, the deltas advance
+/// the ray past the empty super-brick along the axis with the nearest exit.
+fn check_super_brick_skip(
+    vx: i32,
+    vy: i32,
+    vz: i32,
+    step_x: i32,
+    step_y: i32,
+    step_z: i32,
+    t_max_x: f32,
+    t_max_y: f32,
+    t_max_z: f32,
+    t_delta_x: f32,
+    t_delta_y: f32,
+    t_delta_z: f32,
+    super_brick_occupied: &[u32],
+    grid_size: u32,
+) -> (i32, i32, i32, f32, f32, f32) {
+    let sbpa = grid_size / 64; // super-bricks per axis
+    if sbpa == 0 {
+        return (0, 0, 0, 0.0, 0.0, 0.0);
+    }
+    let sbx = (vx as u32) / 64;
+    let sby = (vy as u32) / 64;
+    let sbz = (vz as u32) / 64;
+
+    if sbx >= sbpa || sby >= sbpa || sbz >= sbpa {
+        return (0, 0, 0, 0.0, 0.0, 0.0);
+    }
+
+    let sb_idx = (sbz * sbpa * sbpa + sby * sbpa + sbx) as usize;
+    if super_brick_occupied[sb_idx] != 0 {
+        return (0, 0, 0, 0.0, 0.0, 0.0);
+    }
+
+    // Super-brick is empty: advance ray to exit the 64³ region
+    compute_skip_deltas_64(vx, vy, vz, step_x, step_y, step_z, t_max_x, t_max_y, t_max_z, t_delta_x, t_delta_y, t_delta_z)
+}
+
+/// Compute skip deltas to exit a 64³ super-brick. Separated to avoid >3 branches (trap #15).
+fn compute_skip_deltas_64(
+    vx: i32,
+    vy: i32,
+    vz: i32,
+    step_x: i32,
+    step_y: i32,
+    step_z: i32,
+    t_max_x: f32,
+    t_max_y: f32,
+    t_max_z: f32,
+    t_delta_x: f32,
+    t_delta_y: f32,
+    t_delta_z: f32,
+) -> (i32, i32, i32, f32, f32, f32) {
+    let sx = super_brick_exit_steps(vx, step_x);
+    let sy = super_brick_exit_steps(vy, step_y);
+    let sz = super_brick_exit_steps(vz, step_z);
+
+    let t_exit_x = t_max_x + (sx - 1) as f32 * t_delta_x;
+    let t_exit_y = t_max_y + (sy - 1) as f32 * t_delta_y;
+    let t_exit_z = t_max_z + (sz - 1) as f32 * t_delta_z;
+
+    if t_exit_x <= t_exit_y && t_exit_x <= t_exit_z {
+        (sx * step_x, 0, 0, sx as f32 * t_delta_x, 0.0, 0.0)
+    } else if t_exit_y <= t_exit_z {
+        (0, sy * step_y, 0, 0.0, sy as f32 * t_delta_y, 0.0)
+    } else {
+        (0, 0, sz * step_z, 0.0, 0.0, sz as f32 * t_delta_z)
+    }
+}
+
 /// Check if a voxel is inside an empty brick and compute skip offsets.
 ///
 /// Returns (delta_vx, delta_vy, delta_vz, delta_tx, delta_ty, delta_tz).
@@ -192,6 +279,7 @@ pub fn render_pixel(
     output: &mut [u32],
     materials: &[MaterialParams],
     brick_occupied: &[u32],
+    super_brick_occupied: &[u32],
 ) {
     let width = push.width;
     let height = push.height;
@@ -336,6 +424,26 @@ pub fn render_pixel(
     while i < max_steps {
         // Check current voxel
         if vx >= 0 && vx < gs && vy >= 0 && vy < gs && vz >= 0 && vz < gs {
+            // Super-brick-level skip: if the entire 64³ region is empty, advance past it
+            let (sb_vx, sb_vy, sb_vz, sb_tx, sb_ty, sb_tz) = check_super_brick_skip(
+                vx, vy, vz,
+                step_x, step_y, step_z,
+                t_max_x, t_max_y, t_max_z,
+                t_delta_x, t_delta_y, t_delta_z,
+                super_brick_occupied,
+                grid_size,
+            );
+            if sb_vx != 0 || sb_vy != 0 || sb_vz != 0 {
+                vx += sb_vx;
+                vy += sb_vy;
+                vz += sb_vz;
+                t_max_x += sb_tx;
+                t_max_y += sb_ty;
+                t_max_z += sb_tz;
+                i += 1;
+                continue;
+            }
+
             // Brick-level skip: if the entire 8x8x8 brick is empty, advance past it
             let (skip_vx, skip_vy, skip_vz, skip_tx, skip_ty, skip_tz) = check_brick_skip(
                 vx, vy, vz,
@@ -477,8 +585,9 @@ fn handle_dirty_tile(
 /// Descriptor set 0, binding 1: storage buffer of `u32` (pixel output, write).
 /// Descriptor set 0, binding 2: storage buffer of `MaterialParams` (material table, read).
 /// Descriptor set 0, binding 3: storage buffer of `u32` (brick_occupied map, read).
-/// Descriptor set 0, binding 4: storage buffer of `u32` (dirty_tile_buffer, read).
-/// Descriptor set 0, binding 5: storage buffer of `u32` (prev_render_output, read).
+/// Descriptor set 0, binding 4: storage buffer of `u32` (super_brick_occupied map, read).
+/// Descriptor set 0, binding 5: storage buffer of `u32` (dirty_tile_buffer, read).
+/// Descriptor set 0, binding 6: storage buffer of `u32` (prev_render_output, read).
 /// Push constants: `RenderPushConstants`.
 #[spirv(compute(threads(8, 8, 1)))]
 pub fn render_voxels(
@@ -488,12 +597,13 @@ pub fn render_voxels(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] output: &mut [u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] materials: &[MaterialParams],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] brick_occupied: &[u32],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] dirty_tiles: &[u32],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 5)] prev_output: &[u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] super_brick_occupied: &[u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 5)] dirty_tiles: &[u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 6)] prev_output: &[u32],
 ) {
     // Check dirty tile first; if clean, pixel is already copied from prev frame
     if !handle_dirty_tile(id.x, id.y, push.width, push.height, dirty_tiles, prev_output, output) {
         return;
     }
-    render_pixel(id.x, id.y, push, voxels, output, materials, brick_occupied);
+    render_pixel(id.x, id.y, push, voxels, output, materials, brick_occupied, super_brick_occupied);
 }

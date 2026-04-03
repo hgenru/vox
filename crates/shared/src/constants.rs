@@ -61,6 +61,27 @@ pub const DIRTY_TILES_Y: u32 = (RENDER_HEIGHT + DIRTY_TILE_SIZE - 1) / DIRTY_TIL
 /// Total number of dirty tiles.
 pub const DIRTY_TILE_COUNT: u32 = DIRTY_TILES_X * DIRTY_TILES_Y;
 
+/// Default hash grid capacity (number of slots).
+/// Should be ~2x the expected max active cells for low collision rate.
+/// Must be a power of 2 for fast modulo via bitwise AND.
+pub const HASH_GRID_DEFAULT_CAPACITY: u32 = 1 << 20; // 1M slots = ~52MB
+
+/// Empty sentinel for hash grid keys.
+/// Represents an unoccupied slot in the hash grid.
+pub const HASH_GRID_EMPTY_KEY: u32 = 0xFFFF_FFFF;
+
+/// Maximum number of linear probes before giving up on hash grid insert/lookup.
+pub const HASH_GRID_MAX_PROBES: u32 = 128;
+
+/// Super-brick size: number of bricks per super-brick axis (8 bricks = 64 voxels).
+pub const SUPER_BRICK_SIZE: u32 = 8;
+
+/// Number of super-bricks per axis (BRICKS_PER_AXIS / SUPER_BRICK_SIZE).
+pub const SUPER_BRICKS_PER_AXIS: u32 = BRICKS_PER_AXIS / SUPER_BRICK_SIZE;
+
+/// Total number of super-bricks in the grid (SUPER_BRICKS_PER_AXIS³).
+pub const TOTAL_SUPER_BRICKS: u32 = SUPER_BRICKS_PER_AXIS * SUPER_BRICKS_PER_AXIS * SUPER_BRICKS_PER_AXIS;
+
 /// Velocity² threshold below which a particle is considered inactive.
 /// Particles with speed² <= this won't increment the activity counter.
 pub const ACTIVITY_VELOCITY_THRESHOLD_SQ: f32 = 0.01;
@@ -92,5 +113,23 @@ mod tests {
         assert_eq!(DIRTY_TILES_X, 80);
         assert_eq!(DIRTY_TILES_Y, 45);
         assert_eq!(DIRTY_TILE_COUNT, 3600);
+    }
+
+    #[test]
+    fn hash_grid_capacity_is_power_of_two() {
+        assert!(HASH_GRID_DEFAULT_CAPACITY.is_power_of_two());
+        assert!(HASH_GRID_DEFAULT_CAPACITY > 0);
+    }
+
+    #[test]
+    fn hash_grid_empty_key_is_max_u32() {
+        assert_eq!(HASH_GRID_EMPTY_KEY, u32::MAX);
+    }
+
+    #[test]
+    fn super_brick_constants_consistent() {
+        assert_eq!(SUPER_BRICKS_PER_AXIS, 4);
+        assert_eq!(TOTAL_SUPER_BRICKS, 64);
+        assert_eq!(TOTAL_SUPER_BRICKS, SUPER_BRICKS_PER_AXIS.pow(3));
     }
 }
