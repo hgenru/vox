@@ -62,8 +62,9 @@ pub const GRID_SIZE: u32 = 256;
 /// Fixed simulation timestep (seconds).
 pub const DT: f32 = 0.001;
 
-/// Gravity acceleration (m/s^2, negative Y).
-pub const GRAVITY: f32 = -9.81;
+/// Gravity acceleration (grid-units/s^2, negative Y).
+/// Scaled 20x from 9.81 for 256^3 grid with 5cm voxels.
+pub const GRAVITY: f32 = -196.0;
 
 /// Material ID constants (synced with shared::material).
 pub const MAT_WATER: u32 = 1;

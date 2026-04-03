@@ -136,7 +136,7 @@ pub fn gather_particle(
         // Counteract 70% of gravity (gravity is negative, so add positive Y)
         // and add a small buoyancy boost. Also damp horizontal velocity slightly
         // to keep steam from flying out of bounds too fast.
-        new_vel.y += 9.81 * 0.7 * dt;
+        new_vel.y += 196.0 * 0.7 * dt;
         new_vel.x *= 0.98;
         new_vel.z *= 0.98;
     }

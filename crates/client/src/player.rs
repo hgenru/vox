@@ -14,10 +14,10 @@ use crate::camera::Camera;
 const DEFAULT_PLAYER_HEIGHT: f32 = 1.8;
 
 /// Default jump speed (initial upward velocity) in units per second.
-const DEFAULT_JUMP_SPEED: f32 = 6.0;
+const DEFAULT_JUMP_SPEED: f32 = 120.0;
 
 /// Gravitational acceleration in units per second squared.
-const GRAVITY: f32 = 9.81;
+const GRAVITY: f32 = 196.0;
 
 /// Player controller that wraps a [`Camera`] with optional gravity and ground collision.
 ///
