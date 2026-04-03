@@ -33,7 +33,7 @@ const DEFAULT_SUBSTEPS: u32 = 4;
 const SPAWN_DISTANCE: f32 = 30.0;
 const REMOVE_RADIUS: f32 = 2.0;
 const EXPLOSION_RADIUS: f32 = 20.0;
-const EXPLOSION_STRENGTH: f32 = 50.0;
+const EXPLOSION_STRENGTH: f32 = 800.0;
 /// Water level scales with grid: ~12% of grid height.
 const WATER_LEVEL_FRAC: f32 = 0.12;
 const MARGIN: u32 = 2;
