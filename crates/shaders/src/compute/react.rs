@@ -42,7 +42,7 @@ fn has_neighbor_material(
     }
     let idx = (z as u32 * grid_size * grid_size + y as u32 * grid_size + x as u32) as usize;
     let voxel = voxels[idx];
-    voxel.w > 0 && voxel.x == target_material
+    voxel.w > 0 && ((voxel.x >> 16) & 0xFF) == target_material
 }
 
 /// Check the 6 face-neighbors of a particle's voxel position for a given material.

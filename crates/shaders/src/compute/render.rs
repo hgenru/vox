@@ -447,7 +447,7 @@ fn compute_lava_light(
                         + ny as u32 * grid_size
                         + nx as u32) as usize;
                     let voxel = voxels[idx];
-                    if voxel.w > 0 && voxel.x == 2 {
+                    if voxel.w > 0 && ((voxel.x >> 16) & 0xFF) == 2 {
                         // Lava found — add warm orange light with distance falloff
                         let dist_sq = (dx * dx + dy * dy + dz * dz) as f32;
                         let attenuation = 1.0 / (1.0 + dist_sq * 0.5);
@@ -606,7 +606,7 @@ pub fn render_pixel(
             let voxel = voxels[idx];
             if voxel.w > 0 {
                 hit = true;
-                hit_material = voxel.x;
+                hit_material = (voxel.x >> 16) & 0xFF;
                 break;
             }
         } else {
@@ -661,9 +661,9 @@ pub fn render_pixel(
         );
         let in_shadow = march_shadow(shadow_origin, sun_direction(), voxels, grid_size);
 
-        // Read phase from voxel data (.y component)
+        // Read phase from packed voxel data (.x component, bits 8-15)
         let hit_idx = (vz as u32 * grid_size * grid_size + vy as u32 * grid_size + vx as u32) as usize;
-        let hit_phase = voxels[hit_idx].y;
+        let hit_phase = (voxels[hit_idx].x >> 8) & 0xFF;
 
         // Override color for gas/steam (phase == 2): white-ish wispy appearance
         let base_color = if hit_phase == 2 {
