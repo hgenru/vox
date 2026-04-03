@@ -179,10 +179,66 @@ pub struct UpdateSleepPushConstants {
     pub total_bricks: u32,
     /// Frames of zero activity before a brick enters sleep state.
     pub sleep_threshold: u32,
+    /// Number of bricks per axis (grid_size / brick_size).
+    pub bricks_per_axis: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad: u32,
+}
+
+/// Push constants for the count_per_brick shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct CountPerBrickPushConstants {
+    /// Total number of active particles.
+    pub num_particles: u32,
+    /// Grid dimension (cells per axis).
+    pub grid_size: u32,
+    /// Brick size (voxels per brick axis, e.g. 8).
+    pub brick_size: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad: u32,
+}
+
+/// Push constants for the prefix_sum shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct PrefixSumPushConstants {
+    /// Total number of bricks.
+    pub total_bricks: u32,
     /// Padding to 16-byte alignment.
     pub _pad0: u32,
     /// Padding to 16-byte alignment.
     pub _pad1: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad2: u32,
+}
+
+/// Push constants for the scatter_particles shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct ScatterParticlesPushConstants {
+    /// Total number of active particles.
+    pub num_particles: u32,
+    /// Grid dimension (cells per axis).
+    pub grid_size: u32,
+    /// Brick size (voxels per brick axis, e.g. 8).
+    pub brick_size: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad: u32,
+}
+
+/// Push constants for the compact_active_bricks shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct CompactActiveBricksPushConstants {
+    /// Total number of bricks.
+    pub total_bricks: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad0: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad1: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad2: u32,
 }
 
 /// Maximum number of material slots in the toolbar.
