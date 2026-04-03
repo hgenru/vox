@@ -324,7 +324,7 @@ impl GpuSimulation {
             ctx,
             shader_module,
             c"compute::g2p::g2p",
-            &[&particle_buffer, &grid_buffer],
+            &[&particle_buffer, &grid_buffer, &voxel_buffer],
             mem::size_of::<G2pPushConstants>() as u32,
             descriptor_pool,
             "g2p",

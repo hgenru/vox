@@ -29,6 +29,45 @@ pub struct G2pPushConstants {
 /// 0.7 PIC balances stability with fluid-like flow (less viscous damping).
 const PIC_RATIO: f32 = 0.5;
 
+/// Number of u32 values per voxel cell (must match voxelize.rs layout).
+const U32S_PER_VOXEL: u32 = 4;
+
+/// Check if a solid particle has support from a solid voxel below it.
+///
+/// Reads the voxel buffer (from the previous frame's voxelize pass) to see
+/// if the cell directly below this particle is occupied by a solid (phase==0).
+/// Particles at the grid floor (vy <= 1) are always considered supported.
+pub fn check_solid_support(pos: spirv_std::glam::Vec3, voxels: &[u32], grid_size: u32) -> bool {
+    let vx = pos.x as u32;
+    let vy = pos.y as u32;
+    let vz = pos.z as u32;
+
+    // At bottom of grid = supported by boundary
+    if vy <= 1 {
+        return true;
+    }
+
+    // Check cell below
+    let below_y = vy - 1;
+    if vx >= grid_size || below_y >= grid_size || vz >= grid_size {
+        return true; // out of bounds = treat as supported (safe default)
+    }
+
+    let below_idx = (vz * grid_size * grid_size + below_y * grid_size + vx) as usize;
+    let base = below_idx * U32S_PER_VOXEL as usize;
+
+    // Check occupied flag (offset +3) and that the occupant is solid (phase==0)
+    let occupied = voxels[base + 3] > 0;
+    if !occupied {
+        return false;
+    }
+
+    // Unpack phase from packed_material at offset +0: (weight<<24 | mat<<16 | phase<<8 | 0xFF)
+    let packed = voxels[base];
+    let phase_below = (packed >> 8) & 0xFF;
+    phase_below == 0 // supported only if the voxel below is also solid
+}
+
 /// Gather velocity from the grid and update one particle.
 ///
 /// Implements the G2P transfer step:
@@ -38,9 +77,13 @@ const PIC_RATIO: f32 = 0.5;
 /// 4. Update deformation gradient F
 /// 5. Advect position
 /// 6. Check phase transitions by temperature
+///
+/// For solid particles (phase==0), checks support from the voxel below.
+/// Supported solids update only F/C (pinned). Unsupported solids fall normally.
 pub fn gather_particle(
     particle: &mut Particle,
     grid: &[GridCell],
+    voxels: &[u32],
     grid_size: u32,
     dt: f32,
 ) {
@@ -177,17 +220,22 @@ pub fn gather_particle(
     new_pos.y = new_pos.y.clamp(margin, upper);
     new_pos.z = new_pos.z.clamp(margin, upper);
 
-    // Solids: update F and C for stress computation but skip position/velocity advection.
-    // This prevents stone floor particles from drifting toward grid cell boundaries (#45).
+    // Solids: check if the particle has support from a solid voxel below.
+    // Supported solids update F and C only (pinned, prevents floor drift #45).
+    // Unsupported solids fall through to full position/velocity update.
     if phase == 0 {
-        particle.f_col0 = new_f0.extend(0.0);
-        particle.f_col1 = new_f1.extend(0.0);
-        particle.f_col2 = new_f2.extend(0.0);
-        particle.c_col0 = c_col0.extend(0.0);
-        particle.c_col1 = c_col1.extend(0.0);
-        particle.c_col2 = c_col2.extend(0.0);
-        apply_phase_transitions(particle);
-        return;
+        let supported = check_solid_support(pos, voxels, grid_size);
+        if supported {
+            particle.f_col0 = new_f0.extend(0.0);
+            particle.f_col1 = new_f1.extend(0.0);
+            particle.f_col2 = new_f2.extend(0.0);
+            particle.c_col0 = c_col0.extend(0.0);
+            particle.c_col1 = c_col1.extend(0.0);
+            particle.c_col2 = c_col2.extend(0.0);
+            apply_phase_transitions(particle);
+            return;
+        }
+        // Unsupported: fall through to position/velocity update below
     }
 
     // Write back to particle (liquids and gases only)
@@ -283,6 +331,7 @@ pub fn apply_phase_transitions(particle: &mut Particle) {
 ///
 /// Descriptor set 0, binding 0: storage buffer of `Particle` (read-write).
 /// Descriptor set 0, binding 1: storage buffer of `GridCell` (read).
+/// Descriptor set 0, binding 2: storage buffer of `u32` (voxel grid, 4 per cell, read).
 /// Push constants: `G2pPushConstants`.
 /// Dispatch with `(ceil(num_particles / 64), 1, 1)` workgroups.
 #[spirv(compute(threads(64)))]
@@ -291,10 +340,11 @@ pub fn g2p(
     #[spirv(push_constant)] push: &G2pPushConstants,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] particles: &mut [Particle],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] grid: &[GridCell],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] voxels: &[u32],
 ) {
     let idx = id.x as usize;
     if id.x >= push.num_particles {
         return;
     }
-    gather_particle(&mut particles[idx], grid, push.grid_size, push.dt);
+    gather_particle(&mut particles[idx], grid, voxels, push.grid_size, push.dt);
 }

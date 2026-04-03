@@ -11,7 +11,7 @@ use shared::{
 };
 use thiserror::Error;
 
-use crate::grid::{clear_grid, g2p, grid_update, p2g};
+use crate::grid::{build_solid_occupancy, clear_grid, g2p, grid_update, p2g};
 
 /// Errors that can occur during simulation.
 #[derive(Debug, Error)]
@@ -122,8 +122,9 @@ impl Simulation {
         // 3. Grid update: momentum → velocity, gravity, boundaries
         grid_update(&mut self.grid, dt);
 
-        // 4. Grid-to-Particle transfer
-        g2p(&mut self.particles, &self.grid, dt);
+        // 4. Grid-to-Particle transfer (with solid support check)
+        let solid_occupancy = build_solid_occupancy(&self.particles);
+        g2p(&mut self.particles, &self.grid, &solid_occupancy, dt);
 
         self.time += dt;
         self.step_count += 1;
