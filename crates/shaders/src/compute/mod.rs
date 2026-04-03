@@ -22,6 +22,7 @@ pub mod prepare_indirect;
 pub mod react;
 pub mod render;
 pub mod toolbar_overlay;
+pub mod update_sleep;
 pub mod voxelize;
 
 /// Compute 1D quadratic B-spline weights for a particle at fractional position `fx`.

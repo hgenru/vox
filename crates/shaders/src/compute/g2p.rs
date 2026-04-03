@@ -441,12 +441,31 @@ fn reset_deformation_gradient(particle: &mut Particle) {
     particle.f_col2 = Vec4::new(0.0, 0.0, 1.0, 0.0);
 }
 
+/// Check whether the brick containing a particle position is sleeping.
+///
+/// Computes the brick index from position and looks up the sleep state buffer.
+/// Returns `true` if the brick is marked as sleeping (value != 0).
+/// Out-of-bounds positions return `false` (not sleeping) as a safe default.
+pub fn is_brick_sleeping(pos_x: f32, pos_y: f32, pos_z: f32, sleep_state: &[u32]) -> bool {
+    let brick_size: u32 = 8;
+    let bricks_per_axis: u32 = 32; // 256 / 8
+    let bx = (pos_x as u32) / brick_size;
+    let by = (pos_y as u32) / brick_size;
+    let bz = (pos_z as u32) / brick_size;
+    if bx >= bricks_per_axis || by >= bricks_per_axis || bz >= bricks_per_axis {
+        return false; // out of bounds = not sleeping
+    }
+    let brick_idx = bz * bricks_per_axis * bricks_per_axis + by * bricks_per_axis + bx;
+    sleep_state[brick_idx as usize] != 0
+}
+
 /// Compute shader entry point: Grid-to-Particle transfer.
 ///
 /// Descriptor set 0, binding 0: storage buffer of `Particle` (read-write).
 /// Descriptor set 0, binding 1: storage buffer of `GridCell` (read).
 /// Descriptor set 0, binding 2: storage buffer of `u32` (voxel grid, 4 per cell, read).
 /// Descriptor set 0, binding 3: storage buffer of `PhaseTransitionRule` (read).
+/// Descriptor set 0, binding 4: storage buffer of `u32` (sleep_state per brick, read).
 /// Push constants: `G2pPushConstants`.
 /// Dispatch with `(ceil(num_particles / 64), 1, 1)` workgroups.
 #[spirv(compute(threads(64)))]
@@ -457,11 +476,19 @@ pub fn g2p(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] grid: &[GridCell],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] voxels: &[u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] reactions: &[PhaseTransitionRule],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] sleep_state: &[u32],
 ) {
     let idx = id.x as usize;
     if id.x >= push.num_particles {
         return;
     }
+
+    // Copy position to locals (trap #21) and check sleep state before gathering
+    let pos_mass = particles[idx].pos_mass;
+    if is_brick_sleeping(pos_mass.x, pos_mass.y, pos_mass.z, sleep_state) {
+        return;
+    }
+
     gather_particle(
         &mut particles[idx],
         grid,
