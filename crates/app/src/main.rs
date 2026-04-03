@@ -23,6 +23,8 @@ struct Args {
     frames: u32,
     output: Option<String>,
     substeps: u32,
+    /// Path to a RON scene file. If `None`, the default island scene is used.
+    scene: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -44,7 +46,11 @@ fn parse_args() -> Args {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_SUBSTEPS);
-    Args { headless, frames, output, substeps }
+    let scene = args
+        .iter()
+        .position(|a| a == "--scene")
+        .and_then(|i| args.get(i + 1).cloned());
+    Args { headless, frames, output, substeps, scene }
 }
 
 fn main() -> Result<()> {
@@ -58,7 +64,7 @@ fn main() -> Result<()> {
     if args.headless { return headless::run_headless(&args); }
 
     let event_loop = EventLoop::new()?;
-    let mut application = app::App::new(args.substeps);
+    let mut application = app::App::new(args.substeps, args.scene.as_deref());
     event_loop.run_app(&mut application)?;
     tracing::info!("VOX Engine shut down");
     Ok(())

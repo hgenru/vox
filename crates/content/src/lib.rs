@@ -7,9 +7,11 @@
 //! It is CPU-only (not `no_std`) and depends on `serde` + `ron`.
 
 mod convert;
+pub mod scene;
 mod types;
 
 pub use convert::MaterialDatabase;
+pub use scene::{CameraDef, SceneDef, SceneObject};
 pub use types::*;
 
 /// Errors that can occur when loading content files.
@@ -38,6 +40,31 @@ pub enum ContentError {
     /// Too many phase transition rules for the GPU buffer.
     #[error("too many phase transition rules: {count} exceeds maximum {max}")]
     TooManyPhaseRules { count: usize, max: usize },
+}
+
+/// Load a [`SceneDef`] from a RON file at the given path.
+///
+/// Parses the file into a scene definition whose [`SceneDef::spawn_particles`]
+/// method can then generate the initial particle list.
+///
+/// # Errors
+///
+/// Returns [`ContentError`] if the file cannot be read or parsed.
+pub fn load_scene(path: &str) -> std::result::Result<SceneDef, ContentError> {
+    let content = std::fs::read_to_string(path)?;
+    parse_scene(&content)
+}
+
+/// Parse a [`SceneDef`] from a RON string.
+///
+/// Same as [`load_scene`] but operates on an in-memory string.
+/// Useful for testing without filesystem access.
+///
+/// # Errors
+///
+/// Returns [`ContentError`] if parsing fails.
+pub fn parse_scene(ron_str: &str) -> std::result::Result<SceneDef, ContentError> {
+    Ok(ron::from_str(ron_str)?)
 }
 
 /// Load a [`MaterialDatabase`] from a RON file at the given path.
