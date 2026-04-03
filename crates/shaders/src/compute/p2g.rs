@@ -61,8 +61,8 @@ pub fn compute_stress(particle: &Particle) -> [Vec3; 3] {
         } else {
             // Liquid: material-specific
             match material_id {
-                1 => (15.0_f32, 0.001_f32),  // Water: low bulk, very low viscosity (runny)
-                2 => (25.0_f32, 5.0_f32),    // Lava: higher bulk, HIGH viscosity (sluggish)
+                1 => (20.0_f32, 0.001_f32),  // Water: low viscosity (runny)
+                2 => (20.0_f32, 8.0_f32),    // Lava: HIGH viscosity (thick spread), SAME bulk
                 _ => (20.0_f32, 0.1_f32),    // Default liquid
             }
         };
