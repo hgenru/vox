@@ -34,6 +34,9 @@ const SPAWN_DISTANCE: f32 = 8.0;
 const REMOVE_RADIUS: f32 = 2.0;
 /// Water level scales with grid: ~15% of grid height.
 const WATER_LEVEL_FRAC: f32 = 0.15;
+const MARGIN: u32 = 2;
+const SHELL_THICKNESS: i32 = 3;
+const FLOOR_THICKNESS: i32 = 2;
 
 struct MaterialSlot {
     name: &'static str,
@@ -151,17 +154,33 @@ fn spawn_cell(
 fn create_island_particles() -> Vec<Particle> {
     let mut particles = Vec::new();
     let gs = GRID_SIZE;
-    let margin = 2u32;
+    let margin = MARGIN;
+    let upper = gs - margin;
     let water_level = (gs as f32 * WATER_LEVEL_FRAC) as i32;
 
-    // 1. Terrain: stone particles following the heightmap
-    for x in margin..(gs - margin) {
-        for z in margin..(gs - margin) {
+    // 1a. Thin floor at the bottom
+    for x in margin..upper {
+        for z in margin..upper {
+            let fx = x as f32 + 0.5;
+            let fz = z as f32 + 0.5;
+            for y in (margin as i32)..(margin as i32 + FLOOR_THICKNESS).min(upper as i32) {
+                particles.push(Particle::new(
+                    Vec3::new(fx, y as f32 + 0.5, fz),
+                    1.0, MAT_STONE, PHASE_SOLID,
+                ));
+            }
+        }
+    }
+
+    // 1b. Terrain shell: only top SHELL_THICKNESS layers
+    for x in margin..upper {
+        for z in margin..upper {
             let fx = x as f32 + 0.5;
             let fz = z as f32 + 0.5;
             let height = island_height(fx, fz);
-            let max_y = height.ceil() as i32;
-            for y in (margin as i32)..max_y.min((gs - margin) as i32) {
+            let max_y = (height.ceil() as i32).min(upper as i32);
+            let min_y = (max_y - SHELL_THICKNESS).max(margin as i32 + FLOOR_THICKNESS);
+            for y in min_y..max_y {
                 particles.push(Particle::new(
                     Vec3::new(fx, y as f32 + 0.5, fz),
                     1.0, MAT_STONE, PHASE_SOLID,
