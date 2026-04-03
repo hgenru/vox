@@ -56,8 +56,26 @@ pub(crate) struct App {
 
 impl App {
     /// Create a new `App` with the given number of physics substeps per frame.
-    pub(crate) fn new(substeps: u32) -> Self {
-        let particles = create_island_particles();
+    ///
+    /// If `scene_path` is `Some`, loads a RON scene definition from that file.
+    /// Otherwise falls back to the default procedural island scene.
+    pub(crate) fn new(substeps: u32, scene_path: Option<&str>) -> Self {
+        let (particles, scene_camera) = if let Some(path) = scene_path {
+            match content::load_scene(path) {
+                Ok(scene) => {
+                    tracing::info!("Loaded scene '{}' from {}", scene.name, path);
+                    let cam = scene.camera.clone();
+                    let p = scene.spawn_particles();
+                    (p, cam)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load scene '{}': {}, using default", path, e);
+                    (create_island_particles(), None)
+                }
+            }
+        } else {
+            (create_island_particles(), None)
+        };
         tracing::info!("Created {} initial particles", particles.len());
 
         // Try loading materials from RON file, fall back to hardcoded defaults
@@ -75,15 +93,25 @@ impl App {
             }
         };
 
-        let gs = GRID_SIZE as f32;
-        let camera = Camera::look_at(
-            Vec3::new(gs * 0.75, gs * 0.4, gs * 0.75),
-            Vec3::new(gs * 0.5, gs * 0.3, gs * 0.5),
-        );
+        let camera = if let Some(ref cam) = scene_camera {
+            Camera::look_at(
+                Vec3::new(cam.eye.0, cam.eye.1, cam.eye.2),
+                Vec3::new(cam.target.0, cam.target.1, cam.target.2),
+            )
+        } else {
+            let gs = GRID_SIZE as f32;
+            Camera::look_at(
+                Vec3::new(gs * 0.75, gs * 0.4, gs * 0.75),
+                Vec3::new(gs * 0.5, gs * 0.3, gs * 0.5),
+            )
+        };
         let mut player = PlayerController::new(camera);
-        let heightmap = generate_heightmap();
-        if let Err(e) = player.set_heightmap(heightmap, GRID_SIZE) {
-            tracing::warn!("Failed to set heightmap: {}", e);
+        // Only generate heightmap for default island scene (RON scenes don't have procedural terrain)
+        if scene_camera.is_none() {
+            let heightmap = generate_heightmap();
+            if let Err(e) = player.set_heightmap(heightmap, GRID_SIZE) {
+                tracing::warn!("Failed to set heightmap: {}", e);
+            }
         }
 
         Self {

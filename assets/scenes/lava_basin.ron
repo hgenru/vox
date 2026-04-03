@@ -1,0 +1,18 @@
+(
+    name: "Lava Basin",
+    camera: Some((eye: (40.0, 28.0, 40.0), target: (16.0, 6.0, 16.0))),
+    objects: [
+        // Stone floor
+        Box(material: 0, phase: 0, min: (2.0, 2.0, 2.0), max: (62.0, 5.0, 62.0)),
+        // Stone walls (hollow box)
+        HollowBox(
+            material: 0, phase: 0,
+            outer_min: (2.0, 5.0, 2.0), outer_max: (62.0, 15.0, 62.0),
+            inner_min: (5.0, 5.0, 5.0), inner_max: (59.0, 15.0, 59.0),
+        ),
+        // Water pool (left half)
+        Box(material: 1, phase: 1, min: (6.0, 5.0, 6.0), max: (30.0, 10.0, 58.0), ppc: 8),
+        // Lava stream (right half)
+        Box(material: 2, phase: 1, min: (35.0, 5.0, 25.0), max: (55.0, 8.0, 40.0), temperature: 2000.0, ppc: 8),
+    ],
+)

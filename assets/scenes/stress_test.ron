@@ -1,0 +1,17 @@
+(
+    name: "Stress Test",
+    camera: Some((eye: (100.0, 80.0, 100.0), target: (64.0, 20.0, 64.0))),
+    objects: [
+        // Thick stone floor
+        Layer(material: 0, phase: 0, y_min: 2.0, y_max: 6.0),
+        // Large water volume
+        Box(material: 1, phase: 1, min: (10.0, 6.0, 10.0), max: (120.0, 30.0, 120.0), ppc: 8),
+        // Lava ball dropping into the water
+        Sphere(material: 2, phase: 1, center: (64.0, 50.0, 64.0), radius: 12.0, temperature: 2000.0, ppc: 8),
+        // Stone pillars
+        Box(material: 0, phase: 0, min: (30.0, 6.0, 30.0), max: (34.0, 40.0, 34.0)),
+        Box(material: 0, phase: 0, min: (90.0, 6.0, 90.0), max: (94.0, 40.0, 94.0)),
+        Box(material: 0, phase: 0, min: (30.0, 6.0, 90.0), max: (34.0, 40.0, 94.0)),
+        Box(material: 0, phase: 0, min: (90.0, 6.0, 30.0), max: (94.0, 40.0, 34.0)),
+    ],
+)

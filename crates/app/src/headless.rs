@@ -29,7 +29,15 @@ pub(crate) fn run_headless(args: &Args) -> Result<()> {
             GpuSimulation::new(&ctx)?
         }
     };
-    let particles = create_island_particles();
+    let (particles, scene_camera) = if let Some(scene_path) = &args.scene {
+        let scene = content::load_scene(scene_path)?;
+        tracing::info!("Loaded scene '{}' from {}", scene.name, scene_path);
+        let cam = scene.camera.clone();
+        let p = scene.spawn_particles();
+        (p, cam)
+    } else {
+        (create_island_particles(), None)
+    };
     sim.init_particles(&ctx, &particles)?;
 
     for i in 0..args.frames {
@@ -39,9 +47,12 @@ pub(crate) fn run_headless(args: &Args) -> Result<()> {
         if i % 10 == 0 { tracing::info!("Frame {}/{}", i, args.frames); }
     }
 
-    let gs = GRID_SIZE as f32;
-    let eye = [gs * 0.75, gs * 0.4, gs * 0.75];
-    let target = [gs * 0.5, gs * 0.3, gs * 0.5];
+    let (eye, target) = if let Some(cam) = &scene_camera {
+        ([cam.eye.0, cam.eye.1, cam.eye.2], [cam.target.0, cam.target.1, cam.target.2])
+    } else {
+        let gs = GRID_SIZE as f32;
+        ([gs * 0.75, gs * 0.4, gs * 0.75], [gs * 0.5, gs * 0.3, gs * 0.5])
+    };
     ctx.execute_one_shot(|cmd| {
         sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye, target);
         sim.finalize_render(cmd);
