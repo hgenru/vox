@@ -9,8 +9,8 @@ use gpu_core::{
     pipeline,
 };
 use shared::{
-    GRID_CELL_COUNT, GRID_SIZE, GridCell, MAX_ACTIVE_CELLS, MAX_PARTICLES, Particle,
-    RENDER_HEIGHT, RENDER_WIDTH, SLEEP_THRESHOLD, TOTAL_BRICKS,
+    GRID_CELL_COUNT, GRID_SIZE, GridCell, MAX_ACTIVE_CELLS, MAX_PARTICLES,
+    Particle, RENDER_HEIGHT, RENDER_WIDTH, SLEEP_THRESHOLD, TOTAL_BRICKS,
     material::{self, MATERIAL_COUNT, MaterialParams},
     reaction::{self, MAX_PHASE_RULES, PhaseTransitionRule},
 };
@@ -44,6 +44,9 @@ pub struct GpuSimulation {
     sleep_counter_buffer: GpuBuffer,
     sleep_state_buffer: GpuBuffer,
 
+    // Brick occupancy (render optimization)
+    brick_occupancy_buffer: GpuBuffer,
+
     // Sparse dispatch buffers
     mark_buffer: GpuBuffer,
     active_cells_buffer: GpuBuffer,
@@ -64,6 +67,9 @@ pub struct GpuSimulation {
 
     // Activity tracking pass
     compute_activity_pass: ComputePass,
+
+    // Brick occupancy pass (render optimization)
+    compute_occupancy_pass: ComputePass,
 
     // Brick sleep pass
     update_sleep_pass: ComputePass,
@@ -221,6 +227,14 @@ impl GpuSimulation {
         buffer::upload(ctx, &zeros, &sleep_counter_buffer)?;
         buffer::upload(ctx, &zeros, &sleep_state_buffer)?;
 
+        // -- Brick occupancy buffer (1 u32 per brick, 128 KB) --
+        let brick_occupancy_buffer = buffer::create_device_local_buffer(
+            ctx,
+            (TOTAL_BRICKS as usize * 4) as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            "brick-occupancy-buffer",
+        )?;
+
         // -- Sparse dispatch buffers --
         let mark_buffer = buffer::create_device_local_buffer(
             ctx,
@@ -244,13 +258,13 @@ impl GpuSimulation {
             buffer::create_indirect_buffer(ctx, "indirect-dispatch-buffer")?;
 
         // -- Descriptor pool --
-        // 16 passes, max 5 bindings each = up to 80 storage buffer descriptors
+        // 18 passes, max 5 bindings each = up to 90 storage buffer descriptors
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 80,
+            descriptor_count: 90,
         }];
         let descriptor_pool =
-            pipeline::create_descriptor_pool(ctx, &pool_sizes, 16, "sim-descriptor-pool")?;
+            pipeline::create_descriptor_pool(ctx, &pool_sizes, 18, "sim-descriptor-pool")?;
 
         // -- Create each compute pass --
         // Entry point names are fully qualified module paths in rust-gpu SPIR-V.
@@ -318,7 +332,7 @@ impl GpuSimulation {
             ctx,
             shader_module,
             c"compute::render::render_voxels",
-            &[&voxel_buffer, &render_output_buffer, &material_buffer],
+            &[&voxel_buffer, &render_output_buffer, &material_buffer, &brick_occupancy_buffer],
             mem::size_of::<RenderPushConstants>() as u32,
             descriptor_pool,
             "render",
@@ -364,6 +378,18 @@ impl GpuSimulation {
             mem::size_of::<ComputeActivityPushConstants>() as u32,
             descriptor_pool,
             "compute-activity",
+        )?;
+
+        // -- Brick occupancy pass --
+        // compute_occupancy: voxels(r), brick_occupied(w)
+        let compute_occupancy_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::compute_occupancy::compute_occupancy",
+            &[&voxel_buffer, &brick_occupancy_buffer],
+            mem::size_of::<ComputeOccupancyPushConstants>() as u32,
+            descriptor_pool,
+            "compute-occupancy",
         )?;
 
         // -- Brick sleep pass --
@@ -435,6 +461,7 @@ impl GpuSimulation {
             activity_map_buffer,
             sleep_counter_buffer,
             sleep_state_buffer,
+            brick_occupancy_buffer,
             mark_buffer,
             active_cells_buffer,
             active_count_buffer,
@@ -450,6 +477,7 @@ impl GpuSimulation {
             react_pass,
             explosion_pass,
             compute_activity_pass,
+            compute_occupancy_pass,
             update_sleep_pass,
             mark_active_pass,
             prepare_indirect_pass,
@@ -736,6 +764,25 @@ impl GpuSimulation {
             bytemuck::bytes_of(&vox_pc),
         );
         passes::barrier(cmd, &self.device);
+
+        // 11. Compute brick occupancy (for render brick-skip optimization)
+        let occupancy_pc = ComputeOccupancyPushConstants {
+            grid_size,
+            brick_size: shared::BRICK_SIZE,
+            bricks_per_axis: shared::BRICKS_PER_AXIS,
+            _pad: 0,
+        };
+        let brick_wg = (TOTAL_BRICKS + 63) / 64;
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.compute_occupancy_pass,
+            brick_wg,
+            1,
+            1,
+            bytemuck::bytes_of(&occupancy_pc),
+        );
+        passes::barrier(cmd, &self.device);
     }
 
     /// Run chemical reactions only. Call once per frame after all substeps.
@@ -931,6 +978,7 @@ impl GpuSimulation {
             &self.react_pass,
             &self.explosion_pass,
             &self.compute_activity_pass,
+            &self.compute_occupancy_pass,
             &self.update_sleep_pass,
             &self.mark_active_pass,
             &self.prepare_indirect_pass,
@@ -1023,6 +1071,14 @@ impl GpuSimulation {
                 size: 0,
             },
         );
+        let brick_occupancy_buf = std::mem::replace(
+            &mut self.brick_occupancy_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
         let mark_buf = std::mem::replace(
             &mut self.mark_buffer,
             GpuBuffer {
@@ -1064,6 +1120,7 @@ impl GpuSimulation {
         buffer::destroy_buffer(ctx, activity_map_buf);
         buffer::destroy_buffer(ctx, sleep_counter_buf);
         buffer::destroy_buffer(ctx, sleep_state_buf);
+        buffer::destroy_buffer(ctx, brick_occupancy_buf);
         buffer::destroy_buffer(ctx, mark_buf);
         buffer::destroy_buffer(ctx, active_cells_buf);
         buffer::destroy_buffer(ctx, active_count_buf);
