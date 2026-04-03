@@ -37,6 +37,9 @@ pub(crate) fn run_headless(args: &Args) -> Result<()> {
         let cam = scene.camera.clone();
         let p = scene.spawn_particles();
         (p, cam)
+    } else if args.big {
+        tracing::info!("Using mountain range scene (--big)");
+        (crate::scene::create_mountain_particles(), None)
     } else {
         (create_island_particles(), None)
     };

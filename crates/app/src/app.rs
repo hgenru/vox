@@ -23,7 +23,8 @@ use winit::{
 };
 
 use crate::scene::{
-    MaterialSlot, create_island_particles, generate_heightmap, material_palette, spawn_cell,
+    MaterialSlot, create_island_particles, create_mountain_particles,
+    generate_heightmap, generate_mountain_heightmap, material_palette, spawn_cell,
 };
 
 /// Distance (in grid units) from the camera eye at which particles are
@@ -62,22 +63,25 @@ impl App {
     /// Otherwise falls back to the default procedural island scene.
     /// If `model_path` is provided, the `.vox` model is loaded and its
     /// particles are added to the scene at `model_pos` (default 32,20,32).
-    pub(crate) fn new(substeps: u32, scene_path: Option<&str>, model_path: Option<&str>, model_pos: Option<(f32, f32, f32)>) -> Self {
-        let (mut particles, scene_camera) = if let Some(path) = scene_path {
+    pub(crate) fn new(substeps: u32, scene_path: Option<&str>, big: bool, model_path: Option<&str>, model_pos: Option<(f32, f32, f32)>) -> Self {
+        let (mut particles, scene_camera, use_mountain) = if let Some(path) = scene_path {
             match content::load_scene(path) {
                 Ok(scene) => {
                     tracing::info!("Loaded scene '{}' from {}", scene.name, path);
                     let cam = scene.camera.clone();
                     let p = scene.spawn_particles();
-                    (p, cam)
+                    (p, cam, false)
                 }
                 Err(e) => {
                     tracing::warn!("Failed to load scene '{}': {}, using default", path, e);
-                    (create_island_particles(), None)
+                    (create_island_particles(), None, false)
                 }
             }
+        } else if big {
+            tracing::info!("Using mountain range scene (--big)");
+            (create_mountain_particles(), None, true)
         } else {
-            (create_island_particles(), None)
+            (create_island_particles(), None, false)
         };
         if let Some(path) = model_path {
             let pos = model_pos.unwrap_or((32.0, 20.0, 32.0));
@@ -123,9 +127,13 @@ impl App {
             )
         };
         let mut player = PlayerController::new(camera);
-        // Only generate heightmap for default island scene (RON scenes don't have procedural terrain)
+        // Only generate heightmap for procedural scenes (RON scenes don't have procedural terrain)
         if scene_camera.is_none() {
-            let heightmap = generate_heightmap();
+            let heightmap = if use_mountain {
+                generate_mountain_heightmap()
+            } else {
+                generate_heightmap()
+            };
             if let Err(e) = player.set_heightmap(heightmap, GRID_SIZE) {
                 tracing::warn!("Failed to set heightmap: {}", e);
             }
