@@ -99,3 +99,25 @@ pub const MAT_GUNPOWDER: u32 = 6;
 
 /// Number of materials in the table (synced with shared::material).
 pub const MATERIAL_COUNT: usize = 7;
+
+/// Maximum number of phase transition rules (synced with shared::reaction).
+pub const MAX_PHASE_RULES: usize = 16;
+
+/// Flags for phase transition behavior (synced with shared::reaction).
+pub const FLAG_RESET_F: u32 = 1;
+/// Flag to apply explosion behavior on transition.
+pub const FLAG_EXPLOSION: u32 = 2;
+
+/// A single phase transition rule. 32 bytes, 16-byte aligned.
+///
+/// Mirrors `shared::reaction::PhaseTransitionRule` layout exactly.
+/// - `materials`: x=from_material, y=from_phase, z=to_material, w=to_phase
+/// - `conditions`: x=temp_min, y=temp_max, z=flags (as f32), w=pad
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PhaseTransitionRule {
+    /// x = from_material_id, y = from_phase, z = to_material_id, w = to_phase.
+    pub materials: UVec4,
+    /// x = temp_min, y = temp_max, z = flags (as f32), w = pad.
+    pub conditions: Vec4,
+}
