@@ -163,16 +163,23 @@ fn apply_gunpowder_explosion_cpu(particle: &mut Particle) {
     let hy = hash_f32_cpu(py * 127.31 + px * 53.47);
     let hz = hash_f32_cpu(pz * 91.53 + py * 67.13);
 
-    let explosion_speed = 150.0_f32;
+    let explosion_speed = 200.0_f32;
     let gs = shared::constants::GRID_SIZE as f32;
 
     // Convert grid-space velocity to world-space (divide by grid size)
-    let vel = Vec3::new(
-        hx * explosion_speed / gs,
-        hy.abs() * explosion_speed / gs + 80.0 / gs,
-        hz * explosion_speed / gs,
-    );
-    particle.set_velocity(vel);
+    let vx = hx * explosion_speed / gs;
+    let vy = hy.abs() * explosion_speed / gs + 100.0 / gs;
+    let vz = hz * explosion_speed / gs;
+    particle.set_velocity(Vec3::new(vx, vy, vz));
+    // Also push position directly — G2P will overwrite velocity on next frame
+    // via grid coupling, so the impulse must also move particles spatially.
+    let push_scale = 0.02_f32;
+    let pos = particle.position();
+    particle.set_position(Vec3::new(
+        pos.x + vx * push_scale,
+        pos.y + vy * push_scale,
+        pos.z + vz * push_scale,
+    ));
     particle.set_temperature(3000.0);
 }
 

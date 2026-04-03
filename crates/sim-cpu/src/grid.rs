@@ -300,18 +300,24 @@ pub fn check_solid_support(pos: Vec3, solid_occupancy: &[bool]) -> bool {
     }
 
     // Check cell directly below
-    if let Some(idx) = grid_index(ix, iy - 1, iz) {
-        if solid_occupancy[idx] {
-            return true;
+    match grid_index(ix, iy - 1, iz) {
+        Some(idx) => {
+            if solid_occupancy[idx] {
+                return true;
+            }
         }
+        None => return true, // out of bounds = treat as supported (safe default)
     }
 
     // Check 2 cells below to handle stale voxel buffer
     if iy >= 3 {
-        if let Some(idx) = grid_index(ix, iy - 2, iz) {
-            if solid_occupancy[idx] {
-                return true;
+        match grid_index(ix, iy - 2, iz) {
+            Some(idx) => {
+                if solid_occupancy[idx] {
+                    return true;
+                }
             }
+            None => return true,
         }
     }
 
@@ -405,9 +411,8 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[boo
         }
 
         // Thermal diffusion: blend grid temp with particle temp for gradual transfer.
-        // Must match shader g2p.rs thermal_blend value (0.005 = 0.5% per step).
-        // At 120 steps/sec: lava cools from 2000C to solidification in ~3-5 seconds.
-        let thermal_blend = 0.005_f32;
+        // Must match shader g2p.rs thermal_blend value (0.002 = 0.2% per step).
+        let thermal_blend = 0.002_f32;
         let old_temp = particle.temperature();
         new_temp = old_temp + thermal_blend * (new_temp - old_temp);
 
@@ -415,7 +420,7 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[boo
         // Must match shader g2p.rs apply_radiative_cooling().
         // Prevents thermal runaway from repeated explosions.
         let ambient_temp = 20.0_f32;
-        let cooling_rate = 0.002_f32;
+        let cooling_rate = 0.0005_f32;
         new_temp = new_temp + cooling_rate * (ambient_temp - new_temp);
 
         // PIC/FLIP blend
@@ -453,13 +458,13 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[boo
             // Unsupported solid: enforce minimum fall speed to overcome grid friction.
             // Grid coupling with neighboring solids creates artificial friction that
             // prevents free-fall. Override with gravity-based minimum downward velocity.
-            let min_fall_speed = GRAVITY * dt * 10.0; // ~10 frames of gravity
+            let min_fall_speed = GRAVITY * dt * 5.0; // ~5 frames of gravity
             if final_vel.y > min_fall_speed {
                 final_vel.y = min_fall_speed;
             }
-            // Dampen horizontal velocity to prevent wall-sliding and lateral sticking
-            final_vel.x *= 0.5;
-            final_vel.z *= 0.5;
+            // Gentle horizontal damping
+            final_vel.x *= 0.8;
+            final_vel.z *= 0.8;
         }
 
         // Update velocity and temperature
