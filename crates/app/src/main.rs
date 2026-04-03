@@ -25,6 +25,10 @@ struct Args {
     substeps: u32,
     /// Path to a RON scene file. If `None`, the default island scene is used.
     scene: Option<String>,
+    /// Path to a `.vox` (MagicaVoxel) model to load into the scene.
+    model: Option<String>,
+    /// World-space offset (x,y,z) at which to place the loaded model.
+    model_pos: Option<(f32, f32, f32)>,
 }
 
 fn parse_args() -> Args {
@@ -50,7 +54,27 @@ fn parse_args() -> Args {
         .iter()
         .position(|a| a == "--scene")
         .and_then(|i| args.get(i + 1).cloned());
-    Args { headless, frames, output, substeps, scene }
+    let model = args
+        .iter()
+        .position(|a| a == "--model")
+        .and_then(|i| args.get(i + 1).cloned());
+    let model_pos = args
+        .iter()
+        .position(|a| a == "--model-pos")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| {
+            let parts: Vec<&str> = s.split(',').collect();
+            if parts.len() == 3 {
+                Some((
+                    parts[0].trim().parse::<f32>().ok()?,
+                    parts[1].trim().parse::<f32>().ok()?,
+                    parts[2].trim().parse::<f32>().ok()?,
+                ))
+            } else {
+                None
+            }
+        });
+    Args { headless, frames, output, substeps, scene, model, model_pos }
 }
 
 fn main() -> Result<()> {
@@ -64,7 +88,7 @@ fn main() -> Result<()> {
     if args.headless { return headless::run_headless(&args); }
 
     let event_loop = EventLoop::new()?;
-    let mut application = app::App::new(args.substeps, args.scene.as_deref());
+    let mut application = app::App::new(args.substeps, args.scene.as_deref(), args.model.as_deref(), args.model_pos);
     event_loop.run_app(&mut application)?;
     tracing::info!("VOX Engine shut down");
     Ok(())

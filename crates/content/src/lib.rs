@@ -9,10 +9,12 @@
 mod convert;
 pub mod scene;
 mod types;
+pub mod vox_loader;
 
 pub use convert::MaterialDatabase;
 pub use scene::{CameraDef, SceneDef, SceneObject};
 pub use types::*;
+pub use vox_loader::load_vox_model;
 
 /// Errors that can occur when loading content files.
 #[derive(Debug, thiserror::Error)]
@@ -40,6 +42,10 @@ pub enum ContentError {
     /// Too many phase transition rules for the GPU buffer.
     #[error("too many phase transition rules: {count} exceeds maximum {max}")]
     TooManyPhaseRules { count: usize, max: usize },
+
+    /// Failed to load a `.vox` (MagicaVoxel) file.
+    #[error("failed to load .vox file: {0}")]
+    VoxLoad(String),
 }
 
 /// Load a [`SceneDef`] from a RON file at the given path.

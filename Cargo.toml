@@ -41,6 +41,8 @@ thiserror = "2"
 anyhow = "1"
 # Image
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Voxel model loading
+dot_vox = "5"
 # Testing
 proptest = "1"
 approx = "0.5"
