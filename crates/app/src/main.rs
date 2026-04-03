@@ -18,8 +18,8 @@ use glam::Vec3;
 use gpu_core::VulkanContext;
 use server::{GpuSimulation, ToolbarPushConstants, TOOLBAR_MAX_MATERIALS};
 use shared::{
-    GRID_SIZE, MAT_ASH, MAT_LAVA, MAT_STONE, MAT_WATER, MAT_WOOD, PHASE_LIQUID, PHASE_SOLID,
-    Particle, RENDER_HEIGHT, RENDER_WIDTH,
+    GRID_SIZE, MAT_ASH, MAT_ICE, MAT_LAVA, MAT_STONE, MAT_WATER, MAT_WOOD, PHASE_LIQUID,
+    PHASE_SOLID, Particle, RENDER_HEIGHT, RENDER_WIDTH,
 };
 use winit::{
     application::ApplicationHandler,
@@ -84,6 +84,13 @@ fn material_palette() -> Vec<MaterialSlot> {
             phase: PHASE_SOLID,
             temperature: 0.0,
             color: glam::Vec4::new(0.4, 0.4, 0.4, 1.0),
+        },
+        MaterialSlot {
+            name: "Ice",
+            mat_id: MAT_ICE,
+            phase: PHASE_SOLID,
+            temperature: -50.0,
+            color: glam::Vec4::new(0.7, 0.85, 0.95, 1.0),
         },
     ]
 }
@@ -541,6 +548,10 @@ impl ApplicationHandler for App {
                             winit::keyboard::KeyCode::Digit5 if self.palette.len() > 4 => {
                                 self.selected_material = 4;
                                 tracing::info!("Selected: {}", self.palette[4].name);
+                            }
+                            winit::keyboard::KeyCode::Digit6 if self.palette.len() > 5 => {
+                                self.selected_material = 5;
+                                tracing::info!("Selected: {}", self.palette[5].name);
                             }
                             _ => {}
                         }
