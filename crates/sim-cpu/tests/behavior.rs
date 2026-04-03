@@ -304,6 +304,67 @@ fn no_nan_with_mixed_materials() {
     }
 }
 
+/// Water should not leak through a 3-cell-thick solid wall.
+///
+/// Builds a stone wall spanning the full YZ plane at x=14..17 (in grid coords),
+/// places a block of water on the left side, and runs 50 steps. No water particle
+/// should cross to the right side of the wall.
+#[test]
+fn water_doesnt_leak_through_solid_wall() {
+    let mut w = TestWorld::new(); // grid_size=32
+    let dx = 1.0 / 32.0;
+
+    // Build a 3-cell-thick stone wall at x=14..16 (full YZ extent)
+    for y in 0..32_i32 {
+        for z in 0..32_i32 {
+            for wx in 14..17_i32 {
+                w.spawn(
+                    Vec3::new(
+                        wx as f32 * dx + dx * 0.5,
+                        y as f32 * dx + dx * 0.5,
+                        z as f32 * dx + dx * 0.5,
+                    ),
+                    MAT_STONE,
+                    PHASE_SOLID,
+                    20.0,
+                );
+            }
+        }
+    }
+
+    // Water block on the left side (x=8..12, y=5..9, z=10..19)
+    for y in 5..10_i32 {
+        for z in 10..20_i32 {
+            for x in 8..13_i32 {
+                w.spawn(
+                    Vec3::new(
+                        x as f32 * dx + dx * 0.5,
+                        y as f32 * dx + dx * 0.5,
+                        z as f32 * dx + dx * 0.5,
+                    ),
+                    MAT_WATER,
+                    PHASE_LIQUID,
+                    20.0,
+                );
+            }
+        }
+    }
+
+    w.step_n(50);
+
+    // No water should have crossed to x > 17*dx
+    let wall_right = 17.0 * dx + dx;
+    let leaked = w
+        .particles()
+        .iter()
+        .filter(|p| p.material_id() == MAT_WATER && p.position().x > wall_right)
+        .count();
+    assert_eq!(
+        leaked, 0,
+        "Water leaked through wall: {leaked} particles crossed"
+    );
+}
+
 /// Mass must be conserved through the full pipeline (MPM + thermal + transitions).
 #[test]
 fn mass_conserved_through_full_pipeline() {

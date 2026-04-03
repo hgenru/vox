@@ -207,6 +207,13 @@ pub fn p2g_sized(
                     cell.velocity_mass.z += w * momentum.z + force_contrib.z;
                     cell.velocity_mass.w += w * mass;
 
+                    // Mark cells touched by solid particles (phase == 0)
+                    // so grid_update can enforce solid boundary conditions.
+                    // Uses force_pad.w as a solid flag (mirrors GPU p2g.rs).
+                    if particle.phase() == 0 {
+                        cell.force_pad.w += 1.0;
+                    }
+
                     // Scatter weighted temperature (temp * mass * weight).
                     // Normalized by mass in grid_update to get average temperature.
                     cell.temp_pad.x += temp * w * mass;
@@ -281,6 +288,24 @@ pub fn grid_update_sized(grid: &mut [GridCell], dt: f32, grid_size: u32) {
                 }
                 if iz < boundary || iz >= gs - boundary {
                     cell.velocity_mass.z = 0.0;
+                }
+
+                // Solid boundary conditions: zero velocity at cells with solid contributions.
+                // The solid flag is accumulated by P2G into force_pad.w.
+                // Deep inside solid (many overlapping particles) -> fully zero velocity.
+                // At boundary (few solid particles) -> strongly damp velocity.
+                // This prevents momentum from bleeding through solid walls.
+                // Mirrors the GPU grid_update.rs logic.
+                let solid_flag = cell.force_pad.w;
+                if solid_flag > 2.0 {
+                    cell.velocity_mass.x = 0.0;
+                    cell.velocity_mass.y = 0.0;
+                    cell.velocity_mass.z = 0.0;
+                } else if solid_flag > 0.5 {
+                    let damp = 1.0 - (solid_flag / 3.0_f32).min(0.9);
+                    cell.velocity_mass.x *= damp;
+                    cell.velocity_mass.y *= damp;
+                    cell.velocity_mass.z *= damp;
                 }
 
                 // Normalize accumulated temperature by mass.
