@@ -31,6 +31,7 @@ Server/Client split via protocol crate (even without networking):
 | shaders | render | rust-gpu compute + graphics shaders |
 | server | lead | Simulation orchestrator |
 | client | render | RT renderer, camera, input |
+| content | lead | RON material/scene loading, .vox model loader |
 | app | lead | Binary entry point |
 
 ---
@@ -187,10 +188,15 @@ VK_KHR_spirv_1_4
 ```bash
 cargo build                           # Build everything
 cargo test -p shared                  # Test shared types
-cargo test -p sim-cpu                 # Test CPU simulation
-cargo test -p shared -p sim-cpu -p protocol  # All sim-agent tests
+cargo test -p sim-cpu                 # Test CPU simulation (fast: grid_size=32)
+cargo test -p content                 # Test RON/scene/.vox loading
+cargo test -p shared -p sim-cpu -p protocol -p content  # All CPU tests
+cargo test -p server -- --test-threads=1  # GPU tests (single-threaded!)
 cargo test                            # All tests
-cargo run -p bootstrap-test           # Verify rust-gpu + ash pipeline works
+cargo run -p app                      # Run windowed demo (default island)
+cargo run -p app -- --scene assets/scenes/lava_basin.ron  # Run RON scene
+cargo run -p app -- --model path/to/model.vox             # Load .vox model
+cargo run -p app -- --headless --frames 10                # Headless screenshot
 ```
 
 ---

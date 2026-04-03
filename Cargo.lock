@@ -242,16 +242,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bootstrap-test"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ash",
- "bytemuck",
- "spirv-builder",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
