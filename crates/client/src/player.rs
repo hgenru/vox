@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn test_new_defaults() {
         let pc = make_controller();
-        assert!(pc.fly_mode);
+        assert!(!pc.fly_mode);
         assert!(!pc.on_ground);
         assert_eq!(pc.velocity_y, 0.0);
         assert_eq!(pc.player_height, DEFAULT_PLAYER_HEIGHT);
@@ -235,11 +235,11 @@ mod tests {
     #[test]
     fn test_toggle_fly_mode() {
         let mut pc = make_controller();
-        assert!(pc.fly_mode);
-        pc.toggle_fly_mode();
         assert!(!pc.fly_mode);
         pc.toggle_fly_mode();
         assert!(pc.fly_mode);
+        pc.toggle_fly_mode();
+        assert!(!pc.fly_mode);
     }
 
     #[test]
@@ -325,6 +325,7 @@ mod tests {
     #[test]
     fn test_fly_mode_delegates_keyboard() {
         let mut pc = make_controller();
+        pc.fly_mode = true;
         assert!(pc.fly_mode);
         let pos_before = pc.camera.position;
         pc.process_keyboard(KeyCode::KeyW, 1.0);
@@ -367,6 +368,7 @@ mod tests {
     #[test]
     fn test_update_fly_mode_noop() {
         let mut pc = make_controller();
+        pc.fly_mode = true;
         assert!(pc.fly_mode);
         let pos_before = pc.camera.position;
         pc.update(1.0);

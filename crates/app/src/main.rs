@@ -602,6 +602,32 @@ impl ApplicationHandler for App {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn island_particles_under_limit() {
+        let particles = create_island_particles();
+        assert!(
+            particles.len() < shared::MAX_PARTICLES as usize,
+            "Scene has {} particles, max is {}",
+            particles.len(),
+            shared::MAX_PARTICLES
+        );
+    }
+
+    #[test]
+    fn heightmap_values_valid() {
+        let hm = generate_heightmap();
+        assert_eq!(hm.len(), (GRID_SIZE * GRID_SIZE) as usize);
+        for h in &hm {
+            assert!(h.is_finite(), "NaN in heightmap");
+            assert!(*h >= 0.0 && *h < GRID_SIZE as f32, "Height {} out of bounds", h);
+        }
+    }
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env()
