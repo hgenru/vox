@@ -27,9 +27,11 @@ pub struct ExplosionPushConstants {
 
 /// Apply radial impulse to a single particle from an explosion.
 ///
-/// The force uses a softened inverse-square law: `strength / (dist^2 + 1.0)`.
+/// The velocity impulse uses a linear falloff: `strength * (1 - dist/radius)`.
+/// This gives a direct velocity change (not force * dt), ensuring the effect
+/// is visible regardless of the simulation timestep.
 /// Solid-phase particles also accumulate damage in `ids.z` (clamped to 255).
-pub fn apply_explosion(particle: &mut Particle, center: Vec4, radius: f32, strength: f32, dt: f32) {
+pub fn apply_explosion(particle: &mut Particle, center: Vec4, radius: f32, strength: f32, _dt: f32) {
     let pos = particle.pos_mass.truncate();
     let center_pos = center.truncate();
     let dir = pos - center_pos;
@@ -39,8 +41,10 @@ pub fn apply_explosion(particle: &mut Particle, center: Vec4, radius: f32, stren
         return;
     }
 
-    let force = strength / (dist * dist + 1.0);
-    let impulse = dir * (force / dist) * dt; // normalize(dir) * force * dt
+    // Linear falloff: full strength at center, zero at radius edge.
+    // This is a direct velocity impulse, NOT force * dt.
+    let falloff = 1.0 - dist / radius;
+    let impulse = dir * (strength * falloff / dist);
 
     particle.vel_temp = Vec4::new(
         particle.vel_temp.x + impulse.x,
@@ -51,7 +55,7 @@ pub fn apply_explosion(particle: &mut Particle, center: Vec4, radius: f32, stren
 
     // Accumulate damage on solid-phase particles
     if particle.ids.y == 0 {
-        let damage_add = (force * 0.001) as u32;
+        let damage_add = (strength * falloff * 0.01) as u32;
         let new_damage = particle.ids.z + damage_add;
         particle.ids.z = if new_damage > 255 { 255 } else { new_damage };
     }
