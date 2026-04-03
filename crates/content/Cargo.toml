@@ -10,6 +10,7 @@ serde = { workspace = true }
 ron = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+dot_vox = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

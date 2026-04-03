@@ -29,7 +29,7 @@ pub(crate) fn run_headless(args: &Args) -> Result<()> {
             GpuSimulation::new(&ctx)?
         }
     };
-    let (particles, scene_camera) = if let Some(scene_path) = &args.scene {
+    let (mut particles, scene_camera) = if let Some(scene_path) = &args.scene {
         let scene = content::load_scene(scene_path)?;
         tracing::info!("Loaded scene '{}' from {}", scene.name, scene_path);
         let cam = scene.camera.clone();
@@ -38,6 +38,20 @@ pub(crate) fn run_headless(args: &Args) -> Result<()> {
     } else {
         (create_island_particles(), None)
     };
+    if let Some(path) = &args.model {
+        let pos = args.model_pos.unwrap_or((32.0, 20.0, 32.0));
+        let offset = glam::Vec3::new(pos.0, pos.1, pos.2);
+        let palette = content::vox_loader::default_palette_mapping();
+        match content::load_vox_model(path, offset, &palette) {
+            Ok(model_particles) => {
+                tracing::info!("Loaded {} particles from model '{}'", model_particles.len(), path);
+                particles.extend(model_particles);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load .vox model '{}': {}", path, e);
+            }
+        }
+    }
     sim.init_particles(&ctx, &particles)?;
 
     for i in 0..args.frames {

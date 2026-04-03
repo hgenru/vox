@@ -59,8 +59,10 @@ impl App {
     ///
     /// If `scene_path` is `Some`, loads a RON scene definition from that file.
     /// Otherwise falls back to the default procedural island scene.
-    pub(crate) fn new(substeps: u32, scene_path: Option<&str>) -> Self {
-        let (particles, scene_camera) = if let Some(path) = scene_path {
+    /// If `model_path` is provided, the `.vox` model is loaded and its
+    /// particles are added to the scene at `model_pos` (default 32,20,32).
+    pub(crate) fn new(substeps: u32, scene_path: Option<&str>, model_path: Option<&str>, model_pos: Option<(f32, f32, f32)>) -> Self {
+        let (mut particles, scene_camera) = if let Some(path) = scene_path {
             match content::load_scene(path) {
                 Ok(scene) => {
                     tracing::info!("Loaded scene '{}' from {}", scene.name, path);
@@ -76,6 +78,20 @@ impl App {
         } else {
             (create_island_particles(), None)
         };
+        if let Some(path) = model_path {
+            let pos = model_pos.unwrap_or((32.0, 20.0, 32.0));
+            let offset = Vec3::new(pos.0, pos.1, pos.2);
+            let palette = content::vox_loader::default_palette_mapping();
+            match content::load_vox_model(path, offset, &palette) {
+                Ok(model_particles) => {
+                    tracing::info!("Loaded {} particles from model '{}'", model_particles.len(), path);
+                    particles.extend(model_particles);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load .vox model '{}': {}", path, e);
+                }
+            }
+        }
         tracing::info!("Created {} initial particles", particles.len());
 
         // Try loading materials from RON file, fall back to hardcoded defaults
