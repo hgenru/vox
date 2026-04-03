@@ -388,6 +388,20 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[boo
             }
         }
 
+        // Thermal diffusion: blend grid temp with particle temp for gradual transfer.
+        // Must match shader g2p.rs thermal_blend value (0.005 = 0.5% per step).
+        // At 120 steps/sec: lava cools from 2000C to solidification in ~3-5 seconds.
+        let thermal_blend = 0.005_f32;
+        let old_temp = particle.temperature();
+        new_temp = old_temp + thermal_blend * (new_temp - old_temp);
+
+        // Radiative cooling: particles lose heat to environment (Newton's cooling law).
+        // Must match shader g2p.rs apply_radiative_cooling().
+        // Prevents thermal runaway from repeated explosions.
+        let ambient_temp = 20.0_f32;
+        let cooling_rate = 0.002_f32;
+        new_temp = new_temp + cooling_rate * (ambient_temp - new_temp);
+
         // PIC/FLIP blend
         // True FLIP requires old grid velocities which we don't store.
         // Instead, blend PIC (grid velocity) with old particle velocity

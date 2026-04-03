@@ -107,14 +107,41 @@ fn liquid_stress(particle: &Particle, material: &MaterialParams) -> Mat3 {
     -pressure * j * Mat3::IDENTITY + 2.0 * viscosity * j * deviatoric_d
 }
 
-/// Gas constitutive model: weak EOS with minimal viscosity.
+/// Gas constitutive model: weak EOS with thermal expansion pressure.
 ///
-/// Same structure as liquid but with much weaker pressure response
-/// and near-zero viscosity.
+/// Same structure as liquid but with much weaker bulk modulus and
+/// near-zero viscosity. Hot gas (T>100) gets additional thermal pressure
+/// to simulate ideal gas expansion (e.g., gunpowder explosion debris).
+///
+/// Thermal pressure is scaled by 0.05 and capped at 200 to prevent
+/// numerical instability, matching the shader implementation in p2g.rs.
 fn gas_stress(particle: &Particle, material: &MaterialParams) -> Mat3 {
-    // Gas uses the same model as liquid but with much smaller coefficients
-    // which are already encoded in the material parameters
-    liquid_stress(particle, material)
+    let f = particle.deformation_gradient();
+    let j = f.determinant().max(STRESS_EPSILON);
+
+    let bulk_modulus = material.elastic.x;
+    let viscosity = material.elastic.w;
+
+    // EOS pressure
+    let eos_pressure = bulk_modulus * (1.0 / j - 1.0);
+
+    // Gas thermal pressure: hot gas expands outward.
+    // Must match shader p2g.rs compute_gas_thermal_pressure().
+    let temp = particle.temperature();
+    let thermal_pressure = if temp > 100.0 {
+        (temp * 0.05).min(200.0)
+    } else {
+        0.0
+    };
+
+    let total_pressure = eos_pressure + thermal_pressure;
+
+    // Viscous stress from APIC C matrix
+    let c = particle.affine_momentum();
+    let d = 0.5 * (c + c.transpose());
+    let deviatoric_d = d - (d.col(0).x + d.col(1).y + d.col(2).z) / 3.0 * Mat3::IDENTITY;
+
+    -total_pressure * j * Mat3::IDENTITY + 2.0 * viscosity * j * deviatoric_d
 }
 
 #[cfg(test)]
