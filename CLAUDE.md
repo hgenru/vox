@@ -276,6 +276,7 @@ All work goes through Pull Requests. Direct commits to main are prohibited.
 - Lead only codes in: server/, client/, app/ (own crates)
 - When review finds issues: create a list, send back to the agent for fixing
 - After merging: verify combined state builds and passes tests
+- **Maximize delegation:** Lead MUST offload as much work as possible to sub-agents (sim, gpu, render). The main conversation with the user is for design discussions, idea brainstorming, and feedback — not for the lead to be heads-down coding. Launch agents in background, keep the conversation responsive.
 
 ### Worktree setup (lead creates these)
 ```bash
