@@ -20,6 +20,7 @@ use gpu_core::{
 };
 use shared::{
     GRID_CELL_COUNT, GRID_SIZE, GridCell, MAX_PARTICLES, Particle, RENDER_HEIGHT, RENDER_WIDTH,
+    material::{self, MATERIAL_COUNT, MaterialParams},
 };
 
 /// Compiled SPIR-V shader module bytes, included at compile time.
@@ -198,6 +199,7 @@ pub struct GpuSimulation {
     grid_buffer: GpuBuffer,
     voxel_buffer: GpuBuffer,
     render_output_buffer: GpuBuffer,
+    material_buffer: GpuBuffer,
 
     // Compute passes
     clear_grid_pass: ComputePass,
@@ -279,11 +281,30 @@ impl GpuSimulation {
             "render-output-buffer",
         )?;
 
+        // Material params buffer: MATERIAL_COUNT * 64 bytes
+        let material_buf_size =
+            (MATERIAL_COUNT * mem::size_of::<MaterialParams>()) as vk::DeviceSize;
+        let material_buffer = buffer::create_device_local_buffer(
+            ctx,
+            material_buf_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            "material-buffer",
+        )?;
+
+        // Upload default material table
+        let material_table = material::default_material_table();
+        buffer::upload(ctx, &material_table, &material_buffer)?;
+        tracing::info!(
+            "Uploaded {} materials ({} bytes) to GPU",
+            MATERIAL_COUNT,
+            material_buf_size
+        );
+
         // -- Descriptor pool --
-        // 10 passes, max 2 bindings each = up to 20 storage buffer descriptors
+        // 10 passes, max 3 bindings each = up to 30 storage buffer descriptors
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 20,
+            descriptor_count: 30,
         }];
         let descriptor_pool =
             pipeline::create_descriptor_pool(ctx, &pool_sizes, 10, "sim-descriptor-pool")?;
@@ -304,7 +325,7 @@ impl GpuSimulation {
             ctx,
             shader_module,
             c"compute::p2g::p2g",
-            &[&particle_buffer, &grid_buffer],
+            &[&particle_buffer, &grid_buffer, &material_buffer],
             mem::size_of::<P2gPushConstants>() as u32,
             descriptor_pool,
             "p2g",
@@ -354,7 +375,7 @@ impl GpuSimulation {
             ctx,
             shader_module,
             c"compute::render::render_voxels",
-            &[&voxel_buffer, &render_output_buffer],
+            &[&voxel_buffer, &render_output_buffer, &material_buffer],
             mem::size_of::<RenderPushConstants>() as u32,
             descriptor_pool,
             "render",
@@ -397,6 +418,7 @@ impl GpuSimulation {
             grid_buffer,
             voxel_buffer,
             render_output_buffer,
+            material_buffer,
             clear_grid_pass,
             p2g_pass,
             grid_update_pass,
@@ -933,10 +955,19 @@ impl GpuSimulation {
                 size: 0,
             },
         );
+        let material_buf = std::mem::replace(
+            &mut self.material_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
         buffer::destroy_buffer(ctx, particle_buf);
         buffer::destroy_buffer(ctx, grid_buf);
         buffer::destroy_buffer(ctx, voxel_buf);
         buffer::destroy_buffer(ctx, render_output_buf);
+        buffer::destroy_buffer(ctx, material_buf);
     }
 }
 
