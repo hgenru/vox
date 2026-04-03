@@ -278,7 +278,11 @@ pub fn build_solid_occupancy(particles: &[Particle]) -> Vec<bool> {
 ///
 /// A particle is considered supported if:
 /// - It is at the grid floor (iy <= 1), or
-/// - The cell directly below it in the occupancy grid is occupied by a solid.
+/// - The cell directly below (iy-1) or 2 cells below (iy-2) in the occupancy
+///   grid is occupied by a solid.
+///
+/// Checking 2 cells below avoids stale-read artifacts where the voxel buffer
+/// lags by one frame, causing adjacent falling solids to lose support prematurely.
 ///
 /// # Arguments
 /// - `pos`: particle position in world space [0, 1]
@@ -295,11 +299,23 @@ pub fn check_solid_support(pos: Vec3, solid_occupancy: &[bool]) -> bool {
         return true;
     }
 
-    // Check cell below
-    match grid_index(ix, iy - 1, iz) {
-        Some(idx) => solid_occupancy[idx],
-        None => true, // out of bounds = treat as supported
+    // Check cell directly below
+    if let Some(idx) = grid_index(ix, iy - 1, iz) {
+        if solid_occupancy[idx] {
+            return true;
+        }
     }
+
+    // Check 2 cells below to handle stale voxel buffer
+    if iy >= 3 {
+        if let Some(idx) = grid_index(ix, iy - 2, iz) {
+            if solid_occupancy[idx] {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Grid-to-Particle transfer (G2P).
@@ -424,7 +440,7 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[boo
 
         // Solids: check if the particle has support from a solid voxel below.
         // Supported solids update F and C only (pinned, prevents floor drift).
-        // Unsupported solids fall through to full position/velocity update.
+        // Unsupported solids fall normally with minimum fall speed to overcome grid friction.
         if particle.phase() == 0 && !solid_occupancy.is_empty() {
             let supported = check_solid_support(pos, solid_occupancy);
             if supported {
@@ -434,7 +450,16 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[boo
                 particle.set_temperature(new_temp);
                 continue;
             }
-            // Unsupported: fall through to position/velocity update
+            // Unsupported solid: enforce minimum fall speed to overcome grid friction.
+            // Grid coupling with neighboring solids creates artificial friction that
+            // prevents free-fall. Override with gravity-based minimum downward velocity.
+            let min_fall_speed = GRAVITY * dt * 10.0; // ~10 frames of gravity
+            if final_vel.y > min_fall_speed {
+                final_vel.y = min_fall_speed;
+            }
+            // Dampen horizontal velocity to prevent wall-sliding and lateral sticking
+            final_vel.x *= 0.5;
+            final_vel.z *= 0.5;
         }
 
         // Update velocity and temperature
