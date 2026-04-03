@@ -150,11 +150,12 @@ pub fn grid_update_sparse(
     }
     let cell_idx = active_cells[idx as usize] as usize;
 
-    // Convert flat index back to 3D for boundary checks
+    // Convert flat index back to 3D for boundary checks.
+    // Layout is ZYX (cell = Z*G² + Y*G + X), matching P2G indexing.
     let gz = push.grid_size;
-    let ix = (cell_idx as u32) / (gz * gz);
-    let iy = ((cell_idx as u32) / gz) % gz;
-    let iz = (cell_idx as u32) % gz;
+    let iz = (cell_idx as u32) / (gz * gz);        // Z
+    let iy = ((cell_idx as u32) / gz) % gz;         // Y
+    let ix = (cell_idx as u32) % gz;                // X
 
     update_active_cell(&mut grid[cell_idx], ix, iy, iz, gz, push.dt, push.gravity);
 }

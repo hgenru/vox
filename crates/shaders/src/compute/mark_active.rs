@@ -93,7 +93,8 @@ pub fn try_mark_cell(
     if ci < 0 || ci >= gs || cj < 0 || cj >= gs || ck < 0 || ck >= gs {
         return;
     }
-    let cell_idx = (ci as u32) * grid_size * grid_size + (cj as u32) * grid_size + (ck as u32);
+    // ZYX order — must match P2G's cell indexing: Z*G² + Y*G + X
+    let cell_idx = (ck as u32) * grid_size * grid_size + (cj as u32) * grid_size + (ci as u32);
 
     // Atomically try to mark this cell. If old value was 0, we are the first thread.
     let old = unsafe { mark_atomic_set(mark, cell_idx as usize) };
@@ -118,9 +119,10 @@ pub fn scatter_marks(
     active_cells: &mut [u32],
     active_count: &mut [u32],
 ) {
-    let base_x = pos_x as i32 - 1;
-    let base_y = pos_y as i32 - 1;
-    let base_z = pos_z as i32 - 1;
+    // Must match P2G's base cell formula: floor(pos - 0.5).max(0)
+    let base_x = if pos_x > 0.5 { (pos_x - 0.5) as i32 } else { 0 };
+    let base_y = if pos_y > 0.5 { (pos_y - 0.5) as i32 } else { 0 };
+    let base_z = if pos_z > 0.5 { (pos_z - 0.5) as i32 } else { 0 };
 
     let mut di = 0i32;
     while di < 3 {

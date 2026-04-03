@@ -442,31 +442,11 @@ impl GpuSimulation {
         // Workgroup count for particle dispatches (64 threads)
         let particle_wg = (num_particles + 63) / 64;
 
-        // 1. clear_grid_sparse (indirect) — clears previous frame's active cells
-        //    Uses indirect args written by previous frame's prepare_indirect.
-        //    On first frame: indirect buffer is zeroed → dispatches (0,0,0) → no-op.
-        unsafe {
-            self.device.cmd_bind_pipeline(
-                cmd,
-                vk::PipelineBindPoint::COMPUTE,
-                self.clear_grid_sparse_pass.pipeline,
-            );
-            self.device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::COMPUTE,
-                self.clear_grid_sparse_pass.pipeline_layout,
-                0,
-                &[self.clear_grid_sparse_pass.descriptor_set],
-                &[],
-            );
-            // No push constants for this pass
-            pipeline::cmd_dispatch_indirect(
-                &self.device,
-                cmd,
-                &self.indirect_dispatch_buffer,
-                0,
-            );
-        }
+        // 1. Clear grid (dense) — zero ALL cells every substep.
+        // Dense clear is fast on RTX 4090 (~768MB memset < 1ms) and eliminates
+        // any risk of stale data from uncleaned cells. The main perf win is in
+        // sparse grid_update below, not in clear.
+        passes::dispatch(&self.device, cmd, &self.clear_grid_pass, grid_wg, grid_wg, grid_wg, &[]);
         passes::barrier(cmd, &self.device);
 
         // 2. Reset active_count to 0 for this frame's mark_active pass
