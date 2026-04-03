@@ -9,7 +9,7 @@
 //! On transition: reset F = Identity, damage = 0, update phase.
 
 use crate::{
-    material::{MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_GAS, PHASE_LIQUID, PHASE_SOLID},
+    material::{MAT_ICE, MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_GAS, PHASE_LIQUID, PHASE_SOLID},
     particle::Particle,
 };
 
@@ -34,9 +34,9 @@ pub enum PhaseTransition {
 /// # Rules
 /// - Stone (material=0, phase=solid) + T > 1500 -> Lava (material=2, phase=liquid)
 /// - Water (material=1, phase=liquid) + T > 100 -> Steam (material=1, phase=gas)
-/// - Water (material=1, phase=liquid) + T < 0 -> Ice (material=1, phase=solid)
+/// - Water (material=1, phase=liquid) + T < 0 -> Ice (material=5, phase=solid)
 /// - Lava (material=2, phase=liquid) + T < 1500 -> Stone (material=0, phase=solid)
-/// - Ice (material=1, phase=solid) + T > 0 -> Water (material=1, phase=liquid)
+/// - Ice (material=5, phase=solid) + T > 0 -> Water (material=1, phase=liquid)
 pub fn check_phase_transition(particle: &Particle) -> PhaseTransition {
     let mat_id = particle.material_id();
     let phase = particle.phase();
@@ -55,11 +55,11 @@ pub fn check_phase_transition(particle: &Particle) -> PhaseTransition {
         },
         // Water liquid -> Ice solid when T < 0
         (MAT_WATER, PHASE_LIQUID) if temp < 0.0 => PhaseTransition::Transition {
-            new_material_id: MAT_WATER,
+            new_material_id: MAT_ICE,
             new_phase: PHASE_SOLID,
         },
         // Ice solid -> Water liquid when T > 0
-        (MAT_WATER, PHASE_SOLID) if temp > 0.0 => PhaseTransition::Transition {
+        (MAT_ICE, PHASE_SOLID) if temp > 0.0 => PhaseTransition::Transition {
             new_material_id: MAT_WATER,
             new_phase: PHASE_LIQUID,
         },
@@ -138,7 +138,7 @@ mod tests {
         assert_eq!(
             tr,
             PhaseTransition::Transition {
-                new_material_id: MAT_WATER,
+                new_material_id: MAT_ICE,
                 new_phase: PHASE_SOLID,
             }
         );
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn ice_melts_to_water() {
-        let mut p = Particle::new(Vec3::ZERO, 1.0, MAT_WATER, PHASE_SOLID);
+        let mut p = Particle::new(Vec3::ZERO, 1.0, MAT_ICE, PHASE_SOLID);
         p.set_temperature(5.0);
         let tr = check_phase_transition(&p);
         assert_eq!(
