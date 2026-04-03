@@ -28,6 +28,12 @@ const BORDER_WIDTH: u32 = 3;
 /// Border width for unselected slot outlines (pixels).
 const OUTLINE_WIDTH: u32 = 1;
 
+/// Half-length of each crosshair arm in pixels.
+const CROSSHAIR_ARM: u32 = 10;
+
+/// Thickness of each crosshair line in pixels (each side from center).
+const CROSSHAIR_HALF_THICK: u32 = 1;
+
 /// Push constants for the toolbar overlay shader.
 ///
 /// Contains screen dimensions, selection state, and material colors.
@@ -73,6 +79,48 @@ fn alpha_blend(bg: u32, fg_r: f32, fg_g: f32, fg_b: f32, fg_a: f32) -> u32 {
     let out_b = fg_b * fg_a + bg_b * (1.0 - fg_a);
 
     pack_bgra_f32(out_r, out_g, out_b, 1.0)
+}
+
+/// Draw a crosshair (+ symbol) at the center of the screen.
+///
+/// The crosshair is a white semi-transparent plus sign with configurable arm
+/// length and thickness. It helps the player aim when placing or removing
+/// materials.
+pub fn draw_crosshair_pixel(
+    px: u32,
+    py: u32,
+    push: &ToolbarParams,
+    output: &mut [u32],
+) {
+    let width = push.screen_width;
+    let height = push.screen_height;
+
+    if px >= width || py >= height {
+        return;
+    }
+
+    let cx = width / 2;
+    let cy = height / 2;
+
+    // Check horizontal bar: center_y +/- thickness, center_x +/- arm length
+    // Note: saturating_sub is not available in SPIR-V, use manual underflow guard
+    let in_h_bar = py + CROSSHAIR_HALF_THICK >= cy
+        && py <= cy + CROSSHAIR_HALF_THICK
+        && px + CROSSHAIR_ARM >= cx
+        && px <= cx + CROSSHAIR_ARM;
+
+    // Check vertical bar: center_x +/- thickness, center_y +/- arm length
+    let in_v_bar = px + CROSSHAIR_HALF_THICK >= cx
+        && px <= cx + CROSSHAIR_HALF_THICK
+        && py + CROSSHAIR_ARM >= cy
+        && py <= cy + CROSSHAIR_ARM;
+
+    if in_h_bar || in_v_bar {
+        let pixel_idx = (py * width + px) as usize;
+        let bg = output[pixel_idx];
+        // White with moderate transparency so it doesn't obscure the scene
+        output[pixel_idx] = alpha_blend(bg, 1.0, 1.0, 1.0, 0.75);
+    }
 }
 
 /// Determine what to draw at a given pixel and write to the output buffer.
@@ -201,5 +249,6 @@ pub fn toolbar_overlay(
     #[spirv(push_constant)] push: &ToolbarParams,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] output: &mut [u32],
 ) {
+    draw_crosshair_pixel(id.x, id.y, push, output);
     draw_toolbar_pixel(id.x, id.y, push, output);
 }
