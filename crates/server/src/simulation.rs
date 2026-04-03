@@ -12,6 +12,7 @@ use gpu_core::{
 use shared::{
     GRID_CELL_COUNT, GRID_SIZE, GridCell, MAX_ACTIVE_CELLS, MAX_PARTICLES,
     Particle, RENDER_HEIGHT, RENDER_WIDTH, SLEEP_THRESHOLD, TOTAL_BRICKS,
+    TOTAL_SUPER_BRICKS,
     material::{self, MATERIAL_COUNT, MaterialParams},
     reaction::{self, MAX_PHASE_RULES, PhaseTransitionRule},
 };
@@ -47,6 +48,10 @@ pub struct GpuSimulation {
 
     // Brick occupancy (render optimization)
     brick_occupancy_buffer: GpuBuffer,
+    super_brick_occupancy_buffer: GpuBuffer,
+
+    // Any-active flag (1 u32, set by update_sleep if any brick is active)
+    pub(crate) any_active_buffer: GpuBuffer,
 
     // Counting sort buffers (particle-by-brick sorting)
     brick_count_buffer: GpuBuffer,
@@ -258,6 +263,25 @@ impl GpuSimulation {
             "brick-occupancy-buffer",
         )?;
 
+        // -- Super-brick occupancy buffer (1 u32 per super-brick) --
+        // For 256³ grid: 4³ = 64 super-bricks, 256 bytes
+        let super_brick_occupancy_buffer = buffer::create_device_local_buffer(
+            ctx,
+            (TOTAL_SUPER_BRICKS as usize * 4) as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "super-brick-occupancy-buffer",
+        )?;
+
+        // -- Any-active flag buffer (1 u32, set by update_sleep via atomicMax) --
+        let any_active_buffer = buffer::create_device_local_buffer(
+            ctx,
+            4 as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST
+                | vk::BufferUsageFlags::TRANSFER_SRC,
+            "any-active-buffer",
+        )?;
+
         // -- Sparse dispatch buffers --
         let mark_buffer = buffer::create_device_local_buffer(
             ctx,
@@ -379,7 +403,7 @@ impl GpuSimulation {
             ctx,
             shader_module,
             c"compute::voxelize::clear_voxels",
-            &[&voxel_buffer],
+            &[&voxel_buffer, &sleep_state_buffer],
             mem::size_of::<VoxelizePushConstants>() as u32,
             descriptor_pool,
             "clear-voxels",
@@ -389,7 +413,7 @@ impl GpuSimulation {
             ctx,
             shader_module,
             c"compute::voxelize::voxelize",
-            &[&particle_buffer, &voxel_buffer],
+            &[&particle_buffer, &voxel_buffer, &sleep_state_buffer],
             mem::size_of::<VoxelizePushConstants>() as u32,
             descriptor_pool,
             "voxelize",
@@ -399,7 +423,7 @@ impl GpuSimulation {
             ctx,
             shader_module,
             c"compute::render::render_voxels",
-            &[&voxel_buffer, &render_output_buffer, &material_buffer, &brick_occupancy_buffer],
+            &[&voxel_buffer, &render_output_buffer, &material_buffer, &brick_occupancy_buffer, &super_brick_occupancy_buffer],
             mem::size_of::<RenderPushConstants>() as u32,
             descriptor_pool,
             "render",
@@ -448,24 +472,24 @@ impl GpuSimulation {
         )?;
 
         // -- Brick occupancy pass --
-        // compute_occupancy: voxels(r), brick_occupied(w)
+        // compute_occupancy: voxels(r), brick_occupied(w), super_brick_occupied(w)
         let compute_occupancy_pass = passes::create_pass(
             ctx,
             shader_module,
             c"compute::compute_occupancy::compute_occupancy",
-            &[&voxel_buffer, &brick_occupancy_buffer],
+            &[&voxel_buffer, &brick_occupancy_buffer, &super_brick_occupancy_buffer],
             mem::size_of::<ComputeOccupancyPushConstants>() as u32,
             descriptor_pool,
             "compute-occupancy",
         )?;
 
         // -- Brick sleep pass --
-        // update_sleep: activity_map(r), sleep_counter(rw), sleep_state(w)
+        // update_sleep: activity_map(r), sleep_counter(rw), sleep_state(w), any_active(w)
         let update_sleep_pass = passes::create_pass(
             ctx,
             shader_module,
             c"compute::update_sleep::update_sleep",
-            &[&activity_map_buffer, &sleep_counter_buffer, &sleep_state_buffer],
+            &[&activity_map_buffer, &sleep_counter_buffer, &sleep_state_buffer, &any_active_buffer],
             mem::size_of::<UpdateSleepPushConstants>() as u32,
             descriptor_pool,
             "update-sleep",
@@ -574,6 +598,8 @@ impl GpuSimulation {
             sleep_counter_buffer,
             sleep_state_buffer,
             brick_occupancy_buffer,
+            super_brick_occupancy_buffer,
+            any_active_buffer,
             brick_count_buffer,
             brick_offset_buffer,
             write_offset_buffer,
@@ -917,6 +943,28 @@ impl GpuSimulation {
         );
         passes::barrier(cmd, &self.device);
 
+        // 9. Clear any_active flag before update_sleep
+        unsafe {
+            self.device
+                .cmd_fill_buffer(cmd, self.any_active_buffer.buffer, 0, 4, 0);
+        }
+        {
+            let memory_barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[memory_barrier],
+                    &[],
+                    &[],
+                );
+            }
+        }
+
         // Update brick sleep state from activity map
         let sleep_pc = UpdateSleepPushConstants {
             total_bricks: TOTAL_BRICKS,
@@ -946,11 +994,12 @@ impl GpuSimulation {
         let grid_wg = grid_size / 4;
         let particle_wg = (num_particles + 63) / 64;
 
+        // 10. Clear voxels (dense) — skips frozen bricks via sleep_state
         let vox_pc = VoxelizePushConstants {
             grid_size,
             num_particles,
+            frame_number: self.frame_number.get(),
             _pad0: 0,
-            _pad1: 0,
         };
         passes::dispatch(
             &self.device,
@@ -980,6 +1029,27 @@ impl GpuSimulation {
     /// Populates the brick_occupancy_buffer used by the render pass to skip
     /// empty bricks during ray marching. Can run at reduced rate (e.g., every 200ms).
     fn record_occupancy(&self, cmd: vk::CommandBuffer) {
+        // Clear super-brick buffer before occupancy pass (uses atomicMax)
+        unsafe {
+            self.device
+                .cmd_fill_buffer(cmd, self.super_brick_occupancy_buffer.buffer, 0, vk::WHOLE_SIZE, 0);
+        }
+        {
+            let memory_barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[memory_barrier],
+                    &[],
+                    &[],
+                );
+            }
+        }
         let occupancy_pc = ComputeOccupancyPushConstants {
             grid_size: GRID_SIZE,
             brick_size: shared::BRICK_SIZE,

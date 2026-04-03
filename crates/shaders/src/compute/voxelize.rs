@@ -27,6 +27,8 @@ use crate::types::Particle;
 use spirv_std::glam::{UVec3, UVec4};
 use spirv_std::spirv;
 
+use super::p2g::should_skip_brick;
+
 /// Number of u32 values per voxel cell.
 const U32S_PER_VOXEL: u32 = 4;
 
@@ -38,10 +40,10 @@ pub struct VoxelizePushConstants {
     pub grid_size: u32,
     /// Total number of particles.
     pub num_particles: u32,
+    /// Current simulation frame number (used with tick_period for graduated sleep).
+    pub frame_number: u32,
     /// Padding for alignment.
     pub _pad0: u32,
-    /// Padding for alignment.
-    pub _pad1: u32,
 }
 
 /// Pack material selection data into a single u32 for atomic competition.
@@ -192,19 +194,44 @@ pub fn clear_voxel_cell(voxels: &mut [u32], base: usize) {
     voxels[base + 3] = 0;
 }
 
+/// Check whether a voxel at the given grid coordinates belongs to a frozen brick.
+///
+/// Returns `true` if the brick's tick_period is 0 (frozen), meaning the brick's
+/// voxels are unchanged and do not need clearing or re-voxelization.
+pub fn is_frozen_brick(x: u32, y: u32, z: u32, sleep_state: &[u32]) -> bool {
+    let brick_size: u32 = 8;
+    let bricks_per_axis: u32 = 32; // 256 / 8
+    let bx = x / brick_size;
+    let by = y / brick_size;
+    let bz = z / brick_size;
+    if bx >= bricks_per_axis || by >= bricks_per_axis || bz >= bricks_per_axis {
+        return false; // out of bounds = do not skip
+    }
+    let brick_idx = bz * bricks_per_axis * bricks_per_axis + by * bricks_per_axis + bx;
+    sleep_state[brick_idx as usize] == 0
+}
+
 /// Compute shader entry point: clear voxel grid.
 ///
 /// Must be dispatched before `voxelize` to reset the voxel buffer.
+/// Skips clearing voxels in frozen bricks (tick_period == 0) since those
+/// particles haven't moved and their voxels are still correct.
 /// Descriptor set 0, binding 0: storage buffer of `u32` (voxel grid, 4 per cell).
+/// Descriptor set 0, binding 1: storage buffer of `u32` (sleep_state per brick, read).
 /// Dispatch with `(GRID_SIZE/4, GRID_SIZE/4, GRID_SIZE/4)` workgroups.
 #[spirv(compute(threads(4, 4, 4)))]
 pub fn clear_voxels(
     #[spirv(global_invocation_id)] id: UVec3,
     #[spirv(push_constant)] push: &VoxelizePushConstants,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] voxels: &mut [u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] sleep_state: &[u32],
 ) {
     let grid_size = push.grid_size;
     if id.x >= grid_size || id.y >= grid_size || id.z >= grid_size {
+        return;
+    }
+    // Skip clearing voxels in frozen bricks — their data is still valid
+    if is_frozen_brick(id.x, id.y, id.z, sleep_state) {
         return;
     }
     let cell_idx = (id.z * grid_size * grid_size + id.y * grid_size + id.x) as usize;
@@ -214,8 +241,12 @@ pub fn clear_voxels(
 
 /// Compute shader entry point: voxelize particles.
 ///
+/// Skips particles in frozen bricks (tick_period == 0) since their voxels
+/// are unchanged from the previous frame.
+///
 /// Descriptor set 0, binding 0: storage buffer of `Particle` (read).
 /// Descriptor set 0, binding 1: storage buffer of `u32` (voxel grid, 4 per cell, write).
+/// Descriptor set 0, binding 2: storage buffer of `u32` (sleep_state per brick, read).
 /// Push constants: `VoxelizePushConstants`.
 /// Dispatch with `(ceil(num_particles / 64), 1, 1)` workgroups.
 #[spirv(compute(threads(64)))]
@@ -224,9 +255,15 @@ pub fn voxelize(
     #[spirv(push_constant)] push: &VoxelizePushConstants,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] particles: &[Particle],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] voxels: &mut [u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] sleep_state: &[u32],
 ) {
     let idx = id.x as usize;
     if id.x >= push.num_particles {
+        return;
+    }
+    // Copy position to locals (trap #21) and check sleep state before writing
+    let pos_mass = particles[idx].pos_mass;
+    if should_skip_brick(pos_mass.x, pos_mass.y, pos_mass.z, sleep_state, push.frame_number) {
         return;
     }
     write_voxel(&particles[idx], voxels, push.grid_size);

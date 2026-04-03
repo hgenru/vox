@@ -86,6 +86,28 @@ pub fn update_brick(activity: u32, counter: u32, threshold: u32) -> (u32, u32) {
     }
 }
 
+/// Atomically set the any_active flag if a brick is active.
+///
+/// Uses `atomic_u_max` on SPIR-V targets. Falls back to simple write on CPU.
+///
+/// # Safety
+/// Caller must ensure `any_active[0]` is valid and properly aligned.
+pub unsafe fn set_any_active_flag(any_active: &mut [u32], tick_period: u32) {
+    if tick_period == 0 {
+        return;
+    }
+    #[cfg(target_arch = "spirv")]
+    {
+        unsafe {
+            spirv_std::arch::atomic_u_max::<u32, 1u32, 0x0u32>(&mut any_active[0], 1);
+        }
+    }
+    #[cfg(not(target_arch = "spirv"))]
+    {
+        any_active[0] = 1;
+    }
+}
+
 /// Convert a 1D brick index to 3D (bx, by, bz) coordinates.
 ///
 /// Layout: idx = bz * bpa * bpa + by * bpa + bx
@@ -117,17 +139,11 @@ pub fn wake_neighbors(
     bricks_per_axis: u32,
     sleep_state: &mut [u32],
 ) {
-    // -X neighbor
     wake_neighbor_neg_x(bx, by, bz, bricks_per_axis, sleep_state);
-    // +X neighbor
     wake_neighbor_pos_x(bx, by, bz, bricks_per_axis, sleep_state);
-    // -Y neighbor
     wake_neighbor_neg_y(bx, by, bz, bricks_per_axis, sleep_state);
-    // +Y neighbor
     wake_neighbor_pos_y(bx, by, bz, bricks_per_axis, sleep_state);
-    // -Z neighbor
     wake_neighbor_neg_z(bx, by, bz, bricks_per_axis, sleep_state);
-    // +Z neighbor
     wake_neighbor_pos_z(bx, by, bz, bricks_per_axis, sleep_state);
 }
 
@@ -135,9 +151,7 @@ pub fn wake_neighbors(
 fn wake_neighbor_neg_x(bx: u32, by: u32, bz: u32, bpa: u32, sleep_state: &mut [u32]) {
     if bx > 0 {
         let nidx = brick_3d_to_idx(bx - 1, by, bz, bpa) as usize;
-        unsafe {
-            spirv_std::arch::atomic_u_max::<u32, 1u32, 0x0u32>(&mut sleep_state[nidx], 1);
-        }
+        unsafe { spirv_std::arch::atomic_u_max::<u32, 1u32, 0x0u32>(&mut sleep_state[nidx], 1); }
     }
 }
 
@@ -145,9 +159,7 @@ fn wake_neighbor_neg_x(bx: u32, by: u32, bz: u32, bpa: u32, sleep_state: &mut [u
 fn wake_neighbor_pos_x(bx: u32, by: u32, bz: u32, bpa: u32, sleep_state: &mut [u32]) {
     if bx + 1 < bpa {
         let nidx = brick_3d_to_idx(bx + 1, by, bz, bpa) as usize;
-        unsafe {
-            spirv_std::arch::atomic_u_max::<u32, 1u32, 0x0u32>(&mut sleep_state[nidx], 1);
-        }
+        unsafe { spirv_std::arch::atomic_u_max::<u32, 1u32, 0x0u32>(&mut sleep_state[nidx], 1); }
     }
 }
 
@@ -155,9 +167,7 @@ fn wake_neighbor_pos_x(bx: u32, by: u32, bz: u32, bpa: u32, sleep_state: &mut [u
 fn wake_neighbor_neg_y(bx: u32, by: u32, bz: u32, bpa: u32, sleep_state: &mut [u32]) {
     if by > 0 {
         let nidx = brick_3d_to_idx(bx, by - 1, bz, bpa) as usize;
-        unsafe {
-            spirv_std::arch::atomic_u_max::<u32, 1u32, 0x0u32>(&mut sleep_state[nidx], 1);
-        }
+        unsafe { spirv_std::arch::atomic_u_max::<u32, 1u32, 0x0u32>(&mut sleep_state[nidx], 1); }
     }
 }
 
@@ -165,9 +175,7 @@ fn wake_neighbor_neg_y(bx: u32, by: u32, bz: u32, bpa: u32, sleep_state: &mut [u
 fn wake_neighbor_pos_y(bx: u32, by: u32, bz: u32, bpa: u32, sleep_state: &mut [u32]) {
     if by + 1 < bpa {
         let nidx = brick_3d_to_idx(bx, by + 1, bz, bpa) as usize;
-        unsafe {
-            spirv_std::arch::atomic_u_max::<u32, 1u32, 0x0u32>(&mut sleep_state[nidx], 1);
-        }
+        unsafe { spirv_std::arch::atomic_u_max::<u32, 1u32, 0x0u32>(&mut sleep_state[nidx], 1); }
     }
 }
 
@@ -175,9 +183,7 @@ fn wake_neighbor_pos_y(bx: u32, by: u32, bz: u32, bpa: u32, sleep_state: &mut [u
 fn wake_neighbor_neg_z(bx: u32, by: u32, bz: u32, bpa: u32, sleep_state: &mut [u32]) {
     if bz > 0 {
         let nidx = brick_3d_to_idx(bx, by, bz - 1, bpa) as usize;
-        unsafe {
-            spirv_std::arch::atomic_u_max::<u32, 1u32, 0x0u32>(&mut sleep_state[nidx], 1);
-        }
+        unsafe { spirv_std::arch::atomic_u_max::<u32, 1u32, 0x0u32>(&mut sleep_state[nidx], 1); }
     }
 }
 
@@ -185,9 +191,7 @@ fn wake_neighbor_neg_z(bx: u32, by: u32, bz: u32, bpa: u32, sleep_state: &mut [u
 fn wake_neighbor_pos_z(bx: u32, by: u32, bz: u32, bpa: u32, sleep_state: &mut [u32]) {
     if bz + 1 < bpa {
         let nidx = brick_3d_to_idx(bx, by, bz + 1, bpa) as usize;
-        unsafe {
-            spirv_std::arch::atomic_u_max::<u32, 1u32, 0x0u32>(&mut sleep_state[nidx], 1);
-        }
+        unsafe { spirv_std::arch::atomic_u_max::<u32, 1u32, 0x0u32>(&mut sleep_state[nidx], 1); }
     }
 }
 
@@ -196,6 +200,7 @@ fn wake_neighbor_pos_z(bx: u32, by: u32, bz: u32, bpa: u32, sleep_state: &mut [u
 /// Descriptor set 0, binding 0: storage buffer of `u32` (activity_map, read).
 /// Descriptor set 0, binding 1: storage buffer of `u32` (sleep_counter, read-write).
 /// Descriptor set 0, binding 2: storage buffer of `u32` (sleep_state, read-write).
+/// Descriptor set 0, binding 3: storage buffer of `u32` (any_active flag, write via atomicMax).
 /// Push constants: `UpdateSleepPushConstants`.
 /// Dispatch with `(ceil(total_bricks / 64), 1, 1)` workgroups.
 #[spirv(compute(threads(64)))]
@@ -205,6 +210,7 @@ pub fn update_sleep(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] activity_map: &[u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] sleep_counter: &mut [u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] sleep_state: &mut [u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] any_active: &mut [u32],
 ) {
     let idx = id.x;
     if idx >= push.total_bricks {
@@ -219,6 +225,11 @@ pub fn update_sleep(
 
     sleep_counter[idx as usize] = new_counter;
     sleep_state[idx as usize] = new_state;
+
+    // Set any_active flag if this brick has a non-zero tick period
+    unsafe {
+        set_any_active_flag(any_active, new_state);
+    }
 
     // If this brick is awake, also wake its 6 face-adjacent neighbors.
     // This is critical: P2G scatter writes to a 3x3x3 cell neighborhood,

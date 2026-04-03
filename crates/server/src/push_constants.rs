@@ -63,10 +63,10 @@ pub struct VoxelizePushConstants {
     pub grid_size: u32,
     /// Total number of active particles.
     pub num_particles: u32,
+    /// Current simulation frame number (used with tick_period for graduated sleep).
+    pub frame_number: u32,
     /// Padding.
     pub _pad0: u32,
-    /// Padding.
-    pub _pad1: u32,
 }
 
 /// Push constants for the render shader.
