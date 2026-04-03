@@ -6,14 +6,19 @@
 
 use glam::Vec3;
 use shared::{
-    constants::{DT, GRID_CELL_COUNT, GRID_SIZE},
+    constants::DT,
     material::{MATERIAL_COUNT, MaterialParams, default_material_table},
     particle::{GridCell, Particle},
     reaction::{PhaseTransitionRule, default_phase_transition_table},
 };
 
-use crate::grid::{build_solid_occupancy, clear_grid, g2p, grid_update, p2g};
-use crate::thermal::{apply_phase_transitions, diffuse_temperature};
+use crate::grid::{
+    build_solid_occupancy_sized, clear_grid, g2p_sized, grid_update_sized, p2g_sized,
+};
+use crate::thermal::{apply_phase_transitions, diffuse_temperature_sized};
+
+/// Default grid size for test worlds (small for fast tests).
+const TEST_GRID_SIZE: u32 = 32;
 
 /// A self-contained simulation world for behavior tests.
 ///
@@ -37,12 +42,25 @@ pub struct TestWorld {
     materials: [MaterialParams; MATERIAL_COUNT],
     grid: Vec<GridCell>,
     phase_rules: Vec<PhaseTransitionRule>,
+    grid_size: u32,
 }
 
 impl TestWorld {
-    /// Create a new empty test world with default materials.
+    /// Create a new empty test world with default materials and grid size 32.
+    ///
+    /// Uses a small grid (32^3 = 32K cells) for fast test execution.
+    /// For the full 256^3 grid, use [`TestWorld::with_grid_size`].
     pub fn new() -> Self {
+        Self::with_grid_size(TEST_GRID_SIZE)
+    }
+
+    /// Create a new empty test world with the given grid size.
+    ///
+    /// # Arguments
+    /// - `grid_size`: number of grid cells per axis
+    pub fn with_grid_size(grid_size: u32) -> Self {
         let (table, count) = default_phase_transition_table();
+        let cell_count = (grid_size as usize) * (grid_size as usize) * (grid_size as usize);
         Self {
             particles: Vec::new(),
             materials: default_material_table(),
@@ -52,9 +70,10 @@ impl TestWorld {
                     force_pad: glam::Vec4::ZERO,
                     temp_pad: glam::Vec4::ZERO,
                 };
-                GRID_CELL_COUNT as usize
+                cell_count
             ],
             phase_rules: table[..count].to_vec(),
+            grid_size,
         }
     }
 
@@ -94,7 +113,7 @@ impl TestWorld {
         phase: u32,
         temp: f32,
     ) -> &mut Self {
-        let dx = 1.0 / GRID_SIZE as f32;
+        let dx = 1.0 / self.grid_size as f32;
         for dz in -half_size..=half_size {
             for dy in -half_size..=half_size {
                 for ddx in -half_size..=half_size {
@@ -122,19 +141,31 @@ impl TestWorld {
         clear_grid(&mut self.grid);
 
         // 2. Build solid occupancy for G2P support checks
-        let solid_occupancy = build_solid_occupancy(&self.particles);
+        let solid_occupancy = build_solid_occupancy_sized(&self.particles, self.grid_size);
 
         // 3. P2G
-        p2g(&self.particles, &mut self.grid, &self.materials, DT);
+        p2g_sized(
+            &self.particles,
+            &mut self.grid,
+            &self.materials,
+            DT,
+            self.grid_size,
+        );
 
         // 4. Grid update
-        grid_update(&mut self.grid, DT);
+        grid_update_sized(&mut self.grid, DT, self.grid_size);
 
         // 5. G2P
-        g2p(&mut self.particles, &self.grid, &solid_occupancy, DT);
+        g2p_sized(
+            &mut self.particles,
+            &self.grid,
+            &solid_occupancy,
+            DT,
+            self.grid_size,
+        );
 
         // 6. Thermal diffusion
-        diffuse_temperature(&mut self.particles, &self.materials, DT);
+        diffuse_temperature_sized(&mut self.particles, &self.materials, DT, self.grid_size);
 
         // 7. Phase transitions (data-driven via reaction table)
         apply_phase_transitions(&mut self.particles, &self.phase_rules);

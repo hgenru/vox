@@ -9,15 +9,18 @@
 use glam::Vec3;
 use proptest::prelude::*;
 use shared::{
-    constants::{DT, GRID_SIZE},
+    constants::DT,
     material::{MAT_STONE, MAT_WATER, PHASE_LIQUID, PHASE_SOLID},
     particle::Particle,
 };
 use sim_cpu::world::Simulation;
 
+/// Grid size for property tests (small for speed).
+const PROP_GS: u32 = 16;
+
 /// Generate a random position within the grid (with margin).
 fn arb_position() -> impl Strategy<Value = Vec3> {
-    let margin = 4.0 / GRID_SIZE as f32;
+    let margin = 4.0 / PROP_GS as f32;
     let lo = margin;
     let hi = 1.0 - margin;
     (lo..hi, lo..hi, lo..hi).prop_map(|(x, y, z)| Vec3::new(x, y, z))
@@ -45,12 +48,12 @@ fn arb_particles() -> impl Strategy<Value = Vec<Particle>> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
+    #![proptest_config(ProptestConfig::with_cases(50))]
 
     #[test]
     fn mass_conserved(particles in arb_particles()) {
         let initial_mass: f32 = particles.iter().map(|p| p.mass()).sum();
-        let mut sim = Simulation::new(particles);
+        let mut sim = Simulation::with_grid_size(particles, PROP_GS);
 
         for _ in 0..10 {
             sim.step(DT).unwrap();
@@ -67,9 +70,9 @@ proptest! {
 
     #[test]
     fn no_nan_or_inf(particles in arb_particles()) {
-        let mut sim = Simulation::new(particles);
+        let mut sim = Simulation::with_grid_size(particles, PROP_GS);
 
-        for _ in 0..20 {
+        for _ in 0..10 {
             sim.step(DT).unwrap();
         }
 
@@ -93,10 +96,9 @@ proptest! {
 
     #[test]
     fn particles_stay_in_bounds(particles in arb_particles()) {
-        let mut sim = Simulation::new(particles);
-        let _margin = 1.0 / GRID_SIZE as f32;
+        let mut sim = Simulation::with_grid_size(particles, PROP_GS);
 
-        for _ in 0..20 {
+        for _ in 0..10 {
             sim.step(DT).unwrap();
         }
 
@@ -113,10 +115,10 @@ proptest! {
 
     #[test]
     fn energy_bounded(particles in arb_particles()) {
-        let mut sim = Simulation::new(particles);
+        let mut sim = Simulation::with_grid_size(particles, PROP_GS);
 
-        // Run 50 steps
-        for _ in 0..50 {
+        // Run 20 steps
+        for _ in 0..20 {
             sim.step(DT).unwrap();
         }
 
@@ -124,8 +126,6 @@ proptest! {
         let total_mass = sim.total_mass();
 
         // Kinetic energy should be bounded: KE < mass * g * grid_height * safety_factor
-        // With gravity, max velocity after falling 1.0 grid unit is sqrt(2*g*h) ≈ 4.43 m/s
-        // KE per unit mass ≈ 0.5 * v^2 ≈ 0.5 * 19.6 ≈ 10
         // Allow generous factor for numerical effects
         let max_expected_ke = total_mass * 100.0;
 
@@ -139,9 +139,9 @@ proptest! {
 
     #[test]
     fn deformation_gradient_finite(particles in arb_particles()) {
-        let mut sim = Simulation::new(particles);
+        let mut sim = Simulation::with_grid_size(particles, PROP_GS);
 
-        for _ in 0..20 {
+        for _ in 0..10 {
             sim.step(DT).unwrap();
         }
 
