@@ -70,6 +70,7 @@ pub const MAT_WATER: u32 = 1;
 pub const MAT_WOOD: u32 = 3;
 pub const MAT_ASH: u32 = 4;
 pub const MAT_ICE: u32 = 5;
+pub const MAT_GUNPOWDER: u32 = 6;
 
 /// Number of materials in the table (synced with shared::material).
-pub const MATERIAL_COUNT: usize = 6;
+pub const MATERIAL_COUNT: usize = 7;

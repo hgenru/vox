@@ -237,6 +237,18 @@ fn textured_material_color(material_id: u32, vx: i32, vy: i32, vz: i32, grid_siz
             pale.y + (white.y - pale.y) * t,
             pale.z + (white.z - pale.z) * t,
         )
+    } else if material_id == 6 {
+        // Gunpowder: dark brown with granular noise
+        let h = hash3(vx, vy, vz);
+        let noise = value_noise(vx as f32 * 3.0, vy as f32 * 3.0, vz as f32 * 3.0);
+        let base = Vec3::new(0.25, 0.2, 0.15);
+        let dark = Vec3::new(0.15, 0.12, 0.08);
+        let t = h * 0.5 + noise * 0.5;
+        Vec3::new(
+            dark.x + (base.x - dark.x) * t,
+            dark.y + (base.y - dark.y) * t,
+            dark.z + (base.z - dark.z) * t,
+        )
     } else {
         // Unknown: magenta
         Vec3::new(1.0, 0.0, 1.0)
@@ -743,6 +755,14 @@ pub fn render_pixel(
             // Temperature is encoded in the voxel; approximate by using
             // a moderate glow since we know wood on fire has T > 300
             let emissive = Vec3::new(1.0, 0.4, 0.05) * 0.5;
+            Vec3::new(
+                lit_color.x + emissive.x,
+                lit_color.y + emissive.y,
+                lit_color.z + emissive.z,
+            )
+        } else if hit_material == 6 && hit_phase == 2 {
+            // Burning gunpowder (phase=gas): bright white-orange flash
+            let emissive = Vec3::new(1.0, 0.9, 0.5) * 1.2;
             Vec3::new(
                 lit_color.x + emissive.x,
                 lit_color.y + emissive.y,
