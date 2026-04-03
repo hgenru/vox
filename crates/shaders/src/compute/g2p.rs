@@ -159,19 +159,8 @@ pub fn gather_particle(
     // old velocity to reduce excessive damping while maintaining stability.
     let mut new_vel = PIC_RATIO * pic_vel + (1.0 - PIC_RATIO) * old_vel;
 
-    // Material-specific viscous velocity damping for liquids.
-    // High-viscosity materials (lava) get additional per-step damping
-    // to make them visibly sluggish compared to water.
+    // Phase extraction for gas buoyancy below
     let phase = particle.ids.y;
-    let material_id = particle.ids.x;
-    if phase == 1 {
-        let damping = match material_id {
-            1 => 1.0_f32,    // Water: no extra damping (runny)
-            2 => 0.999_f32,  // Lava: very light damping (viscosity handled in P2G stress)
-            _ => 0.995_f32,  // Default liquid: minimal damping
-        };
-        new_vel *= damping;
-    }
 
     // Gas buoyancy: counteract most of gravity and add slight upward force
     // so steam rises and persists visually instead of falling immediately.

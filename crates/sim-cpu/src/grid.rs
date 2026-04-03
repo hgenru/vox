@@ -376,18 +376,7 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[boo
         // to reduce excessive damping while maintaining stability.
         let blended_vel = pic_blend * new_vel + (1.0 - pic_blend) * old_vel;
 
-        // Material-specific viscous velocity damping for liquids.
-        // High-viscosity materials (lava) get additional per-step damping
-        // to make them visibly sluggish compared to water.
         let mut final_vel = blended_vel;
-        if particle.phase() == 1 {
-            let damping = match particle.material_id() {
-                1 => 1.0_f32,    // Water: no extra damping (runny)
-                2 => 0.98_f32,   // Lava: 2% damping per step (sluggish)
-                _ => 0.995_f32,  // Default liquid: minimal damping
-            };
-            final_vel *= damping;
-        }
 
         // Gas buoyancy: counteract most of gravity and add slight upward force
         // so steam rises and persists visually instead of falling immediately.
