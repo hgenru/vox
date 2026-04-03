@@ -6,5 +6,6 @@
 
 pub mod chemistry;
 pub mod grid;
+pub mod test_world;
 pub mod thermal;
 pub mod world;
