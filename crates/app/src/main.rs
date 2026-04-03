@@ -34,8 +34,8 @@ const SPAWN_DISTANCE: f32 = 8.0;
 const REMOVE_RADIUS: f32 = 2.0;
 const EXPLOSION_RADIUS: f32 = 3.0;
 const EXPLOSION_STRENGTH: f32 = 50.0;
-/// Water level scales with grid: ~15% of grid height.
-const WATER_LEVEL_FRAC: f32 = 0.15;
+/// Water level scales with grid: ~12% of grid height.
+const WATER_LEVEL_FRAC: f32 = 0.12;
 const MARGIN: u32 = 2;
 const SHELL_THICKNESS: i32 = 3;
 const FLOOR_THICKNESS: i32 = 2;
@@ -105,7 +105,9 @@ fn parse_args() -> Args {
 
 /// Compute terrain height at a given (x, z) world position.
 ///
-/// All dimensions scale with GRID_SIZE so the scene works at any resolution.
+/// Uses multi-octave sine-based noise combined with island falloff to produce
+/// natural-looking terrain with rolling hills, a central ridge/plateau, valleys,
+/// and gentle beach slopes. All dimensions scale with GRID_SIZE.
 fn island_height(x: f32, z: f32) -> f32 {
     let gs = GRID_SIZE as f32;
     let cx = gs * 0.5;
@@ -113,21 +115,32 @@ fn island_height(x: f32, z: f32) -> f32 {
     let dx = x - cx;
     let dz = z - cz;
     let dist = (dx * dx + dz * dz).sqrt();
-    let base = gs * 0.08;              // ocean floor (~20 cells at 256)
-    let island_radius = gs * 0.375;    // ~96 cells at 256
+
+    let base = MARGIN as f32;
+    let island_radius = gs * 0.38;
+
+    // Island falloff: smooth drop to ocean at edges
     if dist > island_radius {
         return base;
     }
-    let t = dist / island_radius;
-    let island_rise = (1.0 - t * t) * gs * 0.19;  // ~48 cells slope
-    let peak_radius = gs * 0.125;                   // ~32 cells peak
-    let peak_rise = if dist < peak_radius {
-        let pt = dist / peak_radius;
-        (1.0 - pt * pt) * gs * 0.34               // ~87 cells peak height
+    let edge_t = dist / island_radius;
+    let falloff = (1.0 - edge_t * edge_t).max(0.0);
+
+    // Multi-octave terrain noise (no external deps, just sin/cos)
+    let n1 = (x * 0.05).sin() * (z * 0.07).cos() * gs * 0.06; // big rolling hills
+    let n2 = (x * 0.13 + 1.7).sin() * (z * 0.11 + 2.3).cos() * gs * 0.03; // medium features
+    let n3 = (x * 0.31 + 0.5).cos() * (z * 0.29 + 1.1).sin() * gs * 0.015; // small details
+
+    // Ridge/plateau at center instead of cone peak
+    let center_dist = dist / (gs * 0.12);
+    let ridge = if center_dist < 1.0 {
+        (1.0 - center_dist * center_dist) * gs * 0.22 // plateau (~56 cells at 256)
     } else {
         0.0
     };
-    base + island_rise + peak_rise
+
+    let terrain = n1 + n2 + n3 + ridge;
+    base + falloff * (gs * 0.12 + terrain.max(0.0))
 }
 
 /// Spawn 8 particles (2x2x2 sub-grid) within a single cell.
