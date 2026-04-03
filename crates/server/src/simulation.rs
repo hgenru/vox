@@ -1,6 +1,7 @@
 //! [`GpuSimulation`] implementation — construction, stepping, rendering, destruction.
 
 use std::mem;
+use std::time::Instant;
 
 use ash::vk;
 use gpu_core::{
@@ -91,6 +92,12 @@ pub struct GpuSimulation {
     num_phase_rules: u32,
     /// Monotonically increasing frame counter for graduated sleep scheduling.
     frame_number: core::cell::Cell<u32>,
+
+    // Multi-rate scheduling timestamps
+    /// Last time `compute_activity` + `update_sleep` were dispatched.
+    last_sleep_update_time: core::cell::Cell<Instant>,
+    /// Last time `compute_occupancy` was dispatched.
+    last_occupancy_time: core::cell::Cell<Instant>,
 
     // Reference to context (not owned — caller must keep alive)
     // We store raw device handle for recording commands; the context
@@ -490,6 +497,8 @@ impl GpuSimulation {
             num_particles: 0,
             num_phase_rules: num_phase_rules as u32,
             frame_number: core::cell::Cell::new(0),
+            last_sleep_update_time: core::cell::Cell::new(Instant::now()),
+            last_occupancy_time: core::cell::Cell::new(Instant::now()),
             device: ctx.device.clone(),
         })
     }
@@ -510,18 +519,21 @@ impl GpuSimulation {
     /// Record the full simulation dispatch chain into the given command buffer.
     ///
     /// The command buffer must already be in the recording state.
-    /// Uses sparse grid dispatch: only active cells (those touched by particles)
-    /// are cleared and updated, instead of the entire grid.
+    /// Runs ALL passes every substep (no multi-rate scheduling).
+    /// For production use, prefer [`step_physics_with_time`] which skips
+    /// infrequent passes based on real-time intervals.
     ///
     /// Dispatch order:
     /// 1. `clear_grid_sparse` (indirect) — clears previous frame's active cells + marks
-    /// 2. `vkCmdFillBuffer` — reset active_count to 0
+    /// 2. `vkCmdFillBuffer` — reset active_count and mark_buffer to 0
     /// 3. `P2G` (particle dispatch) — scatter to grid
     /// 4. `mark_active` (particle dispatch) — build new active cell list
     /// 5. `prepare_indirect` (1,1,1) — write indirect args from new active_count
     /// 6. `grid_update_sparse` (indirect) — physics on active cells only
     /// 7. `G2P` (particle dispatch) — gather from grid
-    /// 8. `clear_voxels` + `voxelize` — rasterize particles to voxel grid
+    /// 8. `compute_activity` + `update_sleep` — brick sleep scheduling
+    /// 9. `clear_voxels` + `voxelize` — rasterize particles to voxel grid
+    /// 10. `compute_occupancy` — render optimization
     ///
     /// On the first frame, the indirect buffer contains (0,0,0) so
     /// `clear_grid_sparse` is a no-op. After `mark_active` + `prepare_indirect`,
@@ -532,21 +544,79 @@ impl GpuSimulation {
     /// correct ordering of shader reads and writes.
     /// Run physics only (no reactions). Call in substep loop.
     pub fn step_physics(&self, cmd: vk::CommandBuffer) {
+        self.record_core_physics(cmd);
+        self.record_activity_and_sleep(cmd);
+        self.record_voxelize(cmd);
+        self.record_occupancy(cmd);
+        self.frame_number.set(self.frame_number.get().wrapping_add(1));
+    }
+
+    /// Record the simulation dispatch chain with multi-rate scheduling.
+    ///
+    /// Core physics (clear, P2G, mark_active, prepare_indirect, grid_update_sparse, G2P)
+    /// runs every call. Less critical passes run at reduced rates:
+    /// - `compute_activity` + `update_sleep`: every 100ms
+    /// - `compute_occupancy`: every 200ms
+    /// - Reactions (`step_react`): caller-controlled, recommended 100ms interval
+    ///
+    /// Voxelize always runs because the render pass reads it every frame.
+    pub fn step_physics_with_time(&self, cmd: vk::CommandBuffer, now: Instant) {
+        self.record_core_physics(cmd);
+
+        // Activity tracking + sleep update: every 100ms
+        let sleep_elapsed = now.duration_since(self.last_sleep_update_time.get());
+        if sleep_elapsed.as_millis() >= 100 {
+            self.record_activity_and_sleep(cmd);
+            self.last_sleep_update_time.set(now);
+        }
+
+        self.record_voxelize(cmd);
+
+        // Brick occupancy (render optimization): every 200ms
+        let occupancy_elapsed = now.duration_since(self.last_occupancy_time.get());
+        if occupancy_elapsed.as_millis() >= 200 {
+            self.record_occupancy(cmd);
+            self.last_occupancy_time.set(now);
+        }
+
+        self.frame_number.set(self.frame_number.get().wrapping_add(1));
+    }
+
+    /// Record core physics dispatches: sparse clear, P2G, mark_active,
+    /// prepare_indirect, grid_update_sparse, G2P.
+    ///
+    /// These MUST run every substep for correct simulation.
+    fn record_core_physics(&self, cmd: vk::CommandBuffer) {
         let num_particles = self.num_particles;
         let grid_size = GRID_SIZE;
         let dt = shared::DT;
         let gravity = shared::GRAVITY;
-
-        // Workgroup counts for grid dispatches (4x4x4 workgroups)
-        let grid_wg = grid_size / 4;
-        // Workgroup count for particle dispatches (64 threads)
         let particle_wg = (num_particles + 63) / 64;
 
-        // 1. Clear grid (dense) — zero ALL cells every substep.
-        // Dense clear is fast on RTX 4090 (~768MB memset < 1ms) and eliminates
-        // any risk of stale data from uncleaned cells. The main perf win is in
-        // sparse grid_update below, not in clear.
-        passes::dispatch(&self.device, cmd, &self.clear_grid_pass, grid_wg, grid_wg, grid_wg, &[]);
+        // 1. Clear grid (sparse) — clears only cells that were active last frame.
+        // Uses indirect dispatch from previous frame's active cell list.
+        // On the first frame, indirect buffer is (0,0,0) so this is a no-op.
+        unsafe {
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.clear_grid_sparse_pass.pipeline,
+            );
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.clear_grid_sparse_pass.pipeline_layout,
+                0,
+                &[self.clear_grid_sparse_pass.descriptor_set],
+                &[],
+            );
+            pipeline::cmd_dispatch_indirect(
+                &self.device,
+                cmd,
+                &self.indirect_dispatch_buffer,
+                0,
+            );
+        }
         passes::barrier(cmd, &self.device);
 
         // 2. Reset active_count to 0 AND clear mark_buffer for this frame.
@@ -684,8 +754,18 @@ impl GpuSimulation {
             bytemuck::bytes_of(&g2p_pc),
         );
         passes::barrier(cmd, &self.device);
+    }
 
-        // 8. Activity tracking: clear activity map, then compute per-brick activity
+    /// Record activity tracking and brick sleep update dispatches.
+    ///
+    /// Clears the activity map, computes per-brick activity from particle
+    /// positions, then updates the graduated sleep state for each brick.
+    fn record_activity_and_sleep(&self, cmd: vk::CommandBuffer) {
+        let num_particles = self.num_particles;
+        let grid_size = GRID_SIZE;
+        let particle_wg = (num_particles + 63) / 64;
+
+        // Clear activity map
         unsafe {
             self.device
                 .cmd_fill_buffer(cmd, self.activity_map_buffer.buffer, 0, vk::WHOLE_SIZE, 0);
@@ -724,12 +804,12 @@ impl GpuSimulation {
         );
         passes::barrier(cmd, &self.device);
 
-        // 9. Update brick sleep state from activity map
+        // Update brick sleep state from activity map
         let sleep_pc = UpdateSleepPushConstants {
             total_bricks: TOTAL_BRICKS,
             sleep_threshold: SLEEP_THRESHOLD,
-            _pad0: 0,
-            _pad1: 0,
+            bricks_per_axis: shared::BRICKS_PER_AXIS,
+            _pad: 0,
         };
         let brick_wg = (TOTAL_BRICKS + 63) / 64;
         passes::dispatch(
@@ -742,8 +822,17 @@ impl GpuSimulation {
             bytemuck::bytes_of(&sleep_pc),
         );
         passes::barrier(cmd, &self.device);
+    }
 
-        // 10. Clear voxels (dense)
+    /// Record voxelization dispatches: clear_voxels + voxelize.
+    ///
+    /// Must run every frame since the render pass reads the voxel buffer.
+    fn record_voxelize(&self, cmd: vk::CommandBuffer) {
+        let num_particles = self.num_particles;
+        let grid_size = GRID_SIZE;
+        let grid_wg = grid_size / 4;
+        let particle_wg = (num_particles + 63) / 64;
+
         let vox_pc = VoxelizePushConstants {
             grid_size,
             num_particles,
@@ -761,7 +850,6 @@ impl GpuSimulation {
         );
         passes::barrier(cmd, &self.device);
 
-        // 10. Voxelize (particle dispatch)
         passes::dispatch(
             &self.device,
             cmd,
@@ -772,10 +860,15 @@ impl GpuSimulation {
             bytemuck::bytes_of(&vox_pc),
         );
         passes::barrier(cmd, &self.device);
+    }
 
-        // 11. Compute brick occupancy (for render brick-skip optimization)
+    /// Record brick occupancy compute dispatch.
+    ///
+    /// Populates the brick_occupancy_buffer used by the render pass to skip
+    /// empty bricks during ray marching. Can run at reduced rate (e.g., every 200ms).
+    fn record_occupancy(&self, cmd: vk::CommandBuffer) {
         let occupancy_pc = ComputeOccupancyPushConstants {
-            grid_size,
+            grid_size: GRID_SIZE,
             brick_size: shared::BRICK_SIZE,
             bricks_per_axis: shared::BRICKS_PER_AXIS,
             _pad: 0,
@@ -791,9 +884,16 @@ impl GpuSimulation {
             bytemuck::bytes_of(&occupancy_pc),
         );
         passes::barrier(cmd, &self.device);
+    }
 
-        // Increment frame counter for graduated sleep scheduling
-        self.frame_number.set(frame.wrapping_add(1));
+    /// Dispatch a dense grid clear (zeros ALL cells).
+    ///
+    /// Use this for initialization or manual reset. Normal physics uses
+    /// sparse clear via the active cell list, so this is not called every frame.
+    pub fn clear_grid_dense(&self, cmd: vk::CommandBuffer) {
+        let grid_wg = GRID_SIZE / 4;
+        passes::dispatch(&self.device, cmd, &self.clear_grid_pass, grid_wg, grid_wg, grid_wg, &[]);
+        passes::barrier(cmd, &self.device);
     }
 
     /// Run chemical reactions only. Call once per frame after all substeps.
