@@ -9,7 +9,8 @@ use gpu_core::{
     pipeline,
 };
 use shared::{
-    GRID_CELL_COUNT, GRID_SIZE, GridCell, MAX_PARTICLES, Particle, RENDER_HEIGHT, RENDER_WIDTH,
+    GRID_CELL_COUNT, GRID_SIZE, GridCell, MAX_ACTIVE_CELLS, MAX_PARTICLES, Particle,
+    RENDER_HEIGHT, RENDER_WIDTH,
     material::{self, MATERIAL_COUNT, MaterialParams},
     reaction::{self, MAX_PHASE_RULES, PhaseTransitionRule},
 };
@@ -36,6 +37,12 @@ pub struct GpuSimulation {
     pub(crate) material_buffer: GpuBuffer,
     pub(crate) reaction_buffer: GpuBuffer,
 
+    // Sparse dispatch buffers
+    mark_buffer: GpuBuffer,
+    active_cells_buffer: GpuBuffer,
+    active_count_buffer: GpuBuffer,
+    indirect_dispatch_buffer: GpuBuffer,
+
     // Compute passes
     clear_grid_pass: ComputePass,
     p2g_pass: ComputePass,
@@ -47,6 +54,12 @@ pub struct GpuSimulation {
     toolbar_overlay_pass: ComputePass,
     react_pass: ComputePass,
     explosion_pass: ComputePass,
+
+    // Sparse compute passes
+    mark_active_pass: ComputePass,
+    prepare_indirect_pass: ComputePass,
+    clear_grid_sparse_pass: ComputePass,
+    grid_update_sparse_pass: ComputePass,
 
     // Shader module (kept alive for pipeline lifetime)
     shader_module: vk::ShaderModule,
@@ -168,14 +181,36 @@ impl GpuSimulation {
             reaction_buf_size
         );
 
+        // -- Sparse dispatch buffers --
+        let mark_buffer = buffer::create_device_local_buffer(
+            ctx,
+            (GRID_CELL_COUNT as usize * 4) as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "mark-buffer",
+        )?;
+        let active_cells_buffer = buffer::create_device_local_buffer(
+            ctx,
+            (MAX_ACTIVE_CELLS as usize * 4) as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            "active-cells-buffer",
+        )?;
+        let active_count_buffer = buffer::create_device_local_buffer(
+            ctx,
+            16 as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "active-count-buffer",
+        )?;
+        let indirect_dispatch_buffer =
+            buffer::create_indirect_buffer(ctx, "indirect-dispatch-buffer")?;
+
         // -- Descriptor pool --
-        // 10 passes, max 4 bindings each = up to 40 storage buffer descriptors
+        // 14 passes, max 4 bindings each = up to 56 storage buffer descriptors
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 40,
+            descriptor_count: 56,
         }];
         let descriptor_pool =
-            pipeline::create_descriptor_pool(ctx, &pool_sizes, 10, "sim-descriptor-pool")?;
+            pipeline::create_descriptor_pool(ctx, &pool_sizes, 14, "sim-descriptor-pool")?;
 
         // -- Create each compute pass --
         // Entry point names are fully qualified module paths in rust-gpu SPIR-V.
@@ -279,6 +314,51 @@ impl GpuSimulation {
             "explosion",
         )?;
 
+        // -- Sparse dispatch passes --
+        // mark_active: particles(r), mark(rw), active_cells(w), active_count(rw)
+        let mark_active_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::mark_active::mark_active",
+            &[&particle_buffer, &mark_buffer, &active_cells_buffer, &active_count_buffer],
+            mem::size_of::<MarkActivePushConstants>() as u32,
+            descriptor_pool,
+            "mark-active",
+        )?;
+
+        // prepare_indirect: active_count(r), indirect_args(w)
+        let prepare_indirect_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::prepare_indirect::prepare_indirect",
+            &[&active_count_buffer, &indirect_dispatch_buffer],
+            0, // no push constants
+            descriptor_pool,
+            "prepare-indirect",
+        )?;
+
+        // clear_grid_sparse: active_cells(r), grid(w), mark(w), active_count(r)
+        let clear_grid_sparse_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::clear_grid_sparse::clear_grid_sparse",
+            &[&active_cells_buffer, &grid_buffer, &mark_buffer, &active_count_buffer],
+            0, // no push constants — reads count from buffer
+            descriptor_pool,
+            "clear-grid-sparse",
+        )?;
+
+        // grid_update_sparse: active_cells(r), grid(rw), active_count(r)
+        let grid_update_sparse_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::grid_update_sparse::grid_update_sparse",
+            &[&active_cells_buffer, &grid_buffer, &active_count_buffer],
+            mem::size_of::<GridUpdateSparsePushConstants>() as u32,
+            descriptor_pool,
+            "grid-update-sparse",
+        )?;
+
         tracing::info!("GpuSimulation created successfully");
 
         Ok(Self {
@@ -288,6 +368,10 @@ impl GpuSimulation {
             render_output_buffer,
             material_buffer,
             reaction_buffer,
+            mark_buffer,
+            active_cells_buffer,
+            active_count_buffer,
+            indirect_dispatch_buffer,
             clear_grid_pass,
             p2g_pass,
             grid_update_pass,
@@ -298,6 +382,10 @@ impl GpuSimulation {
             toolbar_overlay_pass,
             react_pass,
             explosion_pass,
+            mark_active_pass,
+            prepare_indirect_pass,
+            clear_grid_sparse_pass,
+            grid_update_sparse_pass,
             shader_module,
             descriptor_pool,
             num_particles: 0,
@@ -322,8 +410,23 @@ impl GpuSimulation {
     /// Record the full simulation dispatch chain into the given command buffer.
     ///
     /// The command buffer must already be in the recording state.
-    /// The dispatch chain is:
-    /// `clear_grid -> P2G -> grid_update -> G2P -> clear_voxels -> voxelize`.
+    /// Uses sparse grid dispatch: only active cells (those touched by particles)
+    /// are cleared and updated, instead of the entire grid.
+    ///
+    /// Dispatch order:
+    /// 1. `clear_grid_sparse` (indirect) — clears previous frame's active cells + marks
+    /// 2. `vkCmdFillBuffer` — reset active_count to 0
+    /// 3. `P2G` (particle dispatch) — scatter to grid
+    /// 4. `mark_active` (particle dispatch) — build new active cell list
+    /// 5. `prepare_indirect` (1,1,1) — write indirect args from new active_count
+    /// 6. `grid_update_sparse` (indirect) — physics on active cells only
+    /// 7. `G2P` (particle dispatch) — gather from grid
+    /// 8. `clear_voxels` + `voxelize` — rasterize particles to voxel grid
+    ///
+    /// On the first frame, the indirect buffer contains (0,0,0) so
+    /// `clear_grid_sparse` is a no-op. After `mark_active` + `prepare_indirect`,
+    /// the sparse dispatch is populated for `grid_update_sparse` and will persist
+    /// for next frame's `clear_grid_sparse`.
     ///
     /// Memory barriers are inserted between each dispatch to ensure
     /// correct ordering of shader reads and writes.
@@ -339,11 +442,57 @@ impl GpuSimulation {
         // Workgroup count for particle dispatches (64 threads)
         let particle_wg = (num_particles + 63) / 64;
 
-        // 1. Clear grid
-        passes::dispatch(&self.device, cmd, &self.clear_grid_pass, grid_wg, grid_wg, grid_wg, &[]);
+        // 1. clear_grid_sparse (indirect) — clears previous frame's active cells
+        //    Uses indirect args written by previous frame's prepare_indirect.
+        //    On first frame: indirect buffer is zeroed → dispatches (0,0,0) → no-op.
+        unsafe {
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.clear_grid_sparse_pass.pipeline,
+            );
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.clear_grid_sparse_pass.pipeline_layout,
+                0,
+                &[self.clear_grid_sparse_pass.descriptor_set],
+                &[],
+            );
+            // No push constants for this pass
+            pipeline::cmd_dispatch_indirect(
+                &self.device,
+                cmd,
+                &self.indirect_dispatch_buffer,
+                0,
+            );
+        }
         passes::barrier(cmd, &self.device);
 
-        // 2. P2G
+        // 2. Reset active_count to 0 for this frame's mark_active pass
+        unsafe {
+            self.device
+                .cmd_fill_buffer(cmd, self.active_count_buffer.buffer, 0, 4, 0);
+        }
+        // Barrier: TRANSFER_WRITE → SHADER_READ | SHADER_WRITE
+        {
+            let memory_barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[memory_barrier],
+                    &[],
+                    &[],
+                );
+            }
+        }
+
+        // 3. P2G (particle dispatch)
         let p2g_pc = P2gPushConstants {
             grid_size,
             dt,
@@ -361,25 +510,74 @@ impl GpuSimulation {
         );
         passes::barrier(cmd, &self.device);
 
-        // 3. Grid update
-        let grid_pc = GridUpdatePushConstants {
+        // 4. mark_active (particle dispatch) — build new active cell list
+        let mark_pc = MarkActivePushConstants {
+            grid_size,
+            num_particles,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.mark_active_pass,
+            particle_wg,
+            1,
+            1,
+            bytemuck::bytes_of(&mark_pc),
+        );
+        passes::barrier(cmd, &self.device);
+
+        // 5. prepare_indirect (1,1,1) — write dispatch args from new active_count
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.prepare_indirect_pass,
+            1,
+            1,
+            1,
+            &[],
+        );
+        passes::barrier(cmd, &self.device);
+
+        // 6. grid_update_sparse (indirect) — physics on active cells only
+        let grid_sparse_pc = GridUpdateSparsePushConstants {
             grid_size,
             dt,
             gravity,
             _pad: 0,
         };
-        passes::dispatch(
-            &self.device,
-            cmd,
-            &self.grid_update_pass,
-            grid_wg,
-            grid_wg,
-            grid_wg,
-            bytemuck::bytes_of(&grid_pc),
-        );
+        unsafe {
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.grid_update_sparse_pass.pipeline,
+            );
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.grid_update_sparse_pass.pipeline_layout,
+                0,
+                &[self.grid_update_sparse_pass.descriptor_set],
+                &[],
+            );
+            self.device.cmd_push_constants(
+                cmd,
+                self.grid_update_sparse_pass.pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(&grid_sparse_pc),
+            );
+            pipeline::cmd_dispatch_indirect(
+                &self.device,
+                cmd,
+                &self.indirect_dispatch_buffer,
+                0,
+            );
+        }
         passes::barrier(cmd, &self.device);
 
-        // 4. G2P
+        // 7. G2P (particle dispatch)
         let g2p_pc = G2pPushConstants {
             grid_size,
             dt,
@@ -397,7 +595,7 @@ impl GpuSimulation {
         );
         passes::barrier(cmd, &self.device);
 
-        // 5. Clear voxels
+        // 8. Clear voxels (dense — kept for now)
         let vox_pc = VoxelizePushConstants {
             grid_size,
             num_particles,
@@ -415,7 +613,7 @@ impl GpuSimulation {
         );
         passes::barrier(cmd, &self.device);
 
-        // 6. Voxelize
+        // 9. Voxelize (particle dispatch)
         passes::dispatch(
             &self.device,
             cmd,
@@ -620,6 +818,10 @@ impl GpuSimulation {
             &self.toolbar_overlay_pass,
             &self.react_pass,
             &self.explosion_pass,
+            &self.mark_active_pass,
+            &self.prepare_indirect_pass,
+            &self.clear_grid_sparse_pass,
+            &self.grid_update_sparse_pass,
         ];
         for pass in passes {
             pipeline::destroy_pipeline(ctx, pass.pipeline);
@@ -683,11 +885,47 @@ impl GpuSimulation {
                 size: 0,
             },
         );
+        let mark_buf = std::mem::replace(
+            &mut self.mark_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
+        let active_cells_buf = std::mem::replace(
+            &mut self.active_cells_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
+        let active_count_buf = std::mem::replace(
+            &mut self.active_count_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
+        let indirect_buf = std::mem::replace(
+            &mut self.indirect_dispatch_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
         buffer::destroy_buffer(ctx, particle_buf);
         buffer::destroy_buffer(ctx, grid_buf);
         buffer::destroy_buffer(ctx, voxel_buf);
         buffer::destroy_buffer(ctx, render_output_buf);
         buffer::destroy_buffer(ctx, material_buf);
         buffer::destroy_buffer(ctx, reaction_buf);
+        buffer::destroy_buffer(ctx, mark_buf);
+        buffer::destroy_buffer(ctx, active_cells_buf);
+        buffer::destroy_buffer(ctx, active_count_buf);
+        buffer::destroy_buffer(ctx, indirect_buf);
     }
 }

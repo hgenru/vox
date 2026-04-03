@@ -107,6 +107,34 @@ pub struct ExplosionPushConstants {
     pub _pad: [u32; 3],
 }
 
+/// Push constants for the mark_active compute shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct MarkActivePushConstants {
+    /// Grid dimension (cells per axis).
+    pub grid_size: u32,
+    /// Total number of active particles.
+    pub num_particles: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad0: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad1: u32,
+}
+
+/// Push constants for the sparse grid update shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct GridUpdateSparsePushConstants {
+    /// Grid dimension (cells per axis).
+    pub grid_size: u32,
+    /// Simulation timestep.
+    pub dt: f32,
+    /// Gravity acceleration (negative Y).
+    pub gravity: f32,
+    /// Padding to 16-byte alignment.
+    pub _pad: u32,
+}
+
 /// Maximum number of material slots in the toolbar.
 pub const TOOLBAR_MAX_MATERIALS: usize = 8;
 
