@@ -11,17 +11,21 @@
 
 pub mod clear_grid;
 pub mod clear_grid_sparse;
+pub mod compact_active_bricks;
 pub mod compute_activity;
 pub mod compute_occupancy;
+pub mod count_per_brick;
 pub mod explosion;
 pub mod g2p;
 pub mod grid_update;
 pub mod grid_update_sparse;
 pub mod mark_active;
 pub mod p2g;
+pub mod prefix_sum;
 pub mod prepare_indirect;
 pub mod react;
 pub mod render;
+pub mod scatter_particles;
 pub mod toolbar_overlay;
 pub mod update_sleep;
 pub mod voxelize;

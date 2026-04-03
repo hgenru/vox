@@ -47,6 +47,14 @@ pub struct GpuSimulation {
     // Brick occupancy (render optimization)
     brick_occupancy_buffer: GpuBuffer,
 
+    // Counting sort buffers (particle-by-brick sorting)
+    brick_count_buffer: GpuBuffer,
+    brick_offset_buffer: GpuBuffer,
+    write_offset_buffer: GpuBuffer,
+    sorted_particle_buffer: GpuBuffer,
+    active_brick_list_buffer: GpuBuffer,
+    active_brick_count_buffer: GpuBuffer,
+
     // Sparse dispatch buffers
     mark_buffer: GpuBuffer,
     active_cells_buffer: GpuBuffer,
@@ -73,6 +81,12 @@ pub struct GpuSimulation {
 
     // Brick sleep pass
     update_sleep_pass: ComputePass,
+
+    // Counting sort passes
+    count_per_brick_pass: ComputePass,
+    prefix_sum_pass: ComputePass,
+    scatter_particles_pass: ComputePass,
+    compact_active_bricks_pass: ComputePass,
 
     // Sparse compute passes
     mark_active_pass: ComputePass,
@@ -259,14 +273,58 @@ impl GpuSimulation {
         let indirect_dispatch_buffer =
             buffer::create_indirect_buffer(ctx, "indirect-dispatch-buffer")?;
 
+        // -- Counting sort buffers --
+        // brick_count: u32 per brick
+        let brick_count_buffer = buffer::create_device_local_buffer(
+            ctx,
+            (TOTAL_BRICKS as usize * 4) as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "brick-count-buffer",
+        )?;
+        // brick_offset: u32 per brick + 1 (for total count at end)
+        let brick_offset_buffer = buffer::create_device_local_buffer(
+            ctx,
+            ((TOTAL_BRICKS as usize + 1) * 4) as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC,
+            "brick-offset-buffer",
+        )?;
+        // write_offset: copy of brick_offset, modified by scatter atomics
+        let write_offset_buffer = buffer::create_device_local_buffer(
+            ctx,
+            ((TOTAL_BRICKS as usize + 1) * 4) as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "write-offset-buffer",
+        )?;
+        // sorted_particle_buffer: same size as particle buffer
+        let sorted_particle_buffer = buffer::create_device_local_buffer(
+            ctx,
+            particle_buf_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            "sorted-particle-buffer",
+        )?;
+        // active_brick_list: u32 per brick (worst case: all bricks active)
+        let active_brick_list_buffer = buffer::create_device_local_buffer(
+            ctx,
+            (TOTAL_BRICKS as usize * 4) as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            "active-brick-list-buffer",
+        )?;
+        // active_brick_count: single u32 atomic counter
+        let active_brick_count_buffer = buffer::create_device_local_buffer(
+            ctx,
+            16 as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "active-brick-count-buffer",
+        )?;
+
         // -- Descriptor pool --
-        // 18 passes, max 5 bindings each = up to 90 storage buffer descriptors
+        // 22 passes, max 5 bindings each = up to 110 storage buffer descriptors
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 90,
+            descriptor_count: 110,
         }];
         let descriptor_pool =
-            pipeline::create_descriptor_pool(ctx, &pool_sizes, 18, "sim-descriptor-pool")?;
+            pipeline::create_descriptor_pool(ctx, &pool_sizes, 22, "sim-descriptor-pool")?;
 
         // -- Create each compute pass --
         // Entry point names are fully qualified module paths in rust-gpu SPIR-V.
@@ -451,6 +509,51 @@ impl GpuSimulation {
             "grid-update-sparse",
         )?;
 
+        // -- Counting sort passes --
+        // count_per_brick: particles(r), brick_count(rw)
+        let count_per_brick_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::count_per_brick::count_per_brick",
+            &[&particle_buffer, &brick_count_buffer],
+            mem::size_of::<CountPerBrickPushConstants>() as u32,
+            descriptor_pool,
+            "count-per-brick",
+        )?;
+
+        // prefix_sum: brick_count(r), brick_offset(w)
+        let prefix_sum_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::prefix_sum::prefix_sum",
+            &[&brick_count_buffer, &brick_offset_buffer],
+            mem::size_of::<PrefixSumPushConstants>() as u32,
+            descriptor_pool,
+            "prefix-sum",
+        )?;
+
+        // scatter_particles: particles(r), write_offset(rw), sorted_particles(w)
+        let scatter_particles_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::scatter_particles::scatter_particles",
+            &[&particle_buffer, &write_offset_buffer, &sorted_particle_buffer],
+            mem::size_of::<ScatterParticlesPushConstants>() as u32,
+            descriptor_pool,
+            "scatter-particles",
+        )?;
+
+        // compact_active_bricks: brick_count(r), sleep_state(r), active_brick_list(w), active_brick_count(rw)
+        let compact_active_bricks_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::compact_active_bricks::compact_active_bricks",
+            &[&brick_count_buffer, &sleep_state_buffer, &active_brick_list_buffer, &active_brick_count_buffer],
+            mem::size_of::<CompactActiveBricksPushConstants>() as u32,
+            descriptor_pool,
+            "compact-active-bricks",
+        )?;
+
         tracing::info!("GpuSimulation created successfully");
 
         Ok(Self {
@@ -464,6 +567,12 @@ impl GpuSimulation {
             sleep_counter_buffer,
             sleep_state_buffer,
             brick_occupancy_buffer,
+            brick_count_buffer,
+            brick_offset_buffer,
+            write_offset_buffer,
+            sorted_particle_buffer,
+            active_brick_list_buffer,
+            active_brick_count_buffer,
             mark_buffer,
             active_cells_buffer,
             active_count_buffer,
@@ -481,6 +590,10 @@ impl GpuSimulation {
             compute_activity_pass,
             compute_occupancy_pass,
             update_sleep_pass,
+            count_per_brick_pass,
+            prefix_sum_pass,
+            scatter_particles_pass,
+            compact_active_bricks_pass,
             mark_active_pass,
             prepare_indirect_pass,
             clear_grid_sparse_pass,
@@ -825,6 +938,192 @@ impl GpuSimulation {
         self.step_react(cmd);
     }
 
+    /// Record the counting sort dispatch chain into the given command buffer.
+    ///
+    /// Sorts particles by brick_id so that all particles in the same brick are
+    /// contiguous in the sorted_particle_buffer. Also builds a compact list of
+    /// active (non-sleeping, non-empty) bricks.
+    ///
+    /// The command buffer must already be in the recording state.
+    /// This method does NOT integrate with step_physics yet -- call it separately
+    /// for testing. Integration with the main dispatch chain comes later.
+    ///
+    /// Dispatch order:
+    /// 1. `vkCmdFillBuffer` -- clear brick_count to 0
+    /// 2. Barrier (TRANSFER -> COMPUTE)
+    /// 3. `count_per_brick` -- count particles per brick
+    /// 4. Barrier
+    /// 5. `prefix_sum` -- exclusive prefix sum over brick_count
+    /// 6. Barrier
+    /// 7. `vkCmdCopyBuffer` -- copy brick_offset to write_offset
+    /// 8. Barrier (TRANSFER -> COMPUTE)
+    /// 9. `scatter_particles` -- scatter to sorted positions
+    /// 10. Barrier
+    /// 11. `vkCmdFillBuffer` -- clear active_brick_count to 0
+    /// 12. Barrier (TRANSFER -> COMPUTE)
+    /// 13. `compact_active_bricks` -- build active brick list
+    /// 14. Barrier
+    pub fn sort_particles(&self, cmd: vk::CommandBuffer) {
+        let num_particles = self.num_particles;
+        let grid_size = GRID_SIZE;
+        let particle_wg = (num_particles + 63) / 64;
+        let brick_wg = (TOTAL_BRICKS + 63) / 64;
+
+        // 1. Clear brick_count to 0
+        unsafe {
+            self.device
+                .cmd_fill_buffer(cmd, self.brick_count_buffer.buffer, 0, vk::WHOLE_SIZE, 0);
+        }
+
+        // 2. Barrier: TRANSFER_WRITE -> SHADER_READ | SHADER_WRITE
+        {
+            let memory_barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[memory_barrier],
+                    &[],
+                    &[],
+                );
+            }
+        }
+
+        // 3. count_per_brick
+        let count_pc = CountPerBrickPushConstants {
+            num_particles,
+            grid_size,
+            brick_size: shared::BRICK_SIZE,
+            _pad: 0,
+        };
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.count_per_brick_pass,
+            particle_wg,
+            1,
+            1,
+            bytemuck::bytes_of(&count_pc),
+        );
+        passes::barrier(cmd, &self.device);
+
+        // 5. prefix_sum (single workgroup)
+        let prefix_pc = PrefixSumPushConstants {
+            total_bricks: TOTAL_BRICKS,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.prefix_sum_pass,
+            1,
+            1,
+            1,
+            bytemuck::bytes_of(&prefix_pc),
+        );
+        passes::barrier(cmd, &self.device);
+
+        // 7. Copy brick_offset -> write_offset (scatter needs a mutable copy)
+        {
+            let copy_size = ((TOTAL_BRICKS as usize + 1) * 4) as vk::DeviceSize;
+            let region = vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: copy_size,
+            };
+            unsafe {
+                self.device.cmd_copy_buffer(
+                    cmd,
+                    self.brick_offset_buffer.buffer,
+                    self.write_offset_buffer.buffer,
+                    &[region],
+                );
+            }
+        }
+        // 8. Barrier: TRANSFER -> COMPUTE
+        {
+            let memory_barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[memory_barrier],
+                    &[],
+                    &[],
+                );
+            }
+        }
+
+        // 9. scatter_particles
+        let scatter_pc = ScatterParticlesPushConstants {
+            num_particles,
+            grid_size,
+            brick_size: shared::BRICK_SIZE,
+            _pad: 0,
+        };
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.scatter_particles_pass,
+            particle_wg,
+            1,
+            1,
+            bytemuck::bytes_of(&scatter_pc),
+        );
+        passes::barrier(cmd, &self.device);
+
+        // 11. Clear active_brick_count to 0
+        unsafe {
+            self.device
+                .cmd_fill_buffer(cmd, self.active_brick_count_buffer.buffer, 0, 4, 0);
+        }
+        // 12. Barrier: TRANSFER -> COMPUTE
+        {
+            let memory_barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[memory_barrier],
+                    &[],
+                    &[],
+                );
+            }
+        }
+
+        // 13. compact_active_bricks
+        let compact_pc = CompactActiveBricksPushConstants {
+            total_bricks: TOTAL_BRICKS,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.compact_active_bricks_pass,
+            brick_wg,
+            1,
+            1,
+            bytemuck::bytes_of(&compact_pc),
+        );
+        passes::barrier(cmd, &self.device);
+    }
+
     /// Append new particles to the existing simulation.
     ///
     /// Reads back current particles from the GPU, appends the new ones,
@@ -991,6 +1290,10 @@ impl GpuSimulation {
             &self.compute_activity_pass,
             &self.compute_occupancy_pass,
             &self.update_sleep_pass,
+            &self.count_per_brick_pass,
+            &self.prefix_sum_pass,
+            &self.scatter_particles_pass,
+            &self.compact_active_bricks_pass,
             &self.mark_active_pass,
             &self.prepare_indirect_pass,
             &self.clear_grid_sparse_pass,
@@ -1122,6 +1425,54 @@ impl GpuSimulation {
                 size: 0,
             },
         );
+        let brick_count_buf = std::mem::replace(
+            &mut self.brick_count_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
+        let brick_offset_buf = std::mem::replace(
+            &mut self.brick_offset_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
+        let write_offset_buf = std::mem::replace(
+            &mut self.write_offset_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
+        let sorted_particle_buf = std::mem::replace(
+            &mut self.sorted_particle_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
+        let active_brick_list_buf = std::mem::replace(
+            &mut self.active_brick_list_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
+        let active_brick_count_buf = std::mem::replace(
+            &mut self.active_brick_count_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
         buffer::destroy_buffer(ctx, particle_buf);
         buffer::destroy_buffer(ctx, grid_buf);
         buffer::destroy_buffer(ctx, voxel_buf);
@@ -1132,6 +1483,12 @@ impl GpuSimulation {
         buffer::destroy_buffer(ctx, sleep_counter_buf);
         buffer::destroy_buffer(ctx, sleep_state_buf);
         buffer::destroy_buffer(ctx, brick_occupancy_buf);
+        buffer::destroy_buffer(ctx, brick_count_buf);
+        buffer::destroy_buffer(ctx, brick_offset_buf);
+        buffer::destroy_buffer(ctx, write_offset_buf);
+        buffer::destroy_buffer(ctx, sorted_particle_buf);
+        buffer::destroy_buffer(ctx, active_brick_list_buf);
+        buffer::destroy_buffer(ctx, active_brick_count_buf);
         buffer::destroy_buffer(ctx, mark_buf);
         buffer::destroy_buffer(ctx, active_cells_buf);
         buffer::destroy_buffer(ctx, active_count_buf);
