@@ -252,6 +252,20 @@ pub fn apply_phase_transitions(particle: &mut Particle) {
                 new_material = 1; // MAT_WATER
             }
         }
+        // Gunpowder
+        6 => {
+            if phase == 0 && temp > 200.0 {
+                new_phase = 2; // solid -> gas (explosion)
+                // Boost temp for massive EOS pressure
+                particle.vel_temp = Vec4::new(
+                    particle.vel_temp.x, particle.vel_temp.y, particle.vel_temp.z, 3000.0
+                );
+                // Reset F (trap #8)
+                particle.f_col0 = Vec4::new(1.0, 0.0, 0.0, 0.0);
+                particle.f_col1 = Vec4::new(0.0, 1.0, 0.0, 0.0);
+                particle.f_col2 = Vec4::new(0.0, 0.0, 1.0, 0.0);
+            }
+        }
         _ => {}
     }
 

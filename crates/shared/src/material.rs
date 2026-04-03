@@ -28,6 +28,7 @@ pub const MAT_LAVA: u32 = 2;
 pub const MAT_WOOD: u32 = 3;
 pub const MAT_ASH: u32 = 4;
 pub const MAT_ICE: u32 = 5;
+pub const MAT_GUNPOWDER: u32 = 6;
 
 /// Phase constants.
 pub const PHASE_SOLID: u32 = 0;
@@ -35,7 +36,7 @@ pub const PHASE_LIQUID: u32 = 1;
 pub const PHASE_GAS: u32 = 2;
 
 /// Number of materials in the table.
-pub const MATERIAL_COUNT: usize = 6;
+pub const MATERIAL_COUNT: usize = 7;
 
 /// Build the default material parameter table.
 ///
@@ -175,6 +176,28 @@ pub fn default_material_table() -> [MaterialParams; MATERIAL_COUNT] {
             ),
             color: Vec4::new(0.7, 0.85, 0.95, 0.0), // light blue-white
         },
+        // Gunpowder (solid, crumbly, explosive)
+        MaterialParams {
+            elastic: Vec4::new(
+                0.0,   // youngs_modulus (crumbly granular)
+                0.0,   // poissons_ratio
+                500.0, // yield_stress (weak)
+                0.0,   // viscosity (solid — not used)
+            ),
+            thermal: Vec4::new(
+                f32::MAX, // melting_point (doesn't melt, explodes)
+                f32::MAX, // boiling_point
+                0.5,      // heat_conductivity
+                800.0,    // specific_heat
+            ),
+            visual: Vec4::new(
+                1800.0, // density (kg/m³)
+                200.0,  // emissive_temp (glows when igniting at 200°C)
+                1.0,    // opacity
+                0.0,    // pad
+            ),
+            color: Vec4::new(0.25, 0.2, 0.15, 0.0), // dark brown
+        },
     ]
 }
 
@@ -199,15 +222,15 @@ mod tests {
     fn material_table_uniform_buffer_size() {
         let table = default_material_table();
         let total_bytes = size_of::<MaterialParams>() * table.len();
-        // 6 materials × 64 bytes = 384 bytes (fits in uniform buffer)
-        assert_eq!(total_bytes, 384);
+        // 7 materials × 64 bytes = 448 bytes (fits in uniform buffer)
+        assert_eq!(total_bytes, 448);
     }
 
     #[test]
     fn material_table_bytemuck_cast() {
         let table = default_material_table();
         let bytes: &[u8] = bytemuck::cast_slice(&table);
-        assert_eq!(bytes.len(), 384);
+        assert_eq!(bytes.len(), 448);
     }
 
     #[test]
@@ -252,5 +275,13 @@ mod tests {
         assert_eq!(table[MAT_ICE as usize].elastic.z, 3000.0); // brittle
         assert_eq!(table[MAT_ICE as usize].visual.x, 917.0); // ice density
         assert!((table[MAT_ICE as usize].color.x - 0.7).abs() < 0.01); // light blue-white
+    }
+
+    #[test]
+    fn gunpowder_is_material_six() {
+        let table = default_material_table();
+        assert_eq!(table[MAT_GUNPOWDER as usize].elastic.z, 500.0); // crumbly
+        assert_eq!(table[MAT_GUNPOWDER as usize].visual.x, 1800.0); // density
+        assert!((table[MAT_GUNPOWDER as usize].color.x - 0.25).abs() < 0.01); // dark brown
     }
 }

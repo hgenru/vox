@@ -5,11 +5,12 @@
 //! - Water T > 100 -> Steam (gas)
 //! - Water T < 0 -> Ice (solid)
 //! - Lava T < 1500 -> Stone (solid)
+//! - Gunpowder T > 200 -> Gas (explosion)
 //!
 //! On transition: reset F = Identity, damage = 0, update phase.
 
 use crate::{
-    material::{MAT_ICE, MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_GAS, PHASE_LIQUID, PHASE_SOLID},
+    material::{MAT_GUNPOWDER, MAT_ICE, MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_GAS, PHASE_LIQUID, PHASE_SOLID},
     particle::Particle,
 };
 
@@ -37,6 +38,7 @@ pub enum PhaseTransition {
 /// - Water (material=1, phase=liquid) + T < 0 -> Ice (material=5, phase=solid)
 /// - Lava (material=2, phase=liquid) + T < 1500 -> Stone (material=0, phase=solid)
 /// - Ice (material=5, phase=solid) + T > 0 -> Water (material=1, phase=liquid)
+/// - Gunpowder (material=6, phase=solid) + T > 200 -> Gas (material=6, phase=gas) [explosion]
 pub fn check_phase_transition(particle: &Particle) -> PhaseTransition {
     let mat_id = particle.material_id();
     let phase = particle.phase();
@@ -67,6 +69,11 @@ pub fn check_phase_transition(particle: &Particle) -> PhaseTransition {
         (MAT_LAVA, PHASE_LIQUID) if temp < 1500.0 => PhaseTransition::Transition {
             new_material_id: MAT_STONE,
             new_phase: PHASE_SOLID,
+        },
+        // Gunpowder solid -> Gas when T > 200 (explosion)
+        (MAT_GUNPOWDER, PHASE_SOLID) if temp > 200.0 => PhaseTransition::Transition {
+            new_material_id: MAT_GUNPOWDER,
+            new_phase: PHASE_GAS,
         },
         _ => PhaseTransition::None,
     }
@@ -170,6 +177,27 @@ mod tests {
                 new_phase: PHASE_SOLID,
             }
         );
+    }
+
+    #[test]
+    fn gunpowder_explodes_to_gas() {
+        let mut p = Particle::new(Vec3::ZERO, 1.0, MAT_GUNPOWDER, PHASE_SOLID);
+        p.set_temperature(250.0);
+        let tr = check_phase_transition(&p);
+        assert_eq!(
+            tr,
+            PhaseTransition::Transition {
+                new_material_id: MAT_GUNPOWDER,
+                new_phase: PHASE_GAS,
+            }
+        );
+    }
+
+    #[test]
+    fn gunpowder_stays_solid_below_ignition() {
+        let mut p = Particle::new(Vec3::ZERO, 1.0, MAT_GUNPOWDER, PHASE_SOLID);
+        p.set_temperature(100.0);
+        assert_eq!(check_phase_transition(&p), PhaseTransition::None);
     }
 
     #[test]
