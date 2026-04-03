@@ -117,6 +117,20 @@ pub struct ReactPushConstants {
     pub _pad1: u32,
 }
 
+/// Push constants for the explosion shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct ExplosionPushConstants {
+    /// Explosion center (xyz), w unused.
+    pub center: glam::Vec4,
+    /// x = radius, y = strength, z = dt, w = num_particles as f32.
+    pub params: glam::Vec4,
+    /// Total number of active particles.
+    pub num_particles: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad: [u32; 3],
+}
+
 /// Maximum number of material slots in the toolbar.
 pub const TOOLBAR_MAX_MATERIALS: usize = 8;
 
@@ -195,6 +209,7 @@ pub struct GpuSimulation {
     render_pass: ComputePass,
     toolbar_overlay_pass: ComputePass,
     react_pass: ComputePass,
+    explosion_pass: ComputePass,
 
     // Shader module (kept alive for pipeline lifetime)
     shader_module: vk::ShaderModule,
@@ -265,13 +280,13 @@ impl GpuSimulation {
         )?;
 
         // -- Descriptor pool --
-        // 9 passes, max 2 bindings each = up to 18 storage buffer descriptors
+        // 10 passes, max 2 bindings each = up to 20 storage buffer descriptors
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 18,
+            descriptor_count: 20,
         }];
         let descriptor_pool =
-            pipeline::create_descriptor_pool(ctx, &pool_sizes, 9, "sim-descriptor-pool")?;
+            pipeline::create_descriptor_pool(ctx, &pool_sizes, 10, "sim-descriptor-pool")?;
 
         // -- Create each compute pass --
         // Entry point names are fully qualified module paths in rust-gpu SPIR-V.
@@ -365,6 +380,16 @@ impl GpuSimulation {
             "react",
         )?;
 
+        let explosion_pass = Self::create_pass(
+            ctx,
+            shader_module,
+            c"compute::explosion::explosion",
+            &[&particle_buffer],
+            mem::size_of::<ExplosionPushConstants>() as u32,
+            descriptor_pool,
+            "explosion",
+        )?;
+
         tracing::info!("GpuSimulation created successfully");
 
         Ok(Self {
@@ -381,6 +406,7 @@ impl GpuSimulation {
             render_pass,
             toolbar_overlay_pass,
             react_pass,
+            explosion_pass,
             shader_module,
             descriptor_pool,
             num_particles: 0,
@@ -649,6 +675,38 @@ impl GpuSimulation {
         );
     }
 
+    /// Record an explosion dispatch into the given command buffer.
+    ///
+    /// Applies a radial impulse to all particles within `radius` of `center`.
+    /// Should be called between `step()` and `render()`. The command buffer
+    /// must be in recording state.
+    pub fn apply_explosion(
+        &self,
+        cmd: vk::CommandBuffer,
+        center: [f32; 3],
+        radius: f32,
+        strength: f32,
+    ) {
+        Self::barrier(cmd, &self.device);
+
+        let push = ExplosionPushConstants {
+            center: glam::Vec4::new(center[0], center[1], center[2], 0.0),
+            params: glam::Vec4::new(radius, strength, shared::DT, self.num_particles as f32),
+            num_particles: self.num_particles,
+            _pad: [0; 3],
+        };
+
+        let particle_wg = (self.num_particles + 63) / 64;
+        self.dispatch(
+            cmd,
+            &self.explosion_pass,
+            particle_wg,
+            1,
+            1,
+            bytemuck::bytes_of(&push),
+        );
+    }
+
     /// Insert a final barrier to ensure all render output writes are complete
     /// before the buffer is copied to the swapchain.
     ///
@@ -813,6 +871,7 @@ impl GpuSimulation {
             &self.render_pass,
             &self.toolbar_overlay_pass,
             &self.react_pass,
+            &self.explosion_pass,
         ];
         for pass in passes {
             pipeline::destroy_pipeline(ctx, pass.pipeline);
@@ -884,6 +943,8 @@ mod tests {
         assert_eq!(mem::size_of::<G2pPushConstants>(), 16);
         assert_eq!(mem::size_of::<VoxelizePushConstants>(), 16);
         assert_eq!(mem::size_of::<ReactPushConstants>(), 16);
+        // ExplosionPushConstants: 2 Vec4s (32 bytes) + 1 u32 + 3 u32 pad (16 bytes) = 48 bytes
+        assert_eq!(mem::size_of::<ExplosionPushConstants>(), 48);
         // RenderPushConstants: 4 u32s (16 bytes) + 2 Vec4s (32 bytes) = 48 bytes
         assert_eq!(mem::size_of::<RenderPushConstants>(), 48);
         // ToolbarPushConstants: 4 u32s (16 bytes) + 8 Vec4s (128 bytes) = 144 bytes

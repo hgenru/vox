@@ -32,6 +32,8 @@ use winit::{
 const DEFAULT_SUBSTEPS: u32 = 4;
 const SPAWN_DISTANCE: f32 = 8.0;
 const REMOVE_RADIUS: f32 = 2.0;
+const EXPLOSION_RADIUS: f32 = 3.0;
+const EXPLOSION_STRENGTH: f32 = 50.0;
 /// Water level scales with grid: ~15% of grid height.
 const WATER_LEVEL_FRAC: f32 = 0.15;
 const MARGIN: u32 = 2;
@@ -313,6 +315,7 @@ struct App {
     substeps: u32,
     selected_material: usize,
     palette: Vec<MaterialSlot>,
+    pending_explosion: Option<[f32; 3]>,
 }
 
 impl App {
@@ -340,6 +343,7 @@ impl App {
             substeps,
             selected_material: 0,
             palette: material_palette(),
+            pending_explosion: None,
         }
     }
 
@@ -376,6 +380,12 @@ impl App {
         if let Err(e) = sim.add_particles(ctx, &new_particles) {
             tracing::warn!("Failed to spawn particles: {}", e);
         }
+    }
+
+    fn trigger_explosion(&mut self) {
+        let center = self.player.camera.eye() + self.player.camera.forward() * SPAWN_DISTANCE;
+        self.pending_explosion = Some([center.x, center.y, center.z]);
+        tracing::info!("Explosion at [{:.1}, {:.1}, {:.1}]", center.x, center.y, center.z);
     }
 
     fn remove_particles(&mut self) {
@@ -510,6 +520,7 @@ impl ApplicationHandler for App {
                     match button {
                         MouseButton::Left => self.spawn_particles(),
                         MouseButton::Right => self.remove_particles(),
+                        MouseButton::Middle => self.trigger_explosion(),
                         _ => {}
                     }
                 }
@@ -536,9 +547,13 @@ impl ApplicationHandler for App {
                 let eye = self.player.camera.eye();
                 let target = self.player.camera.target();
                 let toolbar_pc = self.toolbar_push_constants();
+                let explosion = self.pending_explosion.take();
                 if let (Some(renderer), Some(ctx), Some(sim)) = (self.renderer.as_mut(), self.ctx.as_ref(), self.sim.as_ref()) {
                     if let Err(e) = ctx.execute_one_shot(|cmd| {
                         for _ in 0..substeps { sim.step(cmd); }
+                        if let Some(center) = explosion {
+                            sim.apply_explosion(cmd, center, EXPLOSION_RADIUS, EXPLOSION_STRENGTH);
+                        }
                         sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, [eye.x, eye.y, eye.z], [target.x, target.y, target.z]);
                         sim.render_toolbar(cmd, &toolbar_pc);
                         sim.finalize_render(cmd);

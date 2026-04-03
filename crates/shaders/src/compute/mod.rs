@@ -10,6 +10,7 @@
 //! Both views alias the same GPU buffer. Each `GridCell` = 8 contiguous f32s.
 
 pub mod clear_grid;
+pub mod explosion;
 pub mod g2p;
 pub mod grid_update;
 pub mod p2g;
