@@ -58,6 +58,20 @@ Shader entry points are dropped during SPIR-V linking if the entry point body ha
 ### 5. Vulkan Validation Layers
 ALWAYS enabled in debug builds. If crash with no message → check `VK_LAYER_KHRONOS_validation` is active.
 
+**Setup (Windows):**
+1. Download and install LunarG Vulkan SDK from https://vulkan.lunarg.com/
+2. After install, `VK_LAYER_KHRONOS_validation` should be available automatically.
+3. If layers are still not found, ensure `VK_LAYER_PATH` env var points to the SDK's
+   `Bin` directory (e.g., `C:\VulkanSDK\1.x.y.z\Bin`).
+4. Verify with: `vulkaninfo --summary` — should list the validation layer.
+
+**How it works in gpu-core:**
+- `VulkanContext` checks for `VK_LAYER_KHRONOS_validation` at instance creation (debug builds only).
+- If available: enables the layer + `VK_EXT_debug_utils` extension + installs a debug messenger
+  that routes Vulkan errors/warnings to `tracing::error!()` / `tracing::warn!()`.
+- If unavailable: logs a warning with install instructions and continues without validation.
+- The debug messenger is destroyed in `VulkanContext::Drop`.
+
 ### 6. Grid Clear
 Grid buffer MUST be zeroed before every P2G pass. Without this → mass/momentum accumulation from previous frame.
 

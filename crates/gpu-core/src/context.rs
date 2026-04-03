@@ -171,7 +171,11 @@ impl VulkanContext {
                 _debug_utils_enabled = true;
                 tracing::info!("Vulkan validation layers enabled");
             } else {
-                tracing::warn!("Vulkan validation layer not available, running without validation");
+                tracing::warn!(
+                    "Vulkan validation layer not available. \
+                     Install LunarG Vulkan SDK (https://vulkan.lunarg.com/) for debug validation. \
+                     See CLAUDE.md trap #5."
+                );
             }
         }
 
