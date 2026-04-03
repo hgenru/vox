@@ -14,6 +14,7 @@ pub mod clear_grid_sparse;
 pub mod clear_hash_grid;
 pub mod compact_active_bricks;
 pub mod compute_activity;
+pub mod compute_dirty_tiles;
 pub mod compute_occupancy;
 pub mod count_per_brick;
 pub mod explosion;

@@ -49,6 +49,18 @@ pub const SPARSE_WORKGROUP_SIZE: u32 = 64;
 /// Total number of bricks in the grid (BRICKS_PER_AXIS³).
 pub const TOTAL_BRICKS: u32 = BRICKS_PER_AXIS * BRICKS_PER_AXIS * BRICKS_PER_AXIS;
 
+/// Tile size in pixels for dirty-tile rendering optimization.
+pub const DIRTY_TILE_SIZE: u32 = 16;
+
+/// Number of tiles across X for dirty-tile rendering.
+pub const DIRTY_TILES_X: u32 = (RENDER_WIDTH + DIRTY_TILE_SIZE - 1) / DIRTY_TILE_SIZE;
+
+/// Number of tiles across Y for dirty-tile rendering.
+pub const DIRTY_TILES_Y: u32 = (RENDER_HEIGHT + DIRTY_TILE_SIZE - 1) / DIRTY_TILE_SIZE;
+
+/// Total number of dirty tiles.
+pub const DIRTY_TILE_COUNT: u32 = DIRTY_TILES_X * DIRTY_TILES_Y;
+
 /// Default hash grid capacity (number of slots).
 /// Should be ~2x the expected max active cells for low collision rate.
 /// Must be a power of 2 for fast modulo via bitwise AND.
@@ -93,6 +105,14 @@ mod tests {
     #[test]
     fn sleep_threshold_is_positive() {
         assert!(SLEEP_THRESHOLD > 0);
+    }
+
+    #[test]
+    fn dirty_tile_constants() {
+        // 1280 / 16 = 80 tiles, 720 / 16 = 45 tiles
+        assert_eq!(DIRTY_TILES_X, 80);
+        assert_eq!(DIRTY_TILES_Y, 45);
+        assert_eq!(DIRTY_TILE_COUNT, 3600);
     }
 
     #[test]

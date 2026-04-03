@@ -203,6 +203,18 @@ impl VulkanContext {
         let memory_properties =
             unsafe { instance.get_physical_device_memory_properties(physical_device) };
 
+        // Log VRAM budget
+        let vram_mb = crate::vram_budget::query_vram_mb(&memory_properties);
+        let budget = crate::vram_budget::VramBudget::from_available_vram(vram_mb);
+        tracing::info!(
+            "VRAM: {} MB detected | Budget: max_particles={}, grid_slots={}, render={}x{}",
+            vram_mb,
+            budget.max_particles,
+            budget.hash_grid_capacity,
+            budget.render_width,
+            budget.render_height,
+        );
+
         // Queue families
         let queue_families = Self::find_queue_families(&instance, physical_device)?;
         tracing::info!(

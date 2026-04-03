@@ -12,6 +12,8 @@ pub mod frame;
 pub mod image;
 pub mod pipeline;
 pub mod swapchain;
+pub mod vram_budget;
 
 pub use context::VulkanContext;
 pub use error::{GpuError, Result};
+pub use vram_budget::VramBudget;

@@ -313,6 +313,24 @@ pub struct GridUpdateHashPushConstants {
     pub hash_capacity: u32,
 }
 
+/// Push constants for the compute_dirty_tiles shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct DirtyTilesPushConstants {
+    /// Render target width in pixels.
+    pub width: u32,
+    /// Render target height in pixels.
+    pub height: u32,
+    /// Grid dimension (cells per axis).
+    pub grid_size: u32,
+    /// Number of bricks per axis (grid_size / 8).
+    pub bricks_per_axis: u32,
+    /// Current camera eye position (xyz), w = camera_moved flag (1.0 = moved).
+    pub eye: glam::Vec4,
+    /// Current camera target position (xyz), w unused.
+    pub target: glam::Vec4,
+}
+
 /// Maximum number of material slots in the toolbar.
 pub const TOOLBAR_MAX_MATERIALS: usize = 8;
 

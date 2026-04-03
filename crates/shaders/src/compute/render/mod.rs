@@ -540,6 +540,44 @@ pub fn render_pixel(
     output[pixel_idx] = pack_bgra(r, g, b, 255);
 }
 
+/// Tile size in pixels for dirty-tile rendering.
+const TILE_SIZE: u32 = 16;
+
+/// Check if the tile containing this pixel is dirty, and if clean, copy from
+/// the previous frame buffer.
+///
+/// Returns `true` if the pixel needs full ray march (dirty tile),
+/// `false` if the pixel was copied from the previous frame (clean tile).
+///
+/// Helper function to satisfy trap #4a.
+fn handle_dirty_tile(
+    px: u32,
+    py: u32,
+    width: u32,
+    height: u32,
+    dirty_tiles: &[u32],
+    prev_output: &[u32],
+    output: &mut [u32],
+) -> bool {
+    if px >= width || py >= height {
+        return false;
+    }
+
+    let tiles_x = (width + TILE_SIZE - 1) / TILE_SIZE;
+    let tile_x = px / TILE_SIZE;
+    let tile_y = py / TILE_SIZE;
+    let tile_idx = tile_y * tiles_x + tile_x;
+
+    if dirty_tiles[tile_idx as usize] == 0 {
+        // Clean tile: copy from previous frame
+        let pixel_idx = (py * width + px) as usize;
+        output[pixel_idx] = prev_output[pixel_idx];
+        return false;
+    }
+
+    true
+}
+
 /// Compute shader entry point: render voxels via ray marching.
 ///
 /// Dispatched with `(ceil(width/8), ceil(height/8), 1)` workgroups.
@@ -548,6 +586,8 @@ pub fn render_pixel(
 /// Descriptor set 0, binding 2: storage buffer of `MaterialParams` (material table, read).
 /// Descriptor set 0, binding 3: storage buffer of `u32` (brick_occupied map, read).
 /// Descriptor set 0, binding 4: storage buffer of `u32` (super_brick_occupied map, read).
+/// Descriptor set 0, binding 5: storage buffer of `u32` (dirty_tile_buffer, read).
+/// Descriptor set 0, binding 6: storage buffer of `u32` (prev_render_output, read).
 /// Push constants: `RenderPushConstants`.
 #[spirv(compute(threads(8, 8, 1)))]
 pub fn render_voxels(
@@ -558,6 +598,12 @@ pub fn render_voxels(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] materials: &[MaterialParams],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] brick_occupied: &[u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] super_brick_occupied: &[u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 5)] dirty_tiles: &[u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 6)] prev_output: &[u32],
 ) {
+    // Check dirty tile first; if clean, pixel is already copied from prev frame
+    if !handle_dirty_tile(id.x, id.y, push.width, push.height, dirty_tiles, prev_output, output) {
+        return;
+    }
     render_pixel(id.x, id.y, push, voxels, output, materials, brick_occupied, super_brick_occupied);
 }
