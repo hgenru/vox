@@ -1,6 +1,7 @@
-//! Compute shader entry points for the MPM simulation pipeline.
+//! Compute shader entry points for the MPM simulation pipeline and HUD overlays.
 //!
 //! Pipeline order: clear_grid -> P2G -> grid_update -> G2P -> voxelize
+//! HUD overlays (toolbar_overlay) run after the render pass.
 //!
 //! The grid buffer has two binding modes:
 //! - `&mut [GridCell]` for clear_grid, grid_update, G2P (one thread per cell, no contention)
@@ -14,6 +15,7 @@ pub mod grid_update;
 pub mod p2g;
 pub mod react;
 pub mod render;
+pub mod toolbar_overlay;
 pub mod voxelize;
 
 /// Compute 1D quadratic B-spline weights for a particle at fractional position `fx`.
