@@ -64,16 +64,40 @@ fn any_face_neighbor_has_material(
         || has_neighbor_material(voxels, grid_size, vx, vy, vz + 1, target_material)
 }
 
+/// Simple hash for pseudo-random per-particle rate limiting.
+///
+/// Uses Knuth's multiplicative hash to produce a deterministic but well-distributed
+/// value from a particle index and frame offset.
+pub fn particle_hash(idx: u32, frame_offset: u32) -> u32 {
+    let mut h = idx;
+    h = h.wrapping_mul(2654435761); // Knuth's multiplicative hash
+    h ^= h >> 16;
+    h = h.wrapping_add(frame_offset);
+    h ^= h >> 13;
+    h
+}
+
 /// Process a single particle for chemical reactions.
 ///
 /// Checks 6 face-neighbors in the voxel buffer and applies:
 /// - Water + adjacent Lava -> Stone (reset F = Identity)
 /// - Lava + adjacent Water -> Steam (reset F = Identity, temp = 100)
+///
+/// Reactions are rate-limited: only ~6% chance per particle per frame to avoid
+/// instant mass conversion and visual flickering.
 pub fn react_particle(
     particle: &mut Particle,
     voxels: &[UVec4],
     grid_size: u32,
+    particle_index: u32,
 ) {
+    // Rate-limit reactions: only 1/16 chance (~6%) per particle per frame.
+    // This spreads conversions over many frames for gradual visual transition.
+    let hash = particle_hash(particle_index, 0);
+    if hash % 16 != 0 {
+        return;
+    }
+
     let material_id = particle.ids.x;
     let phase = particle.ids.y;
 
@@ -146,5 +170,5 @@ pub fn react(
     if id.x >= push.num_particles {
         return;
     }
-    react_particle(&mut particles[idx], voxels, push.grid_size);
+    react_particle(&mut particles[idx], voxels, push.grid_size, id.x);
 }
