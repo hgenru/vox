@@ -53,7 +53,7 @@ impl PlayerController {
             camera,
             velocity_y: 0.0,
             on_ground: false,
-            fly_mode: true,
+            fly_mode: false,
             player_height: DEFAULT_PLAYER_HEIGHT,
             jump_speed: DEFAULT_JUMP_SPEED,
             heightmap: None,

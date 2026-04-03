@@ -32,7 +32,8 @@ use winit::{
 const DEFAULT_SUBSTEPS: u32 = 4;
 const SPAWN_DISTANCE: f32 = 8.0;
 const REMOVE_RADIUS: f32 = 2.0;
-const WATER_LEVEL: f32 = 5.0;
+/// Water level scales with grid: ~15% of grid height.
+const WATER_LEVEL_FRAC: f32 = 0.15;
 
 struct MaterialSlot {
     name: &'static str,
@@ -98,23 +99,26 @@ fn parse_args() -> Args {
 }
 
 /// Compute terrain height at a given (x, z) world position.
+///
+/// All dimensions scale with GRID_SIZE so the scene works at any resolution.
 fn island_height(x: f32, z: f32) -> f32 {
-    let cx = 16.0;
-    let cz = 16.0;
+    let gs = GRID_SIZE as f32;
+    let cx = gs * 0.5;
+    let cz = gs * 0.5;
     let dx = x - cx;
     let dz = z - cz;
     let dist = (dx * dx + dz * dz).sqrt();
-    let base = 2.0;
-    let island_radius = 12.0;
+    let base = gs * 0.08;              // ocean floor (~20 cells at 256)
+    let island_radius = gs * 0.375;    // ~96 cells at 256
     if dist > island_radius {
         return base;
     }
     let t = dist / island_radius;
-    let island_rise = (1.0 - t * t) * 6.0;
-    let peak_radius = 4.0;
+    let island_rise = (1.0 - t * t) * gs * 0.19;  // ~48 cells slope
+    let peak_radius = gs * 0.125;                   // ~32 cells peak
     let peak_rise = if dist < peak_radius {
         let pt = dist / peak_radius;
-        (1.0 - pt * pt) * 11.0
+        (1.0 - pt * pt) * gs * 0.34               // ~87 cells peak height
     } else {
         0.0
     };
@@ -142,17 +146,22 @@ fn spawn_cell(
 }
 
 /// Create the initial set of particles for the island demo scene.
+///
+/// All ranges scale with GRID_SIZE so the scene works at any resolution.
 fn create_island_particles() -> Vec<Particle> {
     let mut particles = Vec::new();
+    let gs = GRID_SIZE;
+    let margin = 2u32;
+    let water_level = (gs as f32 * WATER_LEVEL_FRAC) as i32;
 
     // 1. Terrain: stone particles following the heightmap
-    for x in 2..30 {
-        for z in 2..30 {
+    for x in margin..(gs - margin) {
+        for z in margin..(gs - margin) {
             let fx = x as f32 + 0.5;
             let fz = z as f32 + 0.5;
             let height = island_height(fx, fz);
             let max_y = height.ceil() as i32;
-            for y in 2..max_y.min(30) {
+            for y in (margin as i32)..max_y.min((gs - margin) as i32) {
                 particles.push(Particle::new(
                     Vec3::new(fx, y as f32 + 0.5, fz),
                     1.0, MAT_STONE, PHASE_SOLID,
@@ -162,15 +171,14 @@ fn create_island_particles() -> Vec<Particle> {
     }
 
     // 2. Ocean water around the island
-    for x in 2..30 {
-        for z in 2..30 {
+    for x in margin..(gs - margin) {
+        for z in margin..(gs - margin) {
             let fx = x as f32 + 0.5;
             let fz = z as f32 + 0.5;
             let terrain_h = island_height(fx, fz);
-            if terrain_h < WATER_LEVEL {
+            if terrain_h < water_level as f32 {
                 let water_start = terrain_h.ceil() as i32;
-                let water_end = WATER_LEVEL as i32;
-                for y in water_start..water_end {
+                for y in water_start..water_level {
                     spawn_cell(&mut particles, x as f32, y as f32, z as f32, 0.125, MAT_WATER, PHASE_LIQUID);
                 }
             }
@@ -178,12 +186,14 @@ fn create_island_particles() -> Vec<Particle> {
     }
 
     // 3. Lava pool at the volcano summit
-    for x in 14..18 {
-        for z in 14..18 {
+    let lava_min = (gs as f32 * 0.44) as u32;
+    let lava_max = (gs as f32 * 0.56) as u32;
+    for x in lava_min..lava_max {
+        for z in lava_min..lava_max {
             let fx = x as f32 + 0.5;
             let fz = z as f32 + 0.5;
             let terrain_h = island_height(fx, fz);
-            let lava_top = (terrain_h + 2.0).min(28.0) as i32;
+            let lava_top = (terrain_h + gs as f32 * 0.03).min((gs - margin) as f32) as i32;
             let lava_bottom = terrain_h.ceil() as i32;
             for y in lava_bottom..lava_top {
                 let start = particles.len();
@@ -231,8 +241,9 @@ fn run_headless(args: &Args) -> Result<()> {
         if i % 10 == 0 { tracing::info!("Frame {}/{}", i, args.frames); }
     }
 
-    let eye = [24.0_f32, 12.0, 24.0];
-    let target = [16.0_f32, 8.0, 16.0];
+    let gs = GRID_SIZE as f32;
+    let eye = [gs * 0.75, gs * 0.4, gs * 0.75];
+    let target = [gs * 0.5, gs * 0.3, gs * 0.5];
     ctx.execute_one_shot(|cmd| {
         sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye, target);
         sim.finalize_render(cmd);
@@ -272,7 +283,11 @@ impl App {
         let particles = create_island_particles();
         tracing::info!("Created {} initial particles", particles.len());
 
-        let camera = Camera::look_at(Vec3::new(24.0, 12.0, 24.0), Vec3::new(16.0, 10.0, 16.0));
+        let gs = GRID_SIZE as f32;
+        let camera = Camera::look_at(
+            Vec3::new(gs * 0.75, gs * 0.4, gs * 0.75),
+            Vec3::new(gs * 0.5, gs * 0.3, gs * 0.5),
+        );
         let mut player = PlayerController::new(camera);
         let heightmap = generate_heightmap();
         if let Err(e) = player.set_heightmap(heightmap, GRID_SIZE) {
