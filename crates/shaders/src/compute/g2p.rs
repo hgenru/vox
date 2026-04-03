@@ -206,10 +206,11 @@ pub fn gather_particle(
 
 /// Check and apply phase transitions based on temperature thresholds.
 ///
-/// - Stone (mat=0) T > 1500 -> Liquid (lava)
+/// - Stone (mat=0) T > 1500 -> Liquid (lava, mat=2)
 /// - Water (mat=1) T > 100 -> Gas (steam)
-/// - Water (mat=1) T < 0 -> Solid (ice)
-/// - Lava (mat=2) T < 1500 -> Solid (stone)
+/// - Water (mat=1) T < 0 -> Solid (ice, mat=5)
+/// - Lava (mat=2) T < 1500 -> Solid (stone, mat=0)
+/// - Ice (mat=5) T > 0 -> Liquid (water, mat=1)
 ///
 /// On phase change: reset F = Identity, as per CLAUDE.md trap #8.
 pub fn apply_phase_transitions(particle: &mut Particle) {
@@ -218,12 +219,14 @@ pub fn apply_phase_transitions(particle: &mut Particle) {
     let temp = particle.vel_temp.w;
 
     let mut new_phase = phase;
+    let mut new_material = material_id;
 
     match material_id {
         // Stone
         0 => {
             if phase == 0 && temp > 1500.0 {
-                new_phase = 1; // solid -> liquid (becomes lava-like)
+                new_phase = 1; // solid -> liquid (becomes lava)
+                new_material = 2; // MAT_LAVA
             }
         }
         // Water
@@ -232,18 +235,28 @@ pub fn apply_phase_transitions(particle: &mut Particle) {
                 new_phase = 2; // liquid -> gas (steam)
             } else if phase == 1 && temp < 0.0 {
                 new_phase = 0; // liquid -> solid (ice)
+                new_material = 5; // MAT_ICE
             }
         }
         // Lava
         2 => {
             if phase == 1 && temp < 1500.0 {
                 new_phase = 0; // liquid -> solid (becomes stone)
+                new_material = 0; // MAT_STONE
+            }
+        }
+        // Ice
+        5 => {
+            if phase == 0 && temp > 0.0 {
+                new_phase = 1; // solid -> liquid (melts to water)
+                new_material = 1; // MAT_WATER
             }
         }
         _ => {}
     }
 
-    if new_phase != phase {
+    if new_phase != phase || new_material != material_id {
+        particle.ids.x = new_material;
         particle.ids.y = new_phase;
         // Reset deformation gradient on phase change (CLAUDE.md trap #8)
         particle.f_col0 = Vec4::new(1.0, 0.0, 0.0, 0.0);

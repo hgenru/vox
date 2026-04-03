@@ -224,6 +224,19 @@ fn textured_material_color(material_id: u32, vx: i32, vy: i32, vz: i32, grid_siz
         let h = hash3(vx, vy, vz);
         let base = 0.4 + (h - 0.5) * 0.08;
         Vec3::new(base, base, base)
+    } else if material_id == 5 {
+        // Ice: light blue-white with crystalline shimmer
+        let noise = value_noise(vx as f32 * 1.2, vy as f32 * 1.2, vz as f32 * 1.2);
+        let h = hash3(vx, vy, vz);
+        // Vary between pale blue and almost white
+        let pale = Vec3::new(0.7, 0.85, 0.95);
+        let white = Vec3::new(0.85, 0.92, 0.98);
+        let t = noise * 0.6 + h * 0.4;
+        Vec3::new(
+            pale.x + (white.x - pale.x) * t,
+            pale.y + (white.y - pale.y) * t,
+            pale.z + (white.z - pale.z) * t,
+        )
     } else {
         // Unknown: magenta
         Vec3::new(1.0, 0.0, 1.0)
