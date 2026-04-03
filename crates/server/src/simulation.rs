@@ -518,10 +518,15 @@ impl GpuSimulation {
         passes::dispatch(&self.device, cmd, &self.clear_grid_pass, grid_wg, grid_wg, grid_wg, &[]);
         passes::barrier(cmd, &self.device);
 
-        // 2. Reset active_count to 0 for this frame's mark_active pass
+        // 2. Reset active_count to 0 AND clear mark_buffer for this frame.
+        // mark_buffer must be zeroed every frame — otherwise mark_active finds
+        // cells already marked from the previous frame, skips adding them to
+        // active_cells, and grid_update_sparse processes 0 cells (#221).
         unsafe {
             self.device
                 .cmd_fill_buffer(cmd, self.active_count_buffer.buffer, 0, 4, 0);
+            self.device
+                .cmd_fill_buffer(cmd, self.mark_buffer.buffer, 0, vk::WHOLE_SIZE, 0);
         }
         // Barrier: TRANSFER_WRITE → SHADER_READ | SHADER_WRITE
         {
