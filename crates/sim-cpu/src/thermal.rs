@@ -126,13 +126,63 @@ pub fn diffuse_temperature(particles: &mut [Particle], materials: &[MaterialPara
 /// After temperature update, each particle is checked against phase
 /// transition rules. On transition: F = Identity, damage = 0.
 ///
+/// Gunpowder explosion additionally sets outward velocity and boosts
+/// temperature to 3000C, matching the shader implementation in g2p.rs.
+///
 /// # Arguments
 /// - `particles`: mutable particle slice
 pub fn apply_phase_transitions(particles: &mut [Particle]) {
     for particle in particles.iter_mut() {
+        let was_gunpowder_solid = particle.material_id() == shared::material::MAT_GUNPOWDER
+            && particle.phase() == shared::material::PHASE_SOLID;
         let transition = check_phase_transition(particle);
         apply_phase_transition(particle, transition);
+
+        // Gunpowder explosion: apply outward velocity and boost temperature.
+        // Must match shader g2p.rs apply_gunpowder_explosion().
+        if was_gunpowder_solid && particle.phase() == shared::material::PHASE_GAS {
+            apply_gunpowder_explosion_cpu(particle);
+        }
     }
+}
+
+/// Apply gunpowder explosion velocity and temperature boost (CPU side).
+///
+/// Uses particle position as a seed for pseudo-random direction.
+/// Matches the shader implementation in g2p.rs `apply_gunpowder_explosion()`.
+fn apply_gunpowder_explosion_cpu(particle: &mut Particle) {
+    let pos = particle.position();
+    let px = pos.x;
+    let py = pos.y;
+    let pz = pos.z;
+
+    // Hash each axis with different seeds (matches shader hash_f32 logic)
+    let hx = hash_f32_cpu(px * 73.17 + pz * 37.91);
+    let hy = hash_f32_cpu(py * 127.31 + px * 53.47);
+    let hz = hash_f32_cpu(pz * 91.53 + py * 67.13);
+
+    let explosion_speed = 150.0_f32;
+    let gs = shared::constants::GRID_SIZE as f32;
+
+    // Convert grid-space velocity to world-space (divide by grid size)
+    let vel = Vec3::new(
+        hx * explosion_speed / gs,
+        hy.abs() * explosion_speed / gs + 80.0 / gs,
+        hz * explosion_speed / gs,
+    );
+    particle.set_velocity(vel);
+    particle.set_temperature(3000.0);
+}
+
+/// CPU-side pseudo-random hash matching shader hash_f32.
+///
+/// Reinterprets float bits and applies xorshift mixing.
+fn hash_f32_cpu(x: f32) -> f32 {
+    let mut bits = x.to_bits();
+    bits ^= bits >> 16;
+    bits = bits.wrapping_mul(0x45d9f3b);
+    bits ^= bits >> 16;
+    (bits & 0xFFFF) as f32 / 32768.0 - 1.0
 }
 
 #[cfg(test)]

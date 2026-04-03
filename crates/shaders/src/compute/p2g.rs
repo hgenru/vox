@@ -71,7 +71,11 @@ pub fn compute_stress(particle: &Particle, materials: &[MaterialParams]) -> [Vec
             (20.0_f32, mat.elastic.w)
         };
 
-        let pressure = bulk * (j - 1.0);
+        // Gas thermal pressure: hot gas expands outward (ideal gas law approx).
+        // Scale factor 0.05 keeps pressure reasonable: at 3000C -> 150 extra pressure.
+        // Capped at 200 to prevent numerical blowup from extreme temperatures.
+        let thermal_pressure = compute_gas_thermal_pressure(particle, phase);
+        let pressure = bulk * (j - 1.0) + thermal_pressure;
 
         // Viscous stress: approximated from APIC C matrix (velocity gradient).
         // D = 0.5 * (C + C^T), then deviatoric part opposes shearing flow.
@@ -121,6 +125,27 @@ pub fn compute_stress(particle: &Particle, materials: &[MaterialParams]) -> [Vec
         let s2 = mu * (f_col2 - Vec3::Z) * stress_scale + Vec3::Z * lambda * log_j;
         [s0, s1, s2]
     }
+}
+
+/// Compute gas thermal pressure contribution.
+///
+/// Hot gas (phase==2, T>100) generates outward expansion pressure proportional
+/// to temperature, simulating the ideal gas law. Scaled by 0.05 and capped at
+/// 200 to prevent numerical instability at extreme temperatures.
+///
+/// Returns 0.0 for non-gas particles or cool gas.
+fn compute_gas_thermal_pressure(particle: &Particle, phase: u32) -> f32 {
+    if phase != 2 {
+        return 0.0;
+    }
+    let temp = particle.vel_temp.w;
+    if temp <= 100.0 {
+        return 0.0;
+    }
+    // Scale: 3000C * 0.05 = 150 pressure units (comparable to bulk=2.0 * J deviation)
+    let raw = temp * 0.05;
+    // Cap to prevent extreme pressure from runaway temperatures
+    if raw > 200.0 { 200.0 } else { raw }
 }
 
 /// Approximate natural logarithm for GPU (no std::ln available in no_std).

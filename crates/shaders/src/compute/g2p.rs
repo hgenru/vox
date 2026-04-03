@@ -159,6 +159,23 @@ pub fn gather_particle(
     c_col1 *= apic_scale;
     c_col2 *= apic_scale;
 
+    // Thermal diffusion: blend grid temp with particle temp for gradual transfer.
+    // Full grid temp (blend=1.0) = instant equalization (too fast, lava cools in <1s).
+    // Blend=0.005 means 0.5% of grid temp difference per step.
+    // At 120 steps/sec: after 1s temp moves ~45% toward grid average.
+    // Lava at 2000C surrounded by stone at 20C cools to solidification (~1500C) in ~3-5s.
+    let thermal_blend = 0.005_f32;
+    let old_temp = particle.vel_temp.w;
+    new_temp = old_temp + thermal_blend * (new_temp - old_temp);
+
+    // Radiative cooling: particles lose heat to environment over time (Newton's cooling law).
+    // Without this, total thermal energy only accumulates (each explosion adds 3000C)
+    // and chain explosions escalate infinitely. This ensures heat dissipates even
+    // without cold neighbors nearby.
+    // At 0.002 per step (120 steps/sec): hot particle loses ~21% of excess heat per second.
+    // 3000C -> ~2370C after 1s, ~1870C after 2s, reaches ambient in ~15-20s.
+    new_temp = apply_radiative_cooling(new_temp);
+
     // PIC/FLIP blend
     // True FLIP requires old grid velocities which we don't store.
     // Instead, use a weighted blend of PIC (grid velocity) and the particle's
@@ -251,6 +268,69 @@ pub fn gather_particle(
     apply_phase_transitions(particle);
 }
 
+/// Apply radiative cooling (Newton's cooling law) to a temperature value.
+///
+/// Particles lose heat to the environment at a rate proportional to the
+/// temperature difference from ambient (20C). This prevents thermal runaway
+/// where explosions accumulate heat indefinitely.
+///
+/// `cooling_rate = 0.002` per step. At 120 steps/sec, a 3000C particle
+/// loses ~21% of excess heat per second.
+fn apply_radiative_cooling(temp: f32) -> f32 {
+    let ambient_temp = 20.0_f32;
+    let cooling_rate = 0.002_f32;
+    temp + cooling_rate * (ambient_temp - temp)
+}
+
+/// GPU-friendly pseudo-random hash for a single float.
+///
+/// Uses integer bit reinterpretation and xorshift-style mixing to produce
+/// a value in [-1.0, 1.0] with reasonable distribution, even for
+/// nearby integer-ish inputs (e.g., grid-aligned particle positions).
+fn hash_f32(x: f32) -> f32 {
+    // Reinterpret float bits as integer for mixing
+    let mut bits = x.to_bits();
+    bits ^= bits >> 16;
+    bits = bits.wrapping_mul(0x45d9f3b);
+    bits ^= bits >> 16;
+    // Convert to [-1, 1] range
+    let normalized = (bits & 0xFFFF) as f32 / 32768.0 - 1.0;
+    normalized
+}
+
+/// Apply gunpowder explosion: set velocity to pseudo-random outward direction.
+///
+/// Uses particle position as a seed for the hash to give each particle
+/// a unique explosion direction. Speed is calibrated against gravity (-196)
+/// so particles travel ~30-60 grid units before falling back.
+///
+/// Also boosts temperature to 3000C for thermal pressure effects.
+fn apply_gunpowder_explosion(particle: &mut Particle) {
+    let px = particle.pos_mass.x;
+    let py = particle.pos_mass.y;
+    let pz = particle.pos_mass.z;
+
+    // Hash each axis with different seeds for decorrelation
+    let hx = hash_f32(px * 73.17 + pz * 37.91);
+    let hy = hash_f32(py * 127.31 + px * 53.47);
+    let hz = hash_f32(pz * 91.53 + py * 67.13);
+
+    // Explosion speed: 150 grid-units/s.
+    // Against gravity=-196, max vertical rise = v^2/(2*g) ≈ 57 grid units.
+    // Horizontal spread is unimpeded. Good visual for 256-grid.
+    let explosion_speed = 150.0_f32;
+    particle.vel_temp = Vec4::new(
+        hx * explosion_speed,
+        hy.abs() * explosion_speed + 80.0, // always some upward bias
+        hz * explosion_speed,
+        3000.0, // boost temperature for gas thermal pressure
+    );
+    // Reset F (trap #8)
+    particle.f_col0 = Vec4::new(1.0, 0.0, 0.0, 0.0);
+    particle.f_col1 = Vec4::new(0.0, 1.0, 0.0, 0.0);
+    particle.f_col2 = Vec4::new(0.0, 0.0, 1.0, 0.0);
+}
+
 /// Check and apply phase transitions based on temperature thresholds.
 ///
 /// - Stone (mat=0) T > 1500 -> Liquid (lava, mat=2)
@@ -303,14 +383,8 @@ pub fn apply_phase_transitions(particle: &mut Particle) {
         6 => {
             if phase == 0 && temp > 150.0 {
                 new_phase = 2; // solid -> gas (explosion)
-                // Boost temp for massive EOS pressure
-                particle.vel_temp = Vec4::new(
-                    particle.vel_temp.x, particle.vel_temp.y, particle.vel_temp.z, 3000.0
-                );
-                // Reset F (trap #8)
-                particle.f_col0 = Vec4::new(1.0, 0.0, 0.0, 0.0);
-                particle.f_col1 = Vec4::new(0.0, 1.0, 0.0, 0.0);
-                particle.f_col2 = Vec4::new(0.0, 0.0, 1.0, 0.0);
+                // Explosion: outward velocity with pseudo-random direction per particle.
+                apply_gunpowder_explosion(particle);
             }
         }
         _ => {}

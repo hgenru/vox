@@ -16,5 +16,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spv_path = result.module.unwrap_single();
     println!("cargo:rustc-env=SHADERS_SPV_PATH={}", spv_path.display());
 
+    // Ensure build.rs reruns when shader source files change
+    println!("cargo:rerun-if-changed=../shaders/src/");
+
     Ok(())
 }

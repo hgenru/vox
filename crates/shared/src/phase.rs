@@ -5,7 +5,7 @@
 //! - Water T > 100 -> Steam (gas)
 //! - Water T < 0 -> Ice (solid)
 //! - Lava T < 1500 -> Stone (solid)
-//! - Gunpowder T > 200 -> Gas (explosion)
+//! - Gunpowder T > 150 -> Gas (explosion)
 //!
 //! On transition: reset F = Identity, damage = 0, update phase.
 
@@ -71,7 +71,7 @@ pub fn check_phase_transition(particle: &Particle) -> PhaseTransition {
             new_phase: PHASE_SOLID,
         },
         // Gunpowder solid -> Gas when T > 200 (explosion)
-        (MAT_GUNPOWDER, PHASE_SOLID) if temp > 200.0 => PhaseTransition::Transition {
+        (MAT_GUNPOWDER, PHASE_SOLID) if temp > 150.0 => PhaseTransition::Transition {
             new_material_id: MAT_GUNPOWDER,
             new_phase: PHASE_GAS,
         },
