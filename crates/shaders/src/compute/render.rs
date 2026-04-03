@@ -158,72 +158,96 @@ fn value_noise(x: f32, y: f32, z: f32) -> f32 {
     c0 + (c1 - c0) * fz
 }
 
+/// Procedural stone color: dark veins through lighter base with per-voxel grain.
+fn stone_color(vx: i32, vy: i32, vz: i32) -> Vec3 {
+    let noise = value_noise(vx as f32 * 0.7, vy as f32 * 0.7, vz as f32 * 0.7);
+    let noise2 = value_noise(vx as f32 * 2.3, vy as f32 * 2.3, vz as f32 * 2.3);
+    let base = Vec3::new(0.5, 0.48, 0.45);
+    let vein = Vec3::new(0.35, 0.33, 0.30);
+    let t = noise * 0.7 + noise2 * 0.3;
+    let inv_t = 1.0 - t;
+    let inv_t = if inv_t < 0.0 { 0.0 } else { inv_t };
+    let color = Vec3::new(
+        base.x + (vein.x - base.x) * inv_t,
+        base.y + (vein.y - base.y) * inv_t,
+        base.z + (vein.z - base.z) * inv_t,
+    );
+    let h = hash3(vx, vy, vz);
+    let offset = (h - 0.5) * 0.06;
+    Vec3::new(color.x + offset, color.y + offset, color.z + offset)
+}
+
+/// Procedural water color: depth-based blue variation.
+fn water_color(vx: i32, vy: i32, vz: i32, grid_size: u32) -> Vec3 {
+    let gs = grid_size as f32;
+    let depth_factor = 1.0 - (vy as f32 / gs);
+    let depth_factor = if depth_factor < 0.0 { 0.0 } else { depth_factor };
+    let base = Vec3::new(0.1, 0.35, 0.85);
+    let deep = Vec3::new(0.05, 0.15, 0.5);
+    let t = depth_factor * 0.5;
+    Vec3::new(
+        base.x + (deep.x - base.x) * t,
+        base.y + (deep.y - base.y) * t,
+        base.z + (deep.z - base.z) * t,
+    )
+}
+
+/// Procedural lava color: turbulent bright/dark patches.
+fn lava_color(vx: i32, vy: i32, vz: i32) -> Vec3 {
+    let noise = value_noise(vx as f32 * 1.5, vy as f32 * 1.5, vz as f32 * 1.5);
+    let bright = Vec3::new(1.0, 0.7, 0.1);
+    let dark = Vec3::new(0.8, 0.2, 0.0);
+    Vec3::new(
+        dark.x + (bright.x - dark.x) * noise,
+        dark.y + (bright.y - dark.y) * noise,
+        dark.z + (bright.z - dark.z) * noise,
+    )
+}
+
+/// Procedural wood color: grain pattern with brown variation.
+fn wood_color(vx: i32, vy: i32, vz: i32) -> Vec3 {
+    let noise = value_noise(vx as f32 * 0.5, vy as f32 * 2.0, vz as f32 * 0.5);
+    let noise2 = value_noise(vx as f32 * 3.0, vy as f32 * 0.3, vz as f32 * 3.0);
+    let light = Vec3::new(0.6, 0.4, 0.2);
+    let dark = Vec3::new(0.4, 0.25, 0.1);
+    let t = noise * 0.6 + noise2 * 0.4;
+    let color = Vec3::new(
+        dark.x + (light.x - dark.x) * t,
+        dark.y + (light.y - dark.y) * t,
+        dark.z + (light.z - dark.z) * t,
+    );
+    let h = hash3(vx, vy, vz);
+    let offset = (h - 0.5) * 0.04;
+    Vec3::new(color.x + offset, color.y + offset, color.z + offset)
+}
+
+/// Procedural ash color: gray with subtle variation.
+fn ash_color(vx: i32, vy: i32, vz: i32) -> Vec3 {
+    let h = hash3(vx, vy, vz);
+    let base = 0.4 + (h - 0.5) * 0.08;
+    Vec3::new(base, base, base)
+}
+
 /// Get procedurally textured color for a material at a given voxel position.
 ///
 /// Each material uses noise/hash functions seeded by voxel coordinates to produce
 /// visual variation instead of flat color. Returns (r, g, b) as floats in [0, 1].
+///
+/// Material colors are split into separate helper functions to work around a
+/// rust-gpu SPIR-V compilation issue where long `if/else if` chains can cause
+/// later branches to be dropped (see CLAUDE.md trap #4a — entry points and
+/// function calls). Each branch calls a dedicated function.
 fn textured_material_color(material_id: u32, vx: i32, vy: i32, vz: i32, grid_size: u32) -> Vec3 {
     if material_id == 0 {
-        // Stone: dark veins through lighter base with per-voxel grain
-        let noise = value_noise(vx as f32 * 0.7, vy as f32 * 0.7, vz as f32 * 0.7);
-        let noise2 = value_noise(vx as f32 * 2.3, vy as f32 * 2.3, vz as f32 * 2.3);
-        let base = Vec3::new(0.5, 0.48, 0.45);
-        let vein = Vec3::new(0.35, 0.33, 0.30);
-        let t = noise * 0.7 + noise2 * 0.3;
-        let inv_t = 1.0 - t;
-        let inv_t = if inv_t < 0.0 { 0.0 } else { inv_t };
-        let color = Vec3::new(
-            base.x + (vein.x - base.x) * inv_t,
-            base.y + (vein.y - base.y) * inv_t,
-            base.z + (vein.z - base.z) * inv_t,
-        );
-        // Subtle per-voxel variation
-        let h = hash3(vx, vy, vz);
-        let offset = (h - 0.5) * 0.06;
-        Vec3::new(color.x + offset, color.y + offset, color.z + offset)
+        stone_color(vx, vy, vz)
     } else if material_id == 1 {
-        // Water: depth-based blue variation
-        let gs = grid_size as f32;
-        let depth_factor = 1.0 - (vy as f32 / gs);
-        let depth_factor = if depth_factor < 0.0 { 0.0 } else { depth_factor };
-        let base = Vec3::new(0.1, 0.35, 0.85);
-        let deep = Vec3::new(0.05, 0.15, 0.5);
-        let t = depth_factor * 0.5;
-        Vec3::new(
-            base.x + (deep.x - base.x) * t,
-            base.y + (deep.y - base.y) * t,
-            base.z + (deep.z - base.z) * t,
-        )
+        water_color(vx, vy, vz, grid_size)
     } else if material_id == 2 {
-        // Lava: turbulent bright/dark patches
-        let noise = value_noise(vx as f32 * 1.5, vy as f32 * 1.5, vz as f32 * 1.5);
-        let bright = Vec3::new(1.0, 0.7, 0.1);
-        let dark = Vec3::new(0.8, 0.2, 0.0);
-        Vec3::new(
-            dark.x + (bright.x - dark.x) * noise,
-            dark.y + (bright.y - dark.y) * noise,
-            dark.z + (bright.z - dark.z) * noise,
-        )
+        lava_color(vx, vy, vz)
     } else if material_id == 3 {
-        // Wood: grain pattern with brown variation
-        let noise = value_noise(vx as f32 * 0.5, vy as f32 * 2.0, vz as f32 * 0.5);
-        let noise2 = value_noise(vx as f32 * 3.0, vy as f32 * 0.3, vz as f32 * 3.0);
-        let light = Vec3::new(0.6, 0.4, 0.2);
-        let dark = Vec3::new(0.4, 0.25, 0.1);
-        let t = noise * 0.6 + noise2 * 0.4;
-        let color = Vec3::new(
-            dark.x + (light.x - dark.x) * t,
-            dark.y + (light.y - dark.y) * t,
-            dark.z + (light.z - dark.z) * t,
-        );
-        let h = hash3(vx, vy, vz);
-        let offset = (h - 0.5) * 0.04;
-        Vec3::new(color.x + offset, color.y + offset, color.z + offset)
+        wood_color(vx, vy, vz)
     } else if material_id == 4 {
-        // Ash: gray with subtle variation
-        let h = hash3(vx, vy, vz);
-        let base = 0.4 + (h - 0.5) * 0.08;
-        Vec3::new(base, base, base)
+        ash_color(vx, vy, vz)
     } else {
         // Unknown: magenta
         Vec3::new(1.0, 0.0, 1.0)
@@ -717,6 +741,9 @@ pub fn render_pixel(
             lit_color.z + base_color.z * lava_light.z,
         );
 
+        // Read temperature from voxel data (stored as f32 bits in .y component)
+        let hit_temp = f32::from_bits(voxels[hit_idx].y);
+
         // Add emissive glow for lava (material_id == 2) and burning wood (material_id == 3)
         let final_color = if hit_material == 2 {
             let emissive = Vec3::new(1.0, 0.6, 0.1) * 0.8;
@@ -725,10 +752,8 @@ pub fn render_pixel(
                 lit_color.y + emissive.y,
                 lit_color.z + emissive.z,
             )
-        } else if hit_material == 3 {
-            // Burning wood: emissive orange glow based on temperature
-            // Temperature is encoded in the voxel; approximate by using
-            // a moderate glow since we know wood on fire has T > 300
+        } else if hit_material == 3 && hit_temp > 300.0 {
+            // Burning wood: emissive orange glow only when temperature exceeds ignition point
             let emissive = Vec3::new(1.0, 0.4, 0.05) * 0.5;
             Vec3::new(
                 lit_color.x + emissive.x,

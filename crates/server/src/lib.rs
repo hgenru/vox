@@ -429,13 +429,23 @@ impl GpuSimulation {
 
     /// Record the full simulation dispatch chain into the given command buffer.
     ///
+    /// Equivalent to calling [`step_physics`] followed by [`step_react`].
+    /// Prefer using the split methods when running multiple substeps per frame,
+    /// as react only needs to run once after all physics substeps.
+    pub fn step(&self, cmd: vk::CommandBuffer) {
+        self.step_physics(cmd);
+        self.step_react(cmd);
+    }
+
+    /// Record the physics-only dispatch chain (without chemical reactions).
+    ///
     /// The command buffer must already be in the recording state.
     /// The dispatch chain is:
     /// `clear_grid -> P2G -> grid_update -> G2P -> clear_voxels -> voxelize`.
     ///
     /// Memory barriers are inserted between each dispatch to ensure
     /// correct ordering of shader reads and writes.
-    pub fn step(&self, cmd: vk::CommandBuffer) {
+    pub fn step_physics(&self, cmd: vk::CommandBuffer) {
         let num_particles = self.num_particles;
         let grid_size = GRID_SIZE;
         let dt = shared::DT;
@@ -528,8 +538,18 @@ impl GpuSimulation {
             bytemuck::bytes_of(&vox_pc),
         );
         Self::barrier(cmd, &self.device);
+    }
 
-        // 7. React (chemical reactions via voxel neighbor lookup)
+    /// Record the chemical reaction dispatch.
+    ///
+    /// Runs the react shader which processes chemical reactions via voxel
+    /// neighbor lookup (water+lava, wood burning, etc.). Should be called
+    /// once per frame after all physics substeps complete.
+    pub fn step_react(&self, cmd: vk::CommandBuffer) {
+        let num_particles = self.num_particles;
+        let grid_size = GRID_SIZE;
+        let particle_wg = (num_particles + 63) / 64;
+
         let react_pc = ReactPushConstants {
             grid_size,
             num_particles,
