@@ -30,7 +30,7 @@ use winit::{
 };
 
 const DEFAULT_SUBSTEPS: u32 = 4;
-const SPAWN_DISTANCE: f32 = 30.0;
+const SPAWN_DISTANCE: f32 = 15.0;
 const REMOVE_RADIUS: f32 = 2.0;
 const EXPLOSION_RADIUS: f32 = 20.0;
 const EXPLOSION_STRENGTH: f32 = 50.0;
@@ -397,7 +397,22 @@ impl App {
         let slot = &self.palette[self.selected_material];
         let center = self.player.camera.eye() + self.player.camera.forward() * SPAWN_DISTANCE;
         let mut new_particles = Vec::new();
-        spawn_cell(&mut new_particles, center.x - 0.5, center.y - 0.5, center.z - 0.5, 0.125, slot.mat_id, slot.phase);
+        // Spawn a larger cluster for liquids so they are visible (3x3x3 = 27 cells x 8 PPC = 216 particles)
+        let spawn_size: u32 = if slot.phase == PHASE_LIQUID { 3 } else { 1 };
+        let half = spawn_size as f32 * 0.5;
+        for dx in 0..spawn_size {
+            for dy in 0..spawn_size {
+                for dz in 0..spawn_size {
+                    spawn_cell(
+                        &mut new_particles,
+                        center.x - half + dx as f32,
+                        center.y - half + dy as f32,
+                        center.z - half + dz as f32,
+                        0.125, slot.mat_id, slot.phase,
+                    );
+                }
+            }
+        }
         if slot.temperature != 0.0 {
             for p in &mut new_particles {
                 p.vel_temp = glam::Vec4::new(0.0, 0.0, 0.0, slot.temperature);
