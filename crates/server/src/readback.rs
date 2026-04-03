@@ -62,4 +62,25 @@ impl GpuSimulation {
     pub fn render_output_gpu_buffer(&self) -> &GpuBuffer {
         &self.render_output_buffer
     }
+
+    /// Read the any_active flag from the GPU.
+    ///
+    /// Returns `true` if any brick has a non-zero tick_period (i.e., the
+    /// simulation is not fully frozen). The CPU can use this to decide
+    /// whether to skip rendering when nothing is changing.
+    ///
+    /// This is a synchronous readback operation; call after `step_physics()`
+    /// completes and the GPU is idle.
+    pub fn readback_any_active(&self, ctx: &VulkanContext) -> Result<bool> {
+        let data = buffer::readback::<u32>(ctx, &self.any_active_buffer, 1)?;
+        Ok(data[0] != 0)
+    }
+
+    /// Returns a reference to the any_active flag buffer.
+    ///
+    /// Contains a single `u32`: 0 = all bricks frozen, 1 = at least one active.
+    /// Written by `update_sleep` via atomicMax, cleared to 0 before each dispatch.
+    pub fn any_active_buffer(&self) -> &GpuBuffer {
+        &self.any_active_buffer
+    }
 }
