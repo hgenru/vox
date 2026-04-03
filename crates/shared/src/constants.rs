@@ -39,3 +39,9 @@ pub const PHYSICS_HZ: u32 = 60;
 
 /// Number of frames in flight for GPU synchronization.
 pub const FRAMES_IN_FLIGHT: u32 = 2;
+
+/// Upper bound for the active cell list (one quarter of total grid cells).
+pub const MAX_ACTIVE_CELLS: u32 = GRID_CELL_COUNT / 4;
+
+/// Workgroup size for 1D sparse dispatches over active cell lists.
+pub const SPARSE_WORKGROUP_SIZE: u32 = 64;

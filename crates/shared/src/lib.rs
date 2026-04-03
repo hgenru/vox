@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod constants;
+pub mod indirect;
 pub mod material;
 pub mod particle;
 pub mod phase;
@@ -19,5 +20,6 @@ pub mod svd;
 
 pub use config::*;
 pub use constants::*;
+pub use indirect::IndirectDispatchArgs;
 pub use material::*;
 pub use particle::*;
