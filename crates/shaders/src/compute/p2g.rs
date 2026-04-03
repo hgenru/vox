@@ -50,16 +50,58 @@ pub fn compute_stress(particle: &Particle) -> [Vec3; 3] {
     let j = f_col0.dot(f_col1.cross(f_col2));
 
     if phase == 1 || phase == 2 {
-        // Liquid / Gas: pressure-only stress (EOS)
-        // Bulk modulus: lower for gas, higher for liquid
-        let bulk = if phase == 1 { 20.0_f32 } else { 2.0_f32 };
+        // Liquid / Gas: EOS pressure + viscous stress.
+        // Material-specific bulk modulus and viscosity.
+        // We can't access MaterialParams buffer here (only particle + grid bindings),
+        // so use hardcoded per-material values matching shared::material defaults.
+        let material_id = particle.ids.x;
+        let (bulk, viscosity) = if phase == 2 {
+            // Gas: weak pressure, very low viscosity
+            (2.0_f32, 0.001_f32)
+        } else {
+            // Liquid: material-specific
+            match material_id {
+                1 => (15.0_f32, 0.001_f32),  // Water: low bulk, very low viscosity (runny)
+                2 => (25.0_f32, 5.0_f32),    // Lava: higher bulk, HIGH viscosity (sluggish)
+                _ => (20.0_f32, 0.1_f32),    // Default liquid
+            }
+        };
+
         let pressure = bulk * (j - 1.0);
-        // Cauchy stress = -p * I (isotropic pressure)
-        let s = -pressure;
+
+        // Viscous stress: approximated from APIC C matrix (velocity gradient).
+        // D = 0.5 * (C + C^T), then deviatoric part opposes shearing flow.
+        let c0 = particle.c_col0.truncate();
+        let c1 = particle.c_col1.truncate();
+        let c2 = particle.c_col2.truncate();
+
+        // Symmetric strain rate D = 0.5*(C + C^T)
+        let d00 = c0.x;
+        let d11 = c1.y;
+        let d22 = c2.z;
+        let d01 = 0.5 * (c0.y + c1.x);
+        let d02 = 0.5 * (c0.z + c2.x);
+        let d12 = 0.5 * (c1.z + c2.y);
+
+        // Deviatoric part: D' = D - (tr(D)/3)*I
+        let tr_d = d00 + d11 + d22;
+        let third_tr = tr_d / 3.0;
+        let dev00 = d00 - third_tr;
+        let dev11 = d11 - third_tr;
+        let dev22 = d22 - third_tr;
+
+        // Cauchy stress = -p*I + 2*eta*D'
+        let s00 = -pressure + 2.0 * viscosity * dev00;
+        let s11 = -pressure + 2.0 * viscosity * dev11;
+        let s22 = -pressure + 2.0 * viscosity * dev22;
+        let s01 = 2.0 * viscosity * d01;
+        let s02 = 2.0 * viscosity * d02;
+        let s12 = 2.0 * viscosity * d12;
+
         [
-            Vec3::new(s, 0.0, 0.0),
-            Vec3::new(0.0, s, 0.0),
-            Vec3::new(0.0, 0.0, s),
+            Vec3::new(s00, s01, s02),
+            Vec3::new(s01, s11, s12),
+            Vec3::new(s02, s12, s22),
         ]
     } else {
         // Solid: simplified neo-Hookean / fixed corotated
