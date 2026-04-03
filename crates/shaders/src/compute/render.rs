@@ -106,19 +106,104 @@ fn pack_bgra(r: u32, g: u32, b: u32, a: u32) -> u32 {
     b | (g << 8) | (r << 16) | (a << 24)
 }
 
-/// Get color for a material ID.
+/// Simple 3D hash for procedural texturing.
 ///
-/// Returns (r, g, b) as floats in [0, 1].
-fn material_color(material_id: u32) -> Vec3 {
+/// Returns a deterministic pseudo-random value in [0, 1] for integer coordinates.
+fn hash3(x: i32, y: i32, z: i32) -> f32 {
+    let n = x
+        .wrapping_mul(374761393)
+        .wrapping_add(y.wrapping_mul(668265263))
+        .wrapping_add(z.wrapping_mul(1274126177));
+    let n = ((n as u32) >> 13) ^ (n as u32);
+    let n = n.wrapping_mul(
+        n.wrapping_mul(n.wrapping_mul(60493).wrapping_add(19990303))
+            .wrapping_add(1376312589),
+    );
+    (n >> 16) as f32 / 65535.0
+}
+
+/// Smooth value noise via trilinear interpolation of hashed lattice points.
+///
+/// Input coordinates are continuous; output is in [0, 1] with smooth transitions.
+fn value_noise(x: f32, y: f32, z: f32) -> f32 {
+    let ix = x.floor() as i32;
+    let iy = y.floor() as i32;
+    let iz = z.floor() as i32;
+    let fx = x - ix as f32;
+    let fy = y - iy as f32;
+    let fz = z - iz as f32;
+    // Smoothstep for continuous first derivative
+    let fx = fx * fx * (3.0 - 2.0 * fx);
+    let fy = fy * fy * (3.0 - 2.0 * fy);
+    let fz = fz * fz * (3.0 - 2.0 * fz);
+
+    // Trilinear interpolation of 8 corner hashes
+    let c000 = hash3(ix, iy, iz);
+    let c100 = hash3(ix + 1, iy, iz);
+    let c010 = hash3(ix, iy + 1, iz);
+    let c110 = hash3(ix + 1, iy + 1, iz);
+    let c001 = hash3(ix, iy, iz + 1);
+    let c101 = hash3(ix + 1, iy, iz + 1);
+    let c011 = hash3(ix, iy + 1, iz + 1);
+    let c111 = hash3(ix + 1, iy + 1, iz + 1);
+
+    let c00 = c000 + (c100 - c000) * fx;
+    let c10 = c010 + (c110 - c010) * fx;
+    let c01 = c001 + (c101 - c001) * fx;
+    let c11 = c011 + (c111 - c011) * fx;
+
+    let c0 = c00 + (c10 - c00) * fy;
+    let c1 = c01 + (c11 - c01) * fy;
+
+    c0 + (c1 - c0) * fz
+}
+
+/// Get procedurally textured color for a material at a given voxel position.
+///
+/// Each material uses noise/hash functions seeded by voxel coordinates to produce
+/// visual variation instead of flat color. Returns (r, g, b) as floats in [0, 1].
+fn textured_material_color(material_id: u32, vx: i32, vy: i32, vz: i32, grid_size: u32) -> Vec3 {
     if material_id == 0 {
-        // Stone: warm gray
-        Vec3::new(0.55, 0.52, 0.5)
+        // Stone: dark veins through lighter base with per-voxel grain
+        let noise = value_noise(vx as f32 * 0.7, vy as f32 * 0.7, vz as f32 * 0.7);
+        let noise2 = value_noise(vx as f32 * 2.3, vy as f32 * 2.3, vz as f32 * 2.3);
+        let base = Vec3::new(0.5, 0.48, 0.45);
+        let vein = Vec3::new(0.35, 0.33, 0.30);
+        let t = noise * 0.7 + noise2 * 0.3;
+        let inv_t = 1.0 - t;
+        let inv_t = if inv_t < 0.0 { 0.0 } else { inv_t };
+        let color = Vec3::new(
+            base.x + (vein.x - base.x) * inv_t,
+            base.y + (vein.y - base.y) * inv_t,
+            base.z + (vein.z - base.z) * inv_t,
+        );
+        // Subtle per-voxel variation
+        let h = hash3(vx, vy, vz);
+        let offset = (h - 0.5) * 0.06;
+        Vec3::new(color.x + offset, color.y + offset, color.z + offset)
     } else if material_id == 1 {
-        // Water: brighter blue
-        Vec3::new(0.15, 0.4, 0.95)
+        // Water: depth-based blue variation
+        let gs = grid_size as f32;
+        let depth_factor = 1.0 - (vy as f32 / gs);
+        let depth_factor = if depth_factor < 0.0 { 0.0 } else { depth_factor };
+        let base = Vec3::new(0.1, 0.35, 0.85);
+        let deep = Vec3::new(0.05, 0.15, 0.5);
+        let t = depth_factor * 0.5;
+        Vec3::new(
+            base.x + (deep.x - base.x) * t,
+            base.y + (deep.y - base.y) * t,
+            base.z + (deep.z - base.z) * t,
+        )
     } else if material_id == 2 {
-        // Lava: orange-red base (emissive added in shading)
-        Vec3::new(1.0, 0.3, 0.05)
+        // Lava: turbulent bright/dark patches
+        let noise = value_noise(vx as f32 * 1.5, vy as f32 * 1.5, vz as f32 * 1.5);
+        let bright = Vec3::new(1.0, 0.7, 0.1);
+        let dark = Vec3::new(0.8, 0.2, 0.0);
+        Vec3::new(
+            dark.x + (bright.x - dark.x) * noise,
+            dark.y + (bright.y - dark.y) * noise,
+            dark.z + (bright.z - dark.z) * noise,
+        )
     } else {
         // Unknown: magenta
         Vec3::new(1.0, 0.0, 1.0)
@@ -584,7 +669,7 @@ pub fn render_pixel(
         let base_color = if hit_phase == 2 {
             Vec3::new(0.9, 0.9, 0.95)
         } else {
-            material_color(hit_material)
+            textured_material_color(hit_material, vx, vy, vz, grid_size)
         };
 
         // Lighting: if in shadow, only ambient contributes; otherwise full lighting
