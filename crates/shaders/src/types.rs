@@ -56,8 +56,8 @@ pub struct GridCell {
     pub force_pad: Vec4,
 }
 
-/// Grid dimension (cells per axis). 32^3 for iteration-0.
-pub const GRID_SIZE: u32 = 32;
+/// Grid dimension (cells per axis). 256^3 for cave demo.
+pub const GRID_SIZE: u32 = 256;
 
 /// Fixed simulation timestep (seconds).
 pub const DT: f32 = 0.001;

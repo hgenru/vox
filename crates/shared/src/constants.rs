@@ -1,7 +1,7 @@
 //! Simulation constants.
 
-/// Grid dimension (cells per axis). 32³ for iteration-0.
-pub const GRID_SIZE: u32 = 32;
+/// Grid dimension (cells per axis). 256³ for cave demo.
+pub const GRID_SIZE: u32 = 256;
 
 /// Total number of grid cells.
 pub const GRID_CELL_COUNT: u32 = GRID_SIZE * GRID_SIZE * GRID_SIZE;
@@ -25,7 +25,7 @@ pub const RENDER_WIDTH: u32 = 1280;
 pub const RENDER_HEIGHT: u32 = 720;
 
 /// Maximum number of particles for MVP.
-pub const MAX_PARTICLES: u32 = 50_000;
+pub const MAX_PARTICLES: u32 = 2_000_000;
 
 /// Physics tick rate (Hz).
 pub const PHYSICS_HZ: u32 = 60;

@@ -112,14 +112,21 @@ fn spawn_cell(particles: &mut Vec<Particle>, x: f32, y: f32, z: f32, mass_per_pa
 /// Stone uses 1 particle per cell (solid, pinned). Water and lava use
 /// 8 particles per cell (2x2x2 sub-grid) for smoother fluid behavior.
 fn create_initial_particles() -> Vec<Particle> {
+    use shared::GRID_SIZE;
+
     let mut particles = Vec::new();
-    let center = Vec3::new(16.0, 12.0, 16.0);
-    let radii = Vec3::new(10.0, 8.0, 10.0); // ellipsoid radii
+    let gs = GRID_SIZE as f32;
+    let half = gs / 2.0;
+    let center = Vec3::new(half, half * 0.75, half); // 64, 48, 64
+    let radii = Vec3::new(gs * 0.3125, gs * 0.25, gs * 0.3125); // 40, 32, 40
+
+    let margin = 2u32;
+    let stone_top = GRID_SIZE - margin - 4; // leave some headroom
 
     // 1. Stone shell: fill solid block, skip interior of ellipsoid (= cave)
-    for x in 2..30 {
-        for z in 2..30 {
-            for y in 2..28 {
+    for x in margin..(GRID_SIZE - margin) {
+        for z in margin..(GRID_SIZE - margin) {
+            for y in margin..stone_top {
                 let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
                 let d = (pos - center) / radii;
                 let dist_sq = d.x * d.x + d.y * d.y + d.z * d.z;
@@ -133,9 +140,13 @@ fn create_initial_particles() -> Vec<Particle> {
     }
 
     // 2. Water lake at bottom of cave (8 PPC for smooth fluid)
-    for x in 7..25 {
-        for z in 7..25 {
-            for y in 4..7 {
+    let water_min = (gs * 0.22) as u32; // ~28
+    let water_max = (gs * 0.78) as u32; // ~100
+    let water_y_min = (gs * 0.125) as u32; // ~16
+    let water_y_max = (gs * 0.22) as u32; // ~28
+    for x in water_min..water_max {
+        for z in water_min..water_max {
+            for y in water_y_min..water_y_max {
                 let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
                 let d = (pos - center) / radii;
                 let dist_sq = d.x * d.x + d.y * d.y + d.z * d.z;
@@ -149,9 +160,13 @@ fn create_initial_particles() -> Vec<Particle> {
     }
 
     // 3. Lava stream from ceiling crack (8 PPC for smooth fluid)
-    for x in 14..18 {
-        for z in 14..18 {
-            for y in 18..26 {
+    let lava_min = (gs * 0.4375) as u32; // ~56
+    let lava_max = (gs * 0.5625) as u32; // ~72
+    let lava_y_min = (gs * 0.5625) as u32; // ~72
+    let lava_y_max = (gs * 0.8125) as u32; // ~104
+    for x in lava_min..lava_max {
+        for z in lava_min..lava_max {
+            for y in lava_y_min..lava_y_max {
                 let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
                 let d = (pos - center) / radii;
                 let dist_sq = d.x * d.x + d.y * d.y + d.z * d.z;
@@ -217,9 +232,10 @@ fn run_headless(args: &Args) -> Result<()> {
         }
     }
 
-    // Render final frame with camera inside the cave
-    let eye = [16.0_f32, 10.0, 26.0];
-    let target = [16.0_f32, 8.0, 16.0];
+    // Render final frame with camera inside the cave (positions scale with grid)
+    let gs = shared::GRID_SIZE as f32;
+    let eye = [gs * 0.5, gs * 0.3125, gs * 0.8125];
+    let target = [gs * 0.5, gs * 0.25, gs * 0.5];
     ctx.execute_one_shot(|cmd| {
         sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye, target);
     })?;
@@ -279,9 +295,11 @@ impl App {
         tracing::info!("Created {} initial particles", particles.len());
 
         // Camera inside the cave, looking toward the center/water lake
+        // Positions scale with grid size so the scene works at any resolution
+        let gs = shared::GRID_SIZE as f32;
         let camera = Camera::look_at(
-            Vec3::new(16.0, 10.0, 26.0),  // inside cave, near wall
-            Vec3::new(16.0, 8.0, 16.0),   // looking at center/water
+            Vec3::new(gs * 0.5, gs * 0.3125, gs * 0.8125),  // inside cave, near wall
+            Vec3::new(gs * 0.5, gs * 0.25, gs * 0.5),       // looking at center/water
         );
 
         Self {
