@@ -241,7 +241,7 @@ pub fn create_particle_block(
 
 #[cfg(test)]
 mod tests {
-    use shared::material::{MAT_WATER, PHASE_LIQUID};
+    use shared::material::{MAT_STONE, MAT_WATER, PHASE_LIQUID, PHASE_SOLID};
 
     use super::*;
 
@@ -362,6 +362,43 @@ mod tests {
         assert!(
             ke_final > ke_initial,
             "Kinetic energy should increase under gravity: initial={ke_initial}, final={ke_final}"
+        );
+    }
+
+    #[test]
+    fn water_above_stone_floor_falls() {
+        // Regression: a single water particle above a stone floor must move downward
+        let mut particles = Vec::new();
+
+        // Stone floor: a layer of stone particles at y ≈ 0.3
+        for x in 0..5 {
+            for z in 0..5 {
+                particles.push(Particle::new(
+                    Vec3::new(0.3 + x as f32 * 0.05, 0.3, 0.3 + z as f32 * 0.05),
+                    1.0,
+                    MAT_STONE,
+                    PHASE_SOLID,
+                ));
+            }
+        }
+
+        // One water particle above the floor
+        let water_start_y = 0.7;
+        particles.push(Particle::new(
+            Vec3::new(0.5, water_start_y, 0.5),
+            1.0,
+            MAT_WATER,
+            PHASE_LIQUID,
+        ));
+
+        let water_idx = particles.len() - 1;
+        let mut sim = Simulation::new(particles);
+        sim.run(50).unwrap();
+
+        let final_y = sim.particles[water_idx].position().y;
+        assert!(
+            final_y < water_start_y,
+            "Water particle should fall under gravity: start_y={water_start_y}, final_y={final_y}"
         );
     }
 
