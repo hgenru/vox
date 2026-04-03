@@ -149,6 +149,20 @@ pub struct ComputeActivityPushConstants {
     pub _pad: u32,
 }
 
+/// Push constants for the compute_occupancy shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct ComputeOccupancyPushConstants {
+    /// Grid dimension (cells per axis).
+    pub grid_size: u32,
+    /// Brick size (voxels per brick axis, e.g. 8).
+    pub brick_size: u32,
+    /// Number of bricks per axis (grid_size / brick_size).
+    pub bricks_per_axis: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad: u32,
+}
+
 /// Push constants for the update_sleep shader.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
