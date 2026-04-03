@@ -189,16 +189,32 @@ fn create_island_particles() -> Vec<Particle> {
         }
     }
 
-    // 2. Ocean water around the island
+    // 2. Ocean water — shoreline band only (1 PPC to keep count low)
+    let cx = gs as f32 * 0.5;
+    let cz = gs as f32 * 0.5;
+    let island_radius = gs as f32 * 0.375;
+    let water_inner = island_radius * 0.6;  // inner edge of water band
+    let water_outer = island_radius * 1.3;  // outer edge of water band
     for x in margin..(gs - margin) {
         for z in margin..(gs - margin) {
             let fx = x as f32 + 0.5;
             let fz = z as f32 + 0.5;
+            let dx = fx - cx;
+            let dz = fz - cz;
+            let dist = (dx * dx + dz * dz).sqrt();
+            // Only generate water in a band around the island
+            if dist < water_inner || dist > water_outer {
+                continue;
+            }
             let terrain_h = island_height(fx, fz);
             if terrain_h < water_level as f32 {
                 let water_start = terrain_h.ceil() as i32;
                 for y in water_start..water_level {
-                    spawn_cell(&mut particles, x as f32, y as f32, z as f32, 0.125, MAT_WATER, PHASE_LIQUID);
+                    // 1 particle per cell — sufficient at 256³ resolution
+                    particles.push(Particle::new(
+                        Vec3::new(fx, y as f32 + 0.5, fz),
+                        1.0, MAT_WATER, PHASE_LIQUID,
+                    ));
                 }
             }
         }
@@ -215,11 +231,13 @@ fn create_island_particles() -> Vec<Particle> {
             let lava_top = (terrain_h + gs as f32 * 0.03).min((gs - margin) as f32) as i32;
             let lava_bottom = terrain_h.ceil() as i32;
             for y in lava_bottom..lava_top {
-                let start = particles.len();
-                spawn_cell(&mut particles, x as f32, y as f32, z as f32, 0.125, MAT_LAVA, PHASE_LIQUID);
-                for p in &mut particles[start..] {
-                    p.vel_temp = glam::Vec4::new(0.0, 0.0, 0.0, 2000.0);
-                }
+                // 1 particle per cell to keep count manageable
+                let mut p = Particle::new(
+                    Vec3::new(fx, y as f32 + 0.5, fz),
+                    1.0, MAT_LAVA, PHASE_LIQUID,
+                );
+                p.vel_temp = glam::Vec4::new(0.0, 0.0, 0.0, 2000.0);
+                particles.push(p);
             }
         }
     }
