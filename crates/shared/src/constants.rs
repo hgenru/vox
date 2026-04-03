@@ -49,6 +49,15 @@ pub const SPARSE_WORKGROUP_SIZE: u32 = 64;
 /// Total number of bricks in the grid (BRICKS_PER_AXIS³).
 pub const TOTAL_BRICKS: u32 = BRICKS_PER_AXIS * BRICKS_PER_AXIS * BRICKS_PER_AXIS;
 
+/// Super-brick size: number of bricks per super-brick axis (8 bricks = 64 voxels).
+pub const SUPER_BRICK_SIZE: u32 = 8;
+
+/// Number of super-bricks per axis (BRICKS_PER_AXIS / SUPER_BRICK_SIZE).
+pub const SUPER_BRICKS_PER_AXIS: u32 = BRICKS_PER_AXIS / SUPER_BRICK_SIZE;
+
+/// Total number of super-bricks in the grid (SUPER_BRICKS_PER_AXIS³).
+pub const TOTAL_SUPER_BRICKS: u32 = SUPER_BRICKS_PER_AXIS * SUPER_BRICKS_PER_AXIS * SUPER_BRICKS_PER_AXIS;
+
 /// Velocity² threshold below which a particle is considered inactive.
 /// Particles with speed² <= this won't increment the activity counter.
 pub const ACTIVITY_VELOCITY_THRESHOLD_SQ: f32 = 0.01;
@@ -72,5 +81,14 @@ mod tests {
     #[test]
     fn sleep_threshold_is_positive() {
         assert!(SLEEP_THRESHOLD > 0);
+    }
+
+    #[test]
+    fn super_brick_constants_consistent() {
+        // With GRID_SIZE=256, BRICK_SIZE=8: BRICKS_PER_AXIS=32, SUPER_BRICK_SIZE=8
+        // so SUPER_BRICKS_PER_AXIS=4, TOTAL_SUPER_BRICKS=64
+        assert_eq!(SUPER_BRICKS_PER_AXIS, 4);
+        assert_eq!(TOTAL_SUPER_BRICKS, 64);
+        assert_eq!(TOTAL_SUPER_BRICKS, SUPER_BRICKS_PER_AXIS.pow(3));
     }
 }

@@ -80,11 +80,34 @@ pub fn update_brick(activity: u32, counter: u32, threshold: u32) -> (u32, u32) {
     }
 }
 
+/// Atomically set the any_active flag if a brick is active.
+///
+/// Uses `atomic_u_max` on SPIR-V targets. Falls back to simple write on CPU.
+///
+/// # Safety
+/// Caller must ensure `any_active[0]` is valid and properly aligned.
+pub unsafe fn set_any_active_flag(any_active: &mut [u32], tick_period: u32) {
+    if tick_period == 0 {
+        return;
+    }
+    #[cfg(target_arch = "spirv")]
+    {
+        unsafe {
+            spirv_std::arch::atomic_u_max::<u32, 1u32, 0x0u32>(&mut any_active[0], 1);
+        }
+    }
+    #[cfg(not(target_arch = "spirv"))]
+    {
+        any_active[0] = 1;
+    }
+}
+
 /// Compute shader entry point: update per-brick sleep state.
 ///
 /// Descriptor set 0, binding 0: storage buffer of `u32` (activity_map, read).
 /// Descriptor set 0, binding 1: storage buffer of `u32` (sleep_counter, read-write).
 /// Descriptor set 0, binding 2: storage buffer of `u32` (sleep_state, write).
+/// Descriptor set 0, binding 3: storage buffer of `u32` (any_active flag, write via atomicMax).
 /// Push constants: `UpdateSleepPushConstants`.
 /// Dispatch with `(ceil(total_bricks / 64), 1, 1)` workgroups.
 #[spirv(compute(threads(64)))]
@@ -94,6 +117,7 @@ pub fn update_sleep(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] activity_map: &[u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] sleep_counter: &mut [u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] sleep_state: &mut [u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] any_active: &mut [u32],
 ) {
     let idx = id.x;
     if idx >= push.total_bricks {
@@ -108,4 +132,9 @@ pub fn update_sleep(
 
     sleep_counter[idx as usize] = new_counter;
     sleep_state[idx as usize] = new_state;
+
+    // Set any_active flag if this brick has a non-zero tick period
+    unsafe {
+        set_any_active_flag(any_active, new_state);
+    }
 }
