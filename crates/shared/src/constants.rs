@@ -9,8 +9,9 @@ pub const GRID_CELL_COUNT: u32 = GRID_SIZE * GRID_SIZE * GRID_SIZE;
 /// Fixed simulation timestep (seconds).
 pub const DT: f32 = 0.001;
 
-/// Gravity acceleration (m/s², negative Y).
-pub const GRAVITY: f32 = -9.81;
+/// Gravity acceleration (grid-units/s², negative Y).
+/// Scaled 20x from 9.81 for 256³ grid with 5cm voxels.
+pub const GRAVITY: f32 = -196.0;
 
 /// Brick size for BLAS acceleration structure (voxels per axis).
 pub const BRICK_SIZE: u32 = 8;
