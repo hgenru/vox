@@ -10,7 +10,7 @@ use gpu_core::{
 };
 use shared::{
     GRID_CELL_COUNT, GRID_SIZE, GridCell, MAX_ACTIVE_CELLS, MAX_PARTICLES, Particle,
-    RENDER_HEIGHT, RENDER_WIDTH,
+    RENDER_HEIGHT, RENDER_WIDTH, TOTAL_BRICKS,
     material::{self, MATERIAL_COUNT, MaterialParams},
     reaction::{self, MAX_PHASE_RULES, PhaseTransitionRule},
 };
@@ -37,6 +37,9 @@ pub struct GpuSimulation {
     pub(crate) material_buffer: GpuBuffer,
     pub(crate) reaction_buffer: GpuBuffer,
 
+    // Activity tracking
+    pub(crate) activity_map_buffer: GpuBuffer,
+
     // Sparse dispatch buffers
     mark_buffer: GpuBuffer,
     active_cells_buffer: GpuBuffer,
@@ -54,6 +57,9 @@ pub struct GpuSimulation {
     toolbar_overlay_pass: ComputePass,
     react_pass: ComputePass,
     explosion_pass: ComputePass,
+
+    // Activity tracking pass
+    compute_activity_pass: ComputePass,
 
     // Sparse compute passes
     mark_active_pass: ComputePass,
@@ -181,6 +187,14 @@ impl GpuSimulation {
             reaction_buf_size
         );
 
+        // -- Activity map buffer (1 u32 per brick, 128 KB) --
+        let activity_map_buffer = buffer::create_device_local_buffer(
+            ctx,
+            (TOTAL_BRICKS as usize * 4) as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "activity-map-buffer",
+        )?;
+
         // -- Sparse dispatch buffers --
         let mark_buffer = buffer::create_device_local_buffer(
             ctx,
@@ -204,13 +218,13 @@ impl GpuSimulation {
             buffer::create_indirect_buffer(ctx, "indirect-dispatch-buffer")?;
 
         // -- Descriptor pool --
-        // 14 passes, max 4 bindings each = up to 56 storage buffer descriptors
+        // 15 passes, max 4 bindings each = up to 60 storage buffer descriptors
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 56,
+            descriptor_count: 60,
         }];
         let descriptor_pool =
-            pipeline::create_descriptor_pool(ctx, &pool_sizes, 14, "sim-descriptor-pool")?;
+            pipeline::create_descriptor_pool(ctx, &pool_sizes, 15, "sim-descriptor-pool")?;
 
         // -- Create each compute pass --
         // Entry point names are fully qualified module paths in rust-gpu SPIR-V.
@@ -314,6 +328,18 @@ impl GpuSimulation {
             "explosion",
         )?;
 
+        // -- Activity tracking pass --
+        // compute_activity: particles(r), activity_map(rw)
+        let compute_activity_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::compute_activity::compute_activity",
+            &[&particle_buffer, &activity_map_buffer],
+            mem::size_of::<ComputeActivityPushConstants>() as u32,
+            descriptor_pool,
+            "compute-activity",
+        )?;
+
         // -- Sparse dispatch passes --
         // mark_active: particles(r), mark(rw), active_cells(w), active_count(rw)
         let mark_active_pass = passes::create_pass(
@@ -368,6 +394,7 @@ impl GpuSimulation {
             render_output_buffer,
             material_buffer,
             reaction_buffer,
+            activity_map_buffer,
             mark_buffer,
             active_cells_buffer,
             active_count_buffer,
@@ -382,6 +409,7 @@ impl GpuSimulation {
             toolbar_overlay_pass,
             react_pass,
             explosion_pass,
+            compute_activity_pass,
             mark_active_pass,
             prepare_indirect_pass,
             clear_grid_sparse_pass,
@@ -575,7 +603,46 @@ impl GpuSimulation {
         );
         passes::barrier(cmd, &self.device);
 
-        // 8. Clear voxels (dense — kept for now)
+        // 8. Activity tracking: clear activity map, then compute per-brick activity
+        unsafe {
+            self.device
+                .cmd_fill_buffer(cmd, self.activity_map_buffer.buffer, 0, vk::WHOLE_SIZE, 0);
+        }
+        // Barrier: TRANSFER → COMPUTE
+        {
+            let memory_barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[memory_barrier],
+                    &[],
+                    &[],
+                );
+            }
+        }
+        let activity_pc = ComputeActivityPushConstants {
+            grid_size,
+            num_particles,
+            brick_size: shared::BRICK_SIZE,
+            _pad: 0,
+        };
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.compute_activity_pass,
+            particle_wg,
+            1,
+            1,
+            bytemuck::bytes_of(&activity_pc),
+        );
+        passes::barrier(cmd, &self.device);
+
+        // 9. Clear voxels (dense — kept for now)
         let vox_pc = VoxelizePushConstants {
             grid_size,
             num_particles,
@@ -593,7 +660,7 @@ impl GpuSimulation {
         );
         passes::barrier(cmd, &self.device);
 
-        // 9. Voxelize (particle dispatch)
+        // 10. Voxelize (particle dispatch)
         passes::dispatch(
             &self.device,
             cmd,
@@ -798,6 +865,7 @@ impl GpuSimulation {
             &self.toolbar_overlay_pass,
             &self.react_pass,
             &self.explosion_pass,
+            &self.compute_activity_pass,
             &self.mark_active_pass,
             &self.prepare_indirect_pass,
             &self.clear_grid_sparse_pass,
@@ -865,6 +933,14 @@ impl GpuSimulation {
                 size: 0,
             },
         );
+        let activity_map_buf = std::mem::replace(
+            &mut self.activity_map_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
         let mark_buf = std::mem::replace(
             &mut self.mark_buffer,
             GpuBuffer {
@@ -903,6 +979,7 @@ impl GpuSimulation {
         buffer::destroy_buffer(ctx, render_output_buf);
         buffer::destroy_buffer(ctx, material_buf);
         buffer::destroy_buffer(ctx, reaction_buf);
+        buffer::destroy_buffer(ctx, activity_map_buf);
         buffer::destroy_buffer(ctx, mark_buf);
         buffer::destroy_buffer(ctx, active_cells_buf);
         buffer::destroy_buffer(ctx, active_count_buf);

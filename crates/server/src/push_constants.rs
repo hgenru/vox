@@ -135,6 +135,20 @@ pub struct GridUpdateSparsePushConstants {
     pub _pad: u32,
 }
 
+/// Push constants for the compute_activity shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct ComputeActivityPushConstants {
+    /// Grid dimension (cells per axis).
+    pub grid_size: u32,
+    /// Total number of active particles.
+    pub num_particles: u32,
+    /// Brick size (voxels per brick axis, e.g. 8).
+    pub brick_size: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad: u32,
+}
+
 /// Maximum number of material slots in the toolbar.
 pub const TOOLBAR_MAX_MATERIALS: usize = 8;
 
