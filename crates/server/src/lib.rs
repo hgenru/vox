@@ -435,7 +435,8 @@ impl GpuSimulation {
     ///
     /// Memory barriers are inserted between each dispatch to ensure
     /// correct ordering of shader reads and writes.
-    pub fn step(&self, cmd: vk::CommandBuffer) {
+    /// Run physics only (no reactions). Call in substep loop.
+    pub fn step_physics(&self, cmd: vk::CommandBuffer) {
         let num_particles = self.num_particles;
         let grid_size = GRID_SIZE;
         let dt = shared::DT;
@@ -529,7 +530,14 @@ impl GpuSimulation {
         );
         Self::barrier(cmd, &self.device);
 
-        // 7. React (chemical reactions via voxel neighbor lookup)
+    }
+
+    /// Run chemical reactions only. Call once per frame after all substeps.
+    pub fn step_react(&self, cmd: vk::CommandBuffer) {
+        let grid_size = GRID_SIZE;
+        let num_particles = self.num_particles;
+        let particle_wg = (num_particles + 63) / 64;
+
         let react_pc = ReactPushConstants {
             grid_size,
             num_particles,
@@ -544,6 +552,12 @@ impl GpuSimulation {
             1,
             bytemuck::bytes_of(&react_pc),
         );
+    }
+
+    /// Convenience: run one full step (physics + react).
+    pub fn step(&self, cmd: vk::CommandBuffer) {
+        self.step_physics(cmd);
+        self.step_react(cmd);
     }
 
     /// Append new particles to the existing simulation.

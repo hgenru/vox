@@ -29,7 +29,7 @@ use winit::{
     window::{CursorGrabMode, Window, WindowAttributes, WindowId},
 };
 
-const DEFAULT_SUBSTEPS: u32 = 4;
+const DEFAULT_SUBSTEPS: u32 = 2;
 const SPAWN_DISTANCE: f32 = 15.0;
 const REMOVE_RADIUS: f32 = 2.0;
 const EXPLOSION_RADIUS: f32 = 20.0;
@@ -599,7 +599,8 @@ impl ApplicationHandler for App {
                 let explosion = self.pending_explosion.take();
                 if let (Some(renderer), Some(ctx), Some(sim)) = (self.renderer.as_mut(), self.ctx.as_ref(), self.sim.as_ref()) {
                     if let Err(e) = ctx.execute_one_shot(|cmd| {
-                        for _ in 0..substeps { sim.step(cmd); }
+                        for _ in 0..substeps { sim.step_physics(cmd); }
+                        sim.step_react(cmd);
                         if let Some(center) = explosion {
                             sim.apply_explosion(cmd, center, EXPLOSION_RADIUS, EXPLOSION_STRENGTH);
                         }
