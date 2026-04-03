@@ -187,12 +187,12 @@ pub fn default_material_table() -> [MaterialParams; MATERIAL_COUNT] {
             thermal: Vec4::new(
                 f32::MAX, // melting_point (doesn't melt, explodes)
                 f32::MAX, // boiling_point
-                0.5,      // heat_conductivity
+                5.0,      // heat_conductivity (10x: fast absorption from nearby lava)
                 800.0,    // specific_heat
             ),
             visual: Vec4::new(
                 1800.0, // density (kg/m³)
-                200.0,  // emissive_temp (glows when igniting at 200°C)
+                150.0,  // emissive_temp (glows when igniting at 150°C)
                 1.0,    // opacity
                 0.0,    // pad
             ),
