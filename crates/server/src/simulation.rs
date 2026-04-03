@@ -10,7 +10,7 @@ use gpu_core::{
 };
 use shared::{
     GRID_CELL_COUNT, GRID_SIZE, GridCell, MAX_ACTIVE_CELLS, MAX_PARTICLES, Particle,
-    RENDER_HEIGHT, RENDER_WIDTH, TOTAL_BRICKS,
+    RENDER_HEIGHT, RENDER_WIDTH, SLEEP_THRESHOLD, TOTAL_BRICKS,
     material::{self, MATERIAL_COUNT, MaterialParams},
     reaction::{self, MAX_PHASE_RULES, PhaseTransitionRule},
 };
@@ -40,6 +40,10 @@ pub struct GpuSimulation {
     // Activity tracking
     pub(crate) activity_map_buffer: GpuBuffer,
 
+    // Brick sleep
+    sleep_counter_buffer: GpuBuffer,
+    sleep_state_buffer: GpuBuffer,
+
     // Sparse dispatch buffers
     mark_buffer: GpuBuffer,
     active_cells_buffer: GpuBuffer,
@@ -60,6 +64,9 @@ pub struct GpuSimulation {
 
     // Activity tracking pass
     compute_activity_pass: ComputePass,
+
+    // Brick sleep pass
+    update_sleep_pass: ComputePass,
 
     // Sparse compute passes
     mark_active_pass: ComputePass,
@@ -195,6 +202,25 @@ impl GpuSimulation {
             "activity-map-buffer",
         )?;
 
+        // -- Brick sleep buffers (1 u32 per brick each, 128 KB) --
+        // All bricks start awake (zeroed). Without explicit init, P2G would read
+        // garbage from sleep_state and skip particles on the first frame.
+        let sleep_counter_buffer = buffer::create_device_local_buffer(
+            ctx,
+            (TOTAL_BRICKS as usize * 4) as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "sleep-counter-buffer",
+        )?;
+        let sleep_state_buffer = buffer::create_device_local_buffer(
+            ctx,
+            (TOTAL_BRICKS as usize * 4) as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "sleep-state-buffer",
+        )?;
+        let zeros = vec![0u32; TOTAL_BRICKS as usize];
+        buffer::upload(ctx, &zeros, &sleep_counter_buffer)?;
+        buffer::upload(ctx, &zeros, &sleep_state_buffer)?;
+
         // -- Sparse dispatch buffers --
         let mark_buffer = buffer::create_device_local_buffer(
             ctx,
@@ -218,13 +244,13 @@ impl GpuSimulation {
             buffer::create_indirect_buffer(ctx, "indirect-dispatch-buffer")?;
 
         // -- Descriptor pool --
-        // 15 passes, max 4 bindings each = up to 60 storage buffer descriptors
+        // 16 passes, max 5 bindings each = up to 80 storage buffer descriptors
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 60,
+            descriptor_count: 80,
         }];
         let descriptor_pool =
-            pipeline::create_descriptor_pool(ctx, &pool_sizes, 15, "sim-descriptor-pool")?;
+            pipeline::create_descriptor_pool(ctx, &pool_sizes, 16, "sim-descriptor-pool")?;
 
         // -- Create each compute pass --
         // Entry point names are fully qualified module paths in rust-gpu SPIR-V.
@@ -242,7 +268,7 @@ impl GpuSimulation {
             ctx,
             shader_module,
             c"compute::p2g::p2g",
-            &[&particle_buffer, &grid_buffer, &material_buffer],
+            &[&particle_buffer, &grid_buffer, &material_buffer, &sleep_state_buffer],
             mem::size_of::<P2gPushConstants>() as u32,
             descriptor_pool,
             "p2g",
@@ -262,7 +288,7 @@ impl GpuSimulation {
             ctx,
             shader_module,
             c"compute::g2p::g2p",
-            &[&particle_buffer, &grid_buffer, &voxel_buffer, &reaction_buffer],
+            &[&particle_buffer, &grid_buffer, &voxel_buffer, &reaction_buffer, &sleep_state_buffer],
             mem::size_of::<G2pPushConstants>() as u32,
             descriptor_pool,
             "g2p",
@@ -340,6 +366,18 @@ impl GpuSimulation {
             "compute-activity",
         )?;
 
+        // -- Brick sleep pass --
+        // update_sleep: activity_map(r), sleep_counter(rw), sleep_state(w)
+        let update_sleep_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::update_sleep::update_sleep",
+            &[&activity_map_buffer, &sleep_counter_buffer, &sleep_state_buffer],
+            mem::size_of::<UpdateSleepPushConstants>() as u32,
+            descriptor_pool,
+            "update-sleep",
+        )?;
+
         // -- Sparse dispatch passes --
         // mark_active: particles(r), mark(rw), active_cells(w), active_count(rw)
         let mark_active_pass = passes::create_pass(
@@ -395,6 +433,8 @@ impl GpuSimulation {
             material_buffer,
             reaction_buffer,
             activity_map_buffer,
+            sleep_counter_buffer,
+            sleep_state_buffer,
             mark_buffer,
             active_cells_buffer,
             active_count_buffer,
@@ -410,6 +450,7 @@ impl GpuSimulation {
             react_pass,
             explosion_pass,
             compute_activity_pass,
+            update_sleep_pass,
             mark_active_pass,
             prepare_indirect_pass,
             clear_grid_sparse_pass,
@@ -642,7 +683,26 @@ impl GpuSimulation {
         );
         passes::barrier(cmd, &self.device);
 
-        // 9. Clear voxels (dense — kept for now)
+        // 9. Update brick sleep state from activity map
+        let sleep_pc = UpdateSleepPushConstants {
+            total_bricks: TOTAL_BRICKS,
+            sleep_threshold: SLEEP_THRESHOLD,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        let brick_wg = (TOTAL_BRICKS + 63) / 64;
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.update_sleep_pass,
+            brick_wg,
+            1,
+            1,
+            bytemuck::bytes_of(&sleep_pc),
+        );
+        passes::barrier(cmd, &self.device);
+
+        // 10. Clear voxels (dense)
         let vox_pc = VoxelizePushConstants {
             grid_size,
             num_particles,
@@ -866,6 +926,7 @@ impl GpuSimulation {
             &self.react_pass,
             &self.explosion_pass,
             &self.compute_activity_pass,
+            &self.update_sleep_pass,
             &self.mark_active_pass,
             &self.prepare_indirect_pass,
             &self.clear_grid_sparse_pass,
@@ -941,6 +1002,22 @@ impl GpuSimulation {
                 size: 0,
             },
         );
+        let sleep_counter_buf = std::mem::replace(
+            &mut self.sleep_counter_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
+        let sleep_state_buf = std::mem::replace(
+            &mut self.sleep_state_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
         let mark_buf = std::mem::replace(
             &mut self.mark_buffer,
             GpuBuffer {
@@ -980,6 +1057,8 @@ impl GpuSimulation {
         buffer::destroy_buffer(ctx, material_buf);
         buffer::destroy_buffer(ctx, reaction_buf);
         buffer::destroy_buffer(ctx, activity_map_buf);
+        buffer::destroy_buffer(ctx, sleep_counter_buf);
+        buffer::destroy_buffer(ctx, sleep_state_buf);
         buffer::destroy_buffer(ctx, mark_buf);
         buffer::destroy_buffer(ctx, active_cells_buf);
         buffer::destroy_buffer(ctx, active_count_buf);
