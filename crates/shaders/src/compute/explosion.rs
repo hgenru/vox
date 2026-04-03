@@ -69,8 +69,16 @@ pub fn apply_explosion(particle: &mut Particle, center: Vec4, radius: f32, stren
         particle.ids.z = if new_damage > 255 { 255 } else { new_damage };
 
         // High damage → become liquid debris (phase 1)
+        // Also heat above melting point so phase transition doesn't
+        // immediately revert it back to solid
         if particle.ids.z > 100 {
             particle.ids.y = 1; // solid → liquid
+            particle.vel_temp = Vec4::new(
+                particle.vel_temp.x,
+                particle.vel_temp.y,
+                particle.vel_temp.z,
+                2000.0, // above stone melting point (1500)
+            );
             // Reset F = Identity (trap #8)
             particle.f_col0 = Vec4::new(1.0, 0.0, 0.0, 0.0);
             particle.f_col1 = Vec4::new(0.0, 1.0, 0.0, 0.0);
