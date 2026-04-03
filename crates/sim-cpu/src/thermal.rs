@@ -146,6 +146,11 @@ mod tests {
     #[test]
     fn temperature_diffusion_equalizes() {
         let table = default_material_table();
+        // Place particles close enough to share grid cells.
+        // GRID_SIZE=256, so 1 grid cell = 1/256 ~ 0.0039.
+        // B-spline stencil covers +-1.5 cells, so particles within ~3 cells
+        // (~0.012 world units) will overlap and exchange heat.
+        let dx = 1.0 / shared::constants::GRID_SIZE as f32; // one grid cell
         let mut particles = vec![
             // Hot particle
             {
@@ -153,9 +158,10 @@ mod tests {
                 p.set_temperature(1000.0);
                 p
             },
-            // Cold particle nearby
+            // Cold particle 1 grid cell away (within B-spline overlap)
             {
-                let mut p = Particle::new(Vec3::new(0.52, 0.5, 0.5), 1.0, MAT_STONE, PHASE_SOLID);
+                let mut p =
+                    Particle::new(Vec3::new(0.5 + dx, 0.5, 0.5), 1.0, MAT_STONE, PHASE_SOLID);
                 p.set_temperature(100.0);
                 p
             },
@@ -206,6 +212,7 @@ mod tests {
     #[test]
     fn lava_cools_to_stone() {
         let table = default_material_table();
+        let dx = 1.0 / shared::constants::GRID_SIZE as f32;
         let mut particles = vec![
             // Hot lava
             {
@@ -213,9 +220,14 @@ mod tests {
                 p.set_temperature(1600.0);
                 p
             },
-            // Cold stone nearby (acts as heat sink)
+            // Cold stone 1 grid cell away (acts as heat sink)
             {
-                let mut p = Particle::new(Vec3::new(0.52, 0.5, 0.5), 10.0, MAT_STONE, PHASE_SOLID);
+                let mut p = Particle::new(
+                    Vec3::new(0.5 + dx, 0.5, 0.5),
+                    10.0,
+                    MAT_STONE,
+                    PHASE_SOLID,
+                );
                 p.set_temperature(20.0);
                 p
             },

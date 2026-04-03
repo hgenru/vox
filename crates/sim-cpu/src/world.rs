@@ -63,6 +63,7 @@ impl Simulation {
                 GridCell {
                     velocity_mass: glam::Vec4::ZERO,
                     force_pad: glam::Vec4::ZERO,
+                    temp_pad: glam::Vec4::ZERO,
                 };
                 GRID_CELL_COUNT as usize
             ],
@@ -87,6 +88,7 @@ impl Simulation {
                 GridCell {
                     velocity_mass: glam::Vec4::ZERO,
                     force_pad: glam::Vec4::ZERO,
+                    temp_pad: glam::Vec4::ZERO,
                 };
                 GRID_CELL_COUNT as usize
             ],

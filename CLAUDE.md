@@ -245,7 +245,7 @@ Graphics: [Primary Rays + Shading] → [Shadow Rays] → [Tonemap → Swapchain]
 
 ### Struct sizes (verified by tests)
 - `Particle`: 144 bytes, align 16
-- `GridCell`: 32 bytes, align 16
+- `GridCell`: 48 bytes, align 16
 - `MaterialParams`: 64 bytes, align 16
 
 ---

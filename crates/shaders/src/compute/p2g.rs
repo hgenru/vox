@@ -1,12 +1,12 @@
 //! Particle-to-Grid (P2G) compute shader.
 //!
-//! Each thread processes one particle, scattering mass, momentum, and stress
-//! to the 27 neighboring grid cells using quadratic B-spline weights.
+//! Each thread processes one particle, scattering mass, momentum, stress,
+//! and temperature to the 27 neighboring grid cells using quadratic B-spline weights.
 //! Uses `spirv_std::arch::atomic_f_add()` for concurrent accumulation.
 //!
 //! The grid buffer is accessed as flat `&mut [f32]` to enable per-component
-//! float atomics. Each `GridCell` occupies 8 consecutive f32 values:
-//! `[vel_x, vel_y, vel_z, mass, force_x, force_y, force_z, pad]`.
+//! float atomics. Each `GridCell` occupies 12 consecutive f32 values:
+//! `[vel_x, vel_y, vel_z, mass, force_x, force_y, force_z, solid_flag, temp, pad, pad, pad]`.
 
 use crate::types::{MaterialParams, Particle};
 use spirv_std::glam::{UVec3, Vec3};
@@ -14,8 +14,8 @@ use spirv_std::spirv;
 
 use super::quadratic_bspline_weights;
 
-/// Number of f32 values per grid cell (velocity_mass: 4 + force_pad: 4 = 8).
-const FLOATS_PER_CELL: u32 = 8;
+/// Number of f32 values per grid cell (velocity_mass: 4 + force_pad: 4 + temp_pad: 4 = 12).
+const FLOATS_PER_CELL: u32 = 12;
 
 /// Push constants for the P2G shader.
 ///
@@ -169,8 +169,8 @@ pub unsafe fn grid_atomic_add(grid: &mut [f32], index: usize, value: f32) {
 /// momentum, and stress to its 27 neighboring grid cells weighted
 /// by quadratic B-spline interpolation.
 ///
-/// The grid buffer is flat f32 with 8 floats per cell:
-/// `[vel_x, vel_y, vel_z, mass, force_x, force_y, force_z, pad]`.
+/// The grid buffer is flat f32 with 12 floats per cell:
+/// `[vel_x, vel_y, vel_z, mass, force_x, force_y, force_z, solid_flag, temp, pad, pad, pad]`.
 pub fn scatter_particle(
     particle: &Particle,
     grid: &mut [f32],
@@ -181,6 +181,7 @@ pub fn scatter_particle(
     let pos = particle.pos_mass.truncate();
     let vel = particle.vel_temp.truncate();
     let mass = particle.pos_mass.w;
+    let temp = particle.vel_temp.w;
 
     // Base cell index (integer part of position - 0.5, since B-spline support is [-1.5, 1.5])
     let base_x = (pos.x - 0.5).max(0.0) as u32;
@@ -266,6 +267,14 @@ pub fn scatter_particle(
                             grid_atomic_add(grid, base + 7, 1.0);
                         }
                     }
+
+                    // Scatter weighted temperature to temp_pad.x (index 8).
+                    // Accumulated as temp * mass * weight, normalized by mass
+                    // in grid_update to get average temperature per cell.
+                    let weighted_temp = temp * weighted_mass;
+                    unsafe {
+                        grid_atomic_add(grid, base + 8, weighted_temp);
+                    }
                 }
                 dk += 1;
             }
@@ -279,7 +288,7 @@ pub fn scatter_particle(
 ///
 /// Descriptor set 0, binding 0: storage buffer of `Particle` (read).
 /// Descriptor set 0, binding 1: storage buffer of `f32` (grid, read-write with atomics).
-///   Layout: 8 floats per cell `[vel_x, vel_y, vel_z, mass, force_x, force_y, force_z, pad]`.
+///   Layout: 12 floats per cell `[vel_x, vel_y, vel_z, mass, force_x, force_y, force_z, solid_flag, temp, pad, pad, pad]`.
 /// Descriptor set 0, binding 2: storage buffer of `MaterialParams` (material table, read).
 /// Push constants: `P2gPushConstants`.
 /// Dispatch with `(ceil(num_particles / 64), 1, 1)` workgroups.

@@ -7,7 +7,7 @@
 //! - `&mut [GridCell]` for clear_grid, grid_update, G2P (one thread per cell, no contention)
 //! - `&mut [f32]` for P2G (float atomics for concurrent particle scatter)
 //!
-//! Both views alias the same GPU buffer. Each `GridCell` = 8 contiguous f32s.
+//! Both views alias the same GPU buffer. Each `GridCell` = 12 contiguous f32s.
 
 pub mod clear_grid;
 pub mod explosion;

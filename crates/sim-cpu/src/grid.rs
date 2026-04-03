@@ -69,6 +69,7 @@ pub fn clear_grid(grid: &mut [GridCell]) {
         *cell = GridCell {
             velocity_mass: glam::Vec4::ZERO,
             force_pad: glam::Vec4::ZERO,
+            temp_pad: glam::Vec4::ZERO,
         };
     }
 }
@@ -95,6 +96,7 @@ pub fn p2g(particles: &[Particle], grid: &mut [GridCell], materials: &[MaterialP
         let pos = particle.position();
         let vel = particle.velocity();
         let mass = particle.mass();
+        let temp = particle.temperature();
         let c = particle.affine_momentum();
 
         // Get material and compute stress
@@ -169,6 +171,10 @@ pub fn p2g(particles: &[Particle], grid: &mut [GridCell], materials: &[MaterialP
                     cell.velocity_mass.y += w * momentum.y + force_contrib.y;
                     cell.velocity_mass.z += w * momentum.z + force_contrib.z;
                     cell.velocity_mass.w += w * mass;
+
+                    // Scatter weighted temperature (temp * mass * weight).
+                    // Normalized by mass in grid_update to get average temperature.
+                    cell.temp_pad.x += temp * w * mass;
                 }
             }
         }
@@ -198,6 +204,7 @@ pub fn grid_update(grid: &mut [GridCell], dt: f32) {
 
                 if mass < MASS_THRESHOLD {
                     cell.velocity_mass = glam::Vec4::ZERO;
+                    cell.temp_pad = glam::Vec4::ZERO;
                     continue;
                 }
 
@@ -230,6 +237,12 @@ pub fn grid_update(grid: &mut [GridCell], dt: f32) {
                 if iz < boundary || iz >= gs - boundary {
                     cell.velocity_mass.z = 0.0;
                 }
+
+                // Normalize accumulated temperature by mass.
+                // P2G scattered temp * mass * weight; dividing by mass gives
+                // the mass-weighted average temperature at this grid cell.
+                let cell_temp = cell.temp_pad.x / mass;
+                cell.temp_pad = glam::Vec4::new(cell_temp, 0.0, 0.0, 0.0);
             }
         }
     }
@@ -320,6 +333,7 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[boo
 
         let mut new_vel = Vec3::ZERO;
         let mut new_c = Mat3::ZERO;
+        let mut new_temp = 0.0_f32;
 
         // Gather from 3x3x3 neighbors
         for dz in 0..3_i32 {
@@ -366,6 +380,10 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[boo
                         w * grid_vel * dpos.y * inv_d,
                         w * grid_vel * dpos.z * inv_d,
                     );
+
+                    // Gather temperature from grid (normalized in grid_update).
+                    let grid_temp = cell.temp_pad.x;
+                    new_temp += grid_temp * w;
                 }
             }
         }
@@ -398,13 +416,16 @@ pub fn g2p(particles: &mut [Particle], grid: &[GridCell], solid_occupancy: &[boo
             if supported {
                 particle.set_affine_momentum(new_c);
                 particle.set_deformation_gradient(f_new);
+                // Update temperature even for pinned solids (heat conducts through stone)
+                particle.set_temperature(new_temp);
                 continue;
             }
             // Unsupported: fall through to position/velocity update
         }
 
-        // Update velocity
+        // Update velocity and temperature
         particle.set_velocity(final_vel);
+        particle.set_temperature(new_temp);
 
         // Update APIC C matrix
         particle.set_affine_momentum(new_c);
@@ -441,6 +462,7 @@ mod tests {
             GridCell {
                 velocity_mass: glam::Vec4::ZERO,
                 force_pad: glam::Vec4::ZERO,
+                temp_pad: glam::Vec4::ZERO,
             };
             GRID_CELL_COUNT as usize
         ]
@@ -598,10 +620,66 @@ mod tests {
 
     #[test]
     fn grid_index_bounds() {
+        let gs = shared::constants::GRID_SIZE as i32;
         assert!(grid_index(0, 0, 0).is_some());
-        assert!(grid_index(31, 31, 31).is_some());
+        assert!(grid_index(gs - 1, gs - 1, gs - 1).is_some());
         assert!(grid_index(-1, 0, 0).is_none());
-        assert!(grid_index(0, 32, 0).is_none());
+        assert!(grid_index(0, gs, 0).is_none());
         assert_eq!(grid_index(0, 0, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn thermal_diffusion_through_grid() {
+        // Verify that temperature transfers between nearby particles
+        // through the P2G -> grid_update -> G2P cycle.
+        let table = default_material_table();
+        let dx = 1.0 / shared::constants::GRID_SIZE as f32;
+        let center = 0.5_f32;
+
+        let mut particles = vec![
+            // Hot water particle
+            {
+                let mut p = shared::particle::Particle::new(
+                    glam::Vec3::new(center, center, center),
+                    1.0,
+                    shared::material::MAT_WATER,
+                    1,
+                );
+                p.set_temperature(500.0);
+                p
+            },
+            // Cold water particle 1 grid cell away
+            {
+                let mut p = shared::particle::Particle::new(
+                    glam::Vec3::new(center + dx, center, center),
+                    1.0,
+                    shared::material::MAT_WATER,
+                    1,
+                );
+                p.set_temperature(0.0);
+                p
+            },
+        ];
+
+        let initial_diff = (particles[0].temperature() - particles[1].temperature()).abs();
+        let dt = 0.001;
+
+        for _ in 0..20 {
+            let mut grid = make_grid();
+            p2g(&particles, &mut grid, &table, dt);
+            grid_update(&mut grid, dt);
+            let occupancy = build_solid_occupancy(&particles);
+            g2p(&mut particles, &grid, &occupancy, dt);
+        }
+
+        let final_diff = (particles[0].temperature() - particles[1].temperature()).abs();
+
+        assert!(
+            final_diff < initial_diff,
+            "Temperature should diffuse through grid: initial_diff={initial_diff}, final_diff={final_diff}"
+        );
+        // Both temperatures should be finite
+        assert!(particles[0].temperature().is_finite());
+        assert!(particles[1].temperature().is_finite());
     }
 }
