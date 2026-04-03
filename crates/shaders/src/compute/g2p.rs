@@ -27,7 +27,7 @@ pub struct G2pPushConstants {
 
 /// PIC/FLIP blend ratio (0.0 = pure FLIP, 1.0 = pure PIC).
 /// 0.7 PIC balances stability with fluid-like flow (less viscous damping).
-const PIC_RATIO: f32 = 0.7;
+const PIC_RATIO: f32 = 0.5;
 
 /// Gather velocity from the grid and update one particle.
 ///
@@ -124,7 +124,7 @@ pub fn gather_particle(
     if phase == 1 {
         let damping = match material_id {
             1 => 1.0_f32,    // Water: no extra damping (runny)
-            2 => 0.98_f32,   // Lava: 2% damping per step (sluggish)
+            2 => 0.999_f32,  // Lava: very light damping (viscosity handled in P2G stress)
             _ => 0.995_f32,  // Default liquid: minimal damping
         };
         new_vel *= damping;
