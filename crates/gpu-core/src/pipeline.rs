@@ -208,6 +208,29 @@ pub fn update_descriptor_sets(ctx: &VulkanContext, bindings: &[BufferBinding<'_>
     }
 }
 
+/// Record an indirect dispatch command.
+///
+/// Reads the workgroup counts from `buffer` at the given byte `offset`.
+/// The buffer must contain a valid `VkDispatchIndirectCommand` (3 x `u32`:
+/// group_count_x, group_count_y, group_count_z) at that offset.
+///
+/// # Safety
+///
+/// The caller must ensure:
+/// - `cmd` is in the recording state with a compute pipeline bound.
+/// - `buffer` contains a valid `VkDispatchIndirectCommand` at `offset`.
+/// - `buffer` was created with `INDIRECT_BUFFER` usage.
+pub fn cmd_dispatch_indirect(
+    device: &ash::Device,
+    cmd: vk::CommandBuffer,
+    buffer: &crate::buffer::GpuBuffer,
+    offset: vk::DeviceSize,
+) {
+    unsafe {
+        device.cmd_dispatch_indirect(cmd, buffer.buffer, offset);
+    }
+}
+
 /// Destroy a shader module.
 pub fn destroy_shader_module(ctx: &VulkanContext, module: vk::ShaderModule) {
     unsafe {

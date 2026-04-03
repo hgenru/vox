@@ -196,6 +196,24 @@ pub fn readback<T: Pod>(ctx: &VulkanContext, src: &GpuBuffer, count: usize) -> R
     Ok(result)
 }
 
+/// Size in bytes of a `VkDispatchIndirectCommand` (3 x `u32`), padded to 16 bytes
+/// for safe alignment when used as a storage buffer.
+pub const DISPATCH_INDIRECT_SIZE: vk::DeviceSize = 16;
+
+/// Create a device-local indirect dispatch buffer.
+///
+/// The buffer is sized for a single `VkDispatchIndirectCommand` (3 x `u32`, 16 bytes
+/// with padding) and has `STORAGE_BUFFER | INDIRECT_BUFFER` usage flags so it can be
+/// written by a compute shader and consumed by `vkCmdDispatchIndirect`.
+pub fn create_indirect_buffer(ctx: &VulkanContext, name: &str) -> Result<GpuBuffer> {
+    create_device_local_buffer(
+        ctx,
+        DISPATCH_INDIRECT_SIZE,
+        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::INDIRECT_BUFFER,
+        name,
+    )
+}
+
 /// Destroy a GPU buffer and free its memory allocation.
 pub fn destroy_buffer(ctx: &VulkanContext, mut buf: GpuBuffer) {
     unsafe {
@@ -234,6 +252,18 @@ mod tests {
 
         destroy_buffer(&ctx, device_buf);
         destroy_buffer(&ctx, staging_buf);
+    }
+
+    #[test]
+    fn create_indirect_buffer_works() {
+        let ctx = VulkanContext::new().expect("Failed to create VulkanContext");
+
+        let buf = create_indirect_buffer(&ctx, "test-indirect-buf")
+            .expect("Failed to create indirect buffer");
+        assert_ne!(buf.buffer, vk::Buffer::null());
+        assert_eq!(buf.size, DISPATCH_INDIRECT_SIZE);
+
+        destroy_buffer(&ctx, buf);
     }
 
     #[test]
