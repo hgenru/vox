@@ -291,7 +291,7 @@ pub fn apply_phase_transitions(particle: &mut Particle) {
         }
         // Gunpowder
         6 => {
-            if phase == 0 && temp > 200.0 {
+            if phase == 0 && temp > 150.0 {
                 new_phase = 2; // solid -> gas (explosion)
                 // Boost temp for massive EOS pressure
                 particle.vel_temp = Vec4::new(
