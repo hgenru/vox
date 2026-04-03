@@ -424,13 +424,13 @@ fn compute_lava_light(
                         + nx as u32) as usize;
                     let voxel = voxels[idx];
                     if voxel.w > 0 && ((voxel.x >> 16) & 0xFF) == 2 {
-                        // Lava found — add warm orange light with distance falloff
+                        // Lava found — add warm orange-red light with distance falloff
                         let dist_sq = (dx * dx + dy * dy + dz * dz) as f32;
                         let attenuation = 1.0 / (1.0 + dist_sq * 0.5);
                         light = Vec3::new(
-                            light.x + 1.0 * attenuation * 0.6,
-                            light.y + 0.5 * attenuation * 0.6,
-                            light.z + 0.1 * attenuation * 0.6,
+                            light.x + 1.0 * attenuation * 0.5,
+                            light.y + 0.25 * attenuation * 0.5,
+                            light.z + 0.05 * attenuation * 0.5,
                         );
                     }
                 }
@@ -676,7 +676,8 @@ pub fn render_pixel(
 
         // Add emissive glow for lava (material_id == 2) and burning wood (material_id == 3)
         let final_color = if hit_material == 2 {
-            let emissive = Vec3::new(1.0, 0.6, 0.1) * 0.8;
+            // Orange-red emissive glow — keep green low to avoid yellow wash
+            let emissive = Vec3::new(0.6, 0.15, 0.02);
             Vec3::new(
                 lit_color.x + emissive.x,
                 lit_color.y + emissive.y,
