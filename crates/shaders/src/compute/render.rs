@@ -322,7 +322,7 @@ fn apply_lighting(color: Vec3, normal: Vec3) -> Vec3 {
     let ndotl = dot(normal, light_dir);
     let diffuse = if ndotl > 0.0 { ndotl } else { 0.0 };
 
-    let ambient = 0.3;
+    let ambient = 0.35;
     let intensity = ambient + (1.0 - ambient) * diffuse;
 
     Vec3::new(
@@ -330,6 +330,56 @@ fn apply_lighting(color: Vec3, normal: Vec3) -> Vec3 {
         color.y * intensity,
         color.z * intensity,
     )
+}
+
+/// Compute point light contribution from nearby lava voxels.
+///
+/// Searches a 5x5x5 neighborhood (±2 cells) around the hit voxel for lava
+/// (material_id == 2). Each lava voxel contributes warm orange light with
+/// inverse-distance-squared attenuation. This illuminates cave interiors
+/// that receive no sunlight.
+fn compute_lava_light(
+    vx: i32,
+    vy: i32,
+    vz: i32,
+    voxels: &[UVec4],
+    grid_size: u32,
+) -> Vec3 {
+    let gs = grid_size as i32;
+    let mut light = Vec3::new(0.0, 0.0, 0.0);
+    let search = 2i32; // check ±2 cells
+    let mut dx = -search;
+    while dx <= search {
+        let mut dy = -search;
+        while dy <= search {
+            let mut dz = -search;
+            while dz <= search {
+                let nx = vx + dx;
+                let ny = vy + dy;
+                let nz = vz + dz;
+                if nx >= 0 && nx < gs && ny >= 0 && ny < gs && nz >= 0 && nz < gs {
+                    let idx = (nz as u32 * grid_size * grid_size
+                        + ny as u32 * grid_size
+                        + nx as u32) as usize;
+                    let voxel = voxels[idx];
+                    if voxel.w > 0 && voxel.x == 2 {
+                        // Lava found — add warm orange light with distance falloff
+                        let dist_sq = (dx * dx + dy * dy + dz * dz) as f32;
+                        let attenuation = 1.0 / (1.0 + dist_sq * 0.5);
+                        light = Vec3::new(
+                            light.x + 1.0 * attenuation * 0.6,
+                            light.y + 0.5 * attenuation * 0.6,
+                            light.z + 0.1 * attenuation * 0.6,
+                        );
+                    }
+                }
+                dz += 1;
+            }
+            dy += 1;
+        }
+        dx += 1;
+    }
+    light
 }
 
 /// Perform DDA ray march through the voxel grid and write pixel color.
@@ -539,7 +589,7 @@ pub fn render_pixel(
 
         // Lighting: if in shadow, only ambient contributes; otherwise full lighting
         let lit_color = if in_shadow {
-            let ambient = 0.3;
+            let ambient = 0.35;
             Vec3::new(
                 base_color.x * ambient * ao_factor,
                 base_color.y * ambient * ao_factor,
@@ -553,6 +603,14 @@ pub fn render_pixel(
                 full_lit.z * ao_factor,
             )
         };
+
+        // Add lava point lighting from nearby lava voxels
+        let lava_light = compute_lava_light(vx, vy, vz, voxels, grid_size);
+        let lit_color = Vec3::new(
+            lit_color.x + base_color.x * lava_light.x,
+            lit_color.y + base_color.y * lava_light.y,
+            lit_color.z + base_color.z * lava_light.z,
+        );
 
         // Add emissive glow for lava (material_id == 2)
         let final_color = if hit_material == 2 {
