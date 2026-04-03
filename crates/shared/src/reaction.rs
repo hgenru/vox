@@ -15,6 +15,51 @@ use crate::material::{
 /// Maximum number of phase transition rules in the table.
 pub const MAX_PHASE_RULES: usize = 16;
 
+/// Maximum number of slow (progress-based) reaction rules.
+pub const MAX_SLOW_RULES: usize = 16;
+
+/// How fast a reaction progresses. Used for tick budget scheduling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ReactionSpeed {
+    /// Instant reaction, checked every tick (water+lava -> stone+steam).
+    Instant = 0,
+    /// Slow reaction, accumulates progress over ticks (stone -> diamond).
+    Slow = 1,
+    /// Chunk-level reaction using aggregate state (background processes).
+    ChunkLevel = 2,
+}
+
+// SAFETY: ReactionSpeed is #[repr(u32)] with all bit patterns 0..=2 valid,
+// and zero (Instant) is a valid variant.
+unsafe impl Zeroable for ReactionSpeed {}
+unsafe impl Pod for ReactionSpeed {}
+
+/// A reaction that accumulates progress over time.
+/// When progress reaches `ticks_needed`, the reaction completes.
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+pub struct SlowReactionRule {
+    /// Source material ID.
+    pub from_material: u32,
+    /// Target material ID.
+    pub to_material: u32,
+    /// Temperature threshold (must be above this).
+    pub min_temperature: f32,
+    /// Number of ticks needed for completion.
+    pub ticks_needed: u32,
+}
+
+/// Build the default slow reaction table.
+///
+/// Returns a fixed-size array and the count of valid entries.
+/// Entries beyond `count` are zeroed. Currently empty -- slow reactions
+/// will be populated when the content/materials system is expanded.
+pub fn default_slow_reaction_table() -> ([SlowReactionRule; MAX_SLOW_RULES], usize) {
+    let table = [SlowReactionRule::zeroed(); MAX_SLOW_RULES];
+    (table, 0)
+}
+
 /// Flags for phase transition behavior.
 ///
 /// - Bit 0 (1): Reset deformation gradient F to identity.
@@ -239,5 +284,64 @@ mod tests {
         let rules = default_reaction_table();
         let result = find_reaction(MAT_WATER, MAT_WATER, rules);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn reaction_speed_repr() {
+        assert_eq!(size_of::<ReactionSpeed>(), 4);
+        assert_eq!(ReactionSpeed::Instant as u32, 0);
+        assert_eq!(ReactionSpeed::Slow as u32, 1);
+        assert_eq!(ReactionSpeed::ChunkLevel as u32, 2);
+    }
+
+    #[test]
+    fn reaction_speed_bytemuck_zeroed() {
+        let speed: ReactionSpeed = bytemuck::Zeroable::zeroed();
+        assert_eq!(speed, ReactionSpeed::Instant);
+    }
+
+    #[test]
+    fn reaction_speed_bytemuck_cast() {
+        let speed = ReactionSpeed::Slow;
+        let bytes: &[u8] = bytemuck::bytes_of(&speed);
+        assert_eq!(bytes.len(), 4);
+        // Little-endian: value 1
+        assert_eq!(bytes[0], 1);
+    }
+
+    #[test]
+    fn slow_reaction_rule_layout() {
+        assert_eq!(size_of::<SlowReactionRule>(), 16);
+        assert_eq!(align_of::<SlowReactionRule>(), 4);
+    }
+
+    #[test]
+    fn slow_reaction_rule_bytemuck_cast() {
+        let rules = [SlowReactionRule {
+            from_material: 1,
+            to_material: 2,
+            min_temperature: 500.0,
+            ticks_needed: 100,
+        }];
+        let bytes: &[u8] = bytemuck::cast_slice(&rules);
+        assert_eq!(bytes.len(), 16);
+    }
+
+    #[test]
+    fn default_slow_table_empty() {
+        let (table, count) = default_slow_reaction_table();
+        assert_eq!(count, 0);
+        for rule in &table {
+            assert_eq!(rule.from_material, 0);
+            assert_eq!(rule.to_material, 0);
+            assert_eq!(rule.ticks_needed, 0);
+        }
+    }
+
+    #[test]
+    fn default_slow_table_bytemuck_cast() {
+        let (table, _) = default_slow_reaction_table();
+        let bytes: &[u8] = bytemuck::cast_slice(&table);
+        assert_eq!(bytes.len(), MAX_SLOW_RULES * 16);
     }
 }
