@@ -269,6 +269,7 @@ All work goes through Pull Requests. Direct commits to main are prohibited.
 5. **Lead delegates fixes back to agents** — lead does NOT fix code directly
 6. After fixes: lead merges via `gh pr merge`
 7. After merging multiple PRs: lead runs full integration test (`cargo build && cargo test`)
+8. **CRITICAL: Before telling the user "it's ready to test", lead MUST verify `cargo run -p app` launches without crashing.** Never merge and hand off without a smoke test. Scene generation must produce particles under MAX_PARTICLES.
 
 ### Lead Agent rules
 - Lead is a **tech lead / manager** — reviews, delegates, coordinates, merges
