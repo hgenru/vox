@@ -2,6 +2,8 @@
 //!
 //! Runs the simulation for a fixed number of frames and saves a screenshot.
 
+use std::time::Instant;
+
 use anyhow::Result;
 use gpu_core::VulkanContext;
 use server::GpuSimulation;
@@ -54,9 +56,18 @@ pub(crate) fn run_headless(args: &Args) -> Result<()> {
     }
     sim.init_particles(&ctx, &particles)?;
 
+    let mut last_react_time = Instant::now();
     for i in 0..args.frames {
+        let now = Instant::now();
+        let run_react = now.duration_since(last_react_time).as_millis() >= 100;
+        if run_react {
+            last_react_time = now;
+        }
         ctx.execute_one_shot(|cmd| {
-            for _ in 0..args.substeps { sim.step(cmd); }
+            for _ in 0..args.substeps { sim.step_physics_with_time(cmd, now); }
+            if run_react {
+                sim.step_react(cmd);
+            }
         })?;
         if i % 10 == 0 { tracing::info!("Frame {}/{}", i, args.frames); }
     }

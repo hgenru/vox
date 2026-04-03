@@ -142,6 +142,8 @@ pub struct GpuSimulation {
     last_sleep_update_time: core::cell::Cell<Instant>,
     /// Last time `compute_occupancy` was dispatched.
     last_occupancy_time: core::cell::Cell<Instant>,
+    /// Last time `sort_particles` was dispatched.
+    last_sort_time: core::cell::Cell<Instant>,
 
     // Reference to context (not owned — caller must keep alive)
     // We store raw device handle for recording commands; the context
@@ -750,6 +752,7 @@ impl GpuSimulation {
             prev_target: core::cell::Cell::new([f32::NAN; 3]),
             last_sleep_update_time: core::cell::Cell::new(Instant::now()),
             last_occupancy_time: core::cell::Cell::new(Instant::now()),
+            last_sort_time: core::cell::Cell::new(Instant::now()),
             device: ctx.device.clone(),
         })
     }
@@ -822,6 +825,13 @@ impl GpuSimulation {
         }
 
         self.record_voxelize(cmd);
+
+        // Particle sorting (improves cache coherence): every 500ms
+        let sort_elapsed = now.duration_since(self.last_sort_time.get());
+        if sort_elapsed.as_millis() >= 500 {
+            self.sort_particles(cmd);
+            self.last_sort_time.set(now);
+        }
 
         // Brick occupancy (render optimization): every 200ms
         let occupancy_elapsed = now.duration_since(self.last_occupancy_time.get());
