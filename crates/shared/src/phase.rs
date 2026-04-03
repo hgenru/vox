@@ -1,17 +1,14 @@
 //! Phase transition rules for MPM particles.
 //!
-//! Defines temperature-based phase transitions:
-//! - Stone T > 1500 -> Lava (liquid)
-//! - Water T > 100 -> Steam (gas)
-//! - Water T < 0 -> Ice (solid)
-//! - Lava T < 1500 -> Stone (solid)
-//! - Gunpowder T > 150 -> Gas (explosion)
+//! Uses data-driven phase transition table from `reaction::PhaseTransitionRule`.
+//! No more hardcoded match blocks — adding a new material only requires
+//! adding a rule to `default_phase_transition_table()`.
 //!
 //! On transition: reset F = Identity, damage = 0, update phase.
 
 use crate::{
-    material::{MAT_GUNPOWDER, MAT_ICE, MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_GAS, PHASE_LIQUID, PHASE_SOLID},
     particle::Particle,
+    reaction::PhaseTransitionRule,
 };
 
 /// Result of checking a phase transition for a particle.
@@ -25,73 +22,59 @@ pub enum PhaseTransition {
         new_material_id: u32,
         /// New phase after transition.
         new_phase: u32,
+        /// Behavior flags (bit 0 = reset_F, bit 1 = explosion).
+        flags: u32,
     },
 }
 
 /// Check if a particle should undergo a phase transition based on temperature.
 ///
-/// Returns the transition result (either no change or new material/phase).
+/// Iterates over the provided reaction rules and returns the first matching
+/// transition. Rules are matched by (material_id, phase) and temperature range.
 ///
-/// # Rules
-/// - Stone (material=0, phase=solid) + T > 1500 -> Lava (material=2, phase=liquid)
-/// - Water (material=1, phase=liquid) + T > 100 -> Steam (material=1, phase=gas)
-/// - Water (material=1, phase=liquid) + T < 0 -> Ice (material=5, phase=solid)
-/// - Lava (material=2, phase=liquid) + T < 1500 -> Stone (material=0, phase=solid)
-/// - Ice (material=5, phase=solid) + T > 0 -> Water (material=1, phase=liquid)
-/// - Gunpowder (material=6, phase=solid) + T > 200 -> Gas (material=6, phase=gas) [explosion]
-pub fn check_phase_transition(particle: &Particle) -> PhaseTransition {
+/// # Arguments
+/// - `particle`: the particle to check
+/// - `rules`: phase transition rule table (slice of valid entries)
+pub fn check_phase_transition(
+    particle: &Particle,
+    rules: &[PhaseTransitionRule],
+) -> PhaseTransition {
     let mat_id = particle.material_id();
     let phase = particle.phase();
     let temp = particle.temperature();
 
-    match (mat_id, phase) {
-        // Stone solid -> Lava liquid when T > 1500
-        (MAT_STONE, PHASE_SOLID) if temp > 1500.0 => PhaseTransition::Transition {
-            new_material_id: MAT_LAVA,
-            new_phase: PHASE_LIQUID,
-        },
-        // Water liquid -> Steam gas when T > 100
-        (MAT_WATER, PHASE_LIQUID) if temp > 100.0 => PhaseTransition::Transition {
-            new_material_id: MAT_WATER,
-            new_phase: PHASE_GAS,
-        },
-        // Water liquid -> Ice solid when T < 0
-        (MAT_WATER, PHASE_LIQUID) if temp < 0.0 => PhaseTransition::Transition {
-            new_material_id: MAT_ICE,
-            new_phase: PHASE_SOLID,
-        },
-        // Ice solid -> Water liquid when T > 0
-        (MAT_ICE, PHASE_SOLID) if temp > 0.0 => PhaseTransition::Transition {
-            new_material_id: MAT_WATER,
-            new_phase: PHASE_LIQUID,
-        },
-        // Lava liquid -> Stone solid when T < 1500
-        (MAT_LAVA, PHASE_LIQUID) if temp < 1500.0 => PhaseTransition::Transition {
-            new_material_id: MAT_STONE,
-            new_phase: PHASE_SOLID,
-        },
-        // Gunpowder solid -> Gas when T > 200 (explosion)
-        (MAT_GUNPOWDER, PHASE_SOLID) if temp > 150.0 => PhaseTransition::Transition {
-            new_material_id: MAT_GUNPOWDER,
-            new_phase: PHASE_GAS,
-        },
-        _ => PhaseTransition::None,
+    for rule in rules {
+        if rule.materials.x == mat_id && rule.materials.y == phase {
+            let temp_min = rule.conditions.x;
+            let temp_max = rule.conditions.y;
+            if temp > temp_min && temp < temp_max {
+                return PhaseTransition::Transition {
+                    new_material_id: rule.materials.z,
+                    new_phase: rule.materials.w,
+                    flags: rule.conditions.z as u32,
+                };
+            }
+        }
     }
+    PhaseTransition::None
 }
 
 /// Apply a phase transition to a particle.
 ///
-/// Resets deformation gradient to identity and damage to 0.
+/// Resets deformation gradient to identity and damage to 0 if FLAG_RESET_F is set.
 /// See CLAUDE.md trap #8: F must be reset on phase transition.
 pub fn apply_phase_transition(particle: &mut Particle, transition: PhaseTransition) {
     if let PhaseTransition::Transition {
         new_material_id,
         new_phase,
+        flags,
     } = transition
     {
         particle.ids.x = new_material_id;
         particle.set_phase(new_phase);
-        particle.reset_deformation_gradient();
+        if flags & crate::reaction::FLAG_RESET_F != 0 {
+            particle.reset_deformation_gradient();
+        }
         particle.set_damage(0.0);
     }
 }
@@ -101,17 +84,30 @@ mod tests {
     use glam::Vec3;
 
     use super::*;
+    use crate::material::{
+        MAT_GUNPOWDER, MAT_ICE, MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_GAS, PHASE_LIQUID,
+        PHASE_SOLID,
+    };
+    use crate::reaction::{default_phase_transition_table, FLAG_EXPLOSION, FLAG_RESET_F};
+
+    /// Helper: get the valid rules slice from the default table.
+    fn rules() -> &'static [PhaseTransitionRule] {
+        static RULES: std::sync::LazyLock<([PhaseTransitionRule; 16], usize)> =
+            std::sync::LazyLock::new(default_phase_transition_table);
+        &RULES.0[..RULES.1]
+    }
 
     #[test]
     fn stone_melts_to_lava() {
         let mut p = Particle::new(Vec3::ZERO, 1.0, MAT_STONE, PHASE_SOLID);
         p.set_temperature(1600.0);
-        let tr = check_phase_transition(&p);
+        let tr = check_phase_transition(&p, rules());
         assert_eq!(
             tr,
             PhaseTransition::Transition {
                 new_material_id: MAT_LAVA,
                 new_phase: PHASE_LIQUID,
+                flags: FLAG_RESET_F,
             }
         );
     }
@@ -120,19 +116,20 @@ mod tests {
     fn stone_stays_solid_below_melting() {
         let mut p = Particle::new(Vec3::ZERO, 1.0, MAT_STONE, PHASE_SOLID);
         p.set_temperature(1000.0);
-        assert_eq!(check_phase_transition(&p), PhaseTransition::None);
+        assert_eq!(check_phase_transition(&p, rules()), PhaseTransition::None);
     }
 
     #[test]
     fn water_boils_to_steam() {
         let mut p = Particle::new(Vec3::ZERO, 1.0, MAT_WATER, PHASE_LIQUID);
         p.set_temperature(101.0);
-        let tr = check_phase_transition(&p);
+        let tr = check_phase_transition(&p, rules());
         assert_eq!(
             tr,
             PhaseTransition::Transition {
                 new_material_id: MAT_WATER,
                 new_phase: PHASE_GAS,
+                flags: FLAG_RESET_F,
             }
         );
     }
@@ -141,12 +138,13 @@ mod tests {
     fn water_freezes_to_ice() {
         let mut p = Particle::new(Vec3::ZERO, 1.0, MAT_WATER, PHASE_LIQUID);
         p.set_temperature(-5.0);
-        let tr = check_phase_transition(&p);
+        let tr = check_phase_transition(&p, rules());
         assert_eq!(
             tr,
             PhaseTransition::Transition {
                 new_material_id: MAT_ICE,
                 new_phase: PHASE_SOLID,
+                flags: FLAG_RESET_F,
             }
         );
     }
@@ -155,12 +153,13 @@ mod tests {
     fn ice_melts_to_water() {
         let mut p = Particle::new(Vec3::ZERO, 1.0, MAT_ICE, PHASE_SOLID);
         p.set_temperature(5.0);
-        let tr = check_phase_transition(&p);
+        let tr = check_phase_transition(&p, rules());
         assert_eq!(
             tr,
             PhaseTransition::Transition {
                 new_material_id: MAT_WATER,
                 new_phase: PHASE_LIQUID,
+                flags: FLAG_RESET_F,
             }
         );
     }
@@ -169,12 +168,13 @@ mod tests {
     fn lava_solidifies_to_stone() {
         let mut p = Particle::new(Vec3::ZERO, 1.0, MAT_LAVA, PHASE_LIQUID);
         p.set_temperature(1400.0);
-        let tr = check_phase_transition(&p);
+        let tr = check_phase_transition(&p, rules());
         assert_eq!(
             tr,
             PhaseTransition::Transition {
                 new_material_id: MAT_STONE,
                 new_phase: PHASE_SOLID,
+                flags: FLAG_RESET_F,
             }
         );
     }
@@ -183,12 +183,13 @@ mod tests {
     fn gunpowder_explodes_to_gas() {
         let mut p = Particle::new(Vec3::ZERO, 1.0, MAT_GUNPOWDER, PHASE_SOLID);
         p.set_temperature(250.0);
-        let tr = check_phase_transition(&p);
+        let tr = check_phase_transition(&p, rules());
         assert_eq!(
             tr,
             PhaseTransition::Transition {
                 new_material_id: MAT_GUNPOWDER,
                 new_phase: PHASE_GAS,
+                flags: FLAG_RESET_F | FLAG_EXPLOSION,
             }
         );
     }
@@ -197,19 +198,18 @@ mod tests {
     fn gunpowder_stays_solid_below_ignition() {
         let mut p = Particle::new(Vec3::ZERO, 1.0, MAT_GUNPOWDER, PHASE_SOLID);
         p.set_temperature(100.0);
-        assert_eq!(check_phase_transition(&p), PhaseTransition::None);
+        assert_eq!(check_phase_transition(&p, rules()), PhaseTransition::None);
     }
 
     #[test]
     fn apply_transition_resets_f_and_damage() {
         let mut p = Particle::new(Vec3::ZERO, 1.0, MAT_STONE, PHASE_SOLID);
         p.set_temperature(1600.0);
-        // Give it some deformation and damage
         use glam::Mat3;
         p.set_deformation_gradient(Mat3::from_diagonal(Vec3::new(1.5, 0.8, 1.2)));
         p.set_damage(0.7);
 
-        let tr = check_phase_transition(&p);
+        let tr = check_phase_transition(&p, rules());
         apply_phase_transition(&mut p, tr);
 
         assert_eq!(p.material_id(), MAT_LAVA);

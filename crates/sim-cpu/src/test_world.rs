@@ -9,6 +9,7 @@ use shared::{
     constants::{DT, GRID_CELL_COUNT, GRID_SIZE},
     material::{MATERIAL_COUNT, MaterialParams, default_material_table},
     particle::{GridCell, Particle},
+    reaction::{PhaseTransitionRule, default_phase_transition_table},
 };
 
 use crate::grid::{build_solid_occupancy, clear_grid, g2p, grid_update, p2g};
@@ -35,11 +36,13 @@ pub struct TestWorld {
     particles: Vec<Particle>,
     materials: [MaterialParams; MATERIAL_COUNT],
     grid: Vec<GridCell>,
+    phase_rules: Vec<PhaseTransitionRule>,
 }
 
 impl TestWorld {
     /// Create a new empty test world with default materials.
     pub fn new() -> Self {
+        let (table, count) = default_phase_transition_table();
         Self {
             particles: Vec::new(),
             materials: default_material_table(),
@@ -51,6 +54,7 @@ impl TestWorld {
                 };
                 GRID_CELL_COUNT as usize
             ],
+            phase_rules: table[..count].to_vec(),
         }
     }
 
@@ -132,8 +136,8 @@ impl TestWorld {
         // 6. Thermal diffusion
         diffuse_temperature(&mut self.particles, &self.materials, DT);
 
-        // 7. Phase transitions
-        apply_phase_transitions(&mut self.particles);
+        // 7. Phase transitions (data-driven via reaction table)
+        apply_phase_transitions(&mut self.particles, &self.phase_rules);
     }
 
     /// Run `n` full simulation steps.

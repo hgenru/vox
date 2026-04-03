@@ -1,14 +1,16 @@
 //! Temperature diffusion and phase transition processing.
 //!
 //! Heat diffusion via grid: `T += conductivity * (T_avg_neighbors - T) * dt`
-//! Phase transitions are checked after temperature update.
+//! Phase transitions are checked after temperature update using the data-driven
+//! reaction table from `shared::reaction::PhaseTransitionRule`.
 
 use glam::Vec3;
 use shared::{
     constants::GRID_SIZE,
     material::MaterialParams,
     particle::Particle,
-    phase::{apply_phase_transition, check_phase_transition},
+    phase::{apply_phase_transition, check_phase_transition, PhaseTransition},
+    reaction::{PhaseTransitionRule, FLAG_EXPLOSION},
 };
 
 use crate::grid::{bspline_weight, grid_index};
@@ -123,25 +125,25 @@ pub fn diffuse_temperature(particles: &mut [Particle], materials: &[MaterialPara
 
 /// Check and apply phase transitions for all particles.
 ///
-/// After temperature update, each particle is checked against phase
-/// transition rules. On transition: F = Identity, damage = 0.
+/// After temperature update, each particle is checked against the data-driven
+/// phase transition rules. On transition: F = Identity, damage = 0.
 ///
-/// Gunpowder explosion additionally sets outward velocity and boosts
-/// temperature to 3000C, matching the shader implementation in g2p.rs.
+/// Gunpowder explosion (FLAG_EXPLOSION) additionally sets outward velocity
+/// and boosts temperature to 3000C, matching the shader implementation in g2p.rs.
 ///
 /// # Arguments
 /// - `particles`: mutable particle slice
-pub fn apply_phase_transitions(particles: &mut [Particle]) {
+/// - `rules`: phase transition rule table (valid entries only)
+pub fn apply_phase_transitions(particles: &mut [Particle], rules: &[PhaseTransitionRule]) {
     for particle in particles.iter_mut() {
-        let was_gunpowder_solid = particle.material_id() == shared::material::MAT_GUNPOWDER
-            && particle.phase() == shared::material::PHASE_SOLID;
-        let transition = check_phase_transition(particle);
-        apply_phase_transition(particle, transition);
-
-        // Gunpowder explosion: apply outward velocity and boost temperature.
-        // Must match shader g2p.rs apply_gunpowder_explosion().
-        if was_gunpowder_solid && particle.phase() == shared::material::PHASE_GAS {
-            apply_gunpowder_explosion_cpu(particle);
+        let transition = check_phase_transition(particle, rules);
+        if let PhaseTransition::Transition { flags, .. } = transition {
+            apply_phase_transition(particle, transition);
+            // Gunpowder explosion: apply outward velocity and boost temperature.
+            // Must match shader g2p.rs apply_gunpowder_explosion().
+            if flags & FLAG_EXPLOSION != 0 {
+                apply_gunpowder_explosion_cpu(particle);
+            }
         }
     }
 }
@@ -187,11 +189,20 @@ fn hash_f32_cpu(x: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use shared::material::{
-        MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_LIQUID, PHASE_SOLID, default_material_table,
+    use shared::{
+        material::{
+            MAT_LAVA, MAT_STONE, MAT_WATER, PHASE_LIQUID, PHASE_SOLID, default_material_table,
+        },
+        reaction::default_phase_transition_table,
     };
 
     use super::*;
+
+    /// Helper: get the valid rules as a Vec.
+    fn rules() -> Vec<PhaseTransitionRule> {
+        let (table, count) = default_phase_transition_table();
+        table[..count].to_vec()
+    }
 
     #[test]
     fn temperature_diffusion_equalizes() {
@@ -233,13 +244,14 @@ mod tests {
 
     #[test]
     fn phase_transition_stone_to_lava() {
+        let r = rules();
         let mut particles = vec![{
             let mut p = Particle::new(Vec3::ZERO, 1.0, MAT_STONE, PHASE_SOLID);
             p.set_temperature(1600.0);
             p
         }];
 
-        apply_phase_transitions(&mut particles);
+        apply_phase_transitions(&mut particles, &r);
 
         assert_eq!(particles[0].material_id(), MAT_LAVA);
         assert_eq!(particles[0].phase(), PHASE_LIQUID);
@@ -247,13 +259,14 @@ mod tests {
 
     #[test]
     fn phase_transition_water_to_steam() {
+        let r = rules();
         let mut particles = vec![{
             let mut p = Particle::new(Vec3::ZERO, 1.0, MAT_WATER, PHASE_LIQUID);
             p.set_temperature(110.0);
             p
         }];
 
-        apply_phase_transitions(&mut particles);
+        apply_phase_transitions(&mut particles, &r);
 
         assert_eq!(particles[0].material_id(), MAT_WATER);
         assert_eq!(particles[0].phase(), shared::material::PHASE_GAS);
@@ -262,6 +275,7 @@ mod tests {
     #[test]
     fn lava_cools_to_stone() {
         let table = default_material_table();
+        let r = rules();
         let dx = 1.0 / shared::constants::GRID_SIZE as f32;
         let mut particles = vec![
             // Hot lava
@@ -286,7 +300,7 @@ mod tests {
         // Run many diffusion + transition steps
         for _ in 0..500 {
             diffuse_temperature(&mut particles, &table, 0.01);
-            apply_phase_transitions(&mut particles);
+            apply_phase_transitions(&mut particles, &r);
         }
 
         // The lava should have cooled and solidified

@@ -21,6 +21,7 @@ use gpu_core::{
 use shared::{
     GRID_CELL_COUNT, GRID_SIZE, GridCell, MAX_PARTICLES, Particle, RENDER_HEIGHT, RENDER_WIDTH,
     material::{self, MATERIAL_COUNT, MaterialParams},
+    reaction::{self, MAX_PHASE_RULES, PhaseTransitionRule},
 };
 
 /// Compiled SPIR-V shader module bytes, included at compile time.
@@ -68,8 +69,8 @@ pub struct G2pPushConstants {
     pub dt: f32,
     /// Total number of active particles.
     pub num_particles: u32,
-    /// Padding to 16-byte alignment.
-    pub _pad: u32,
+    /// Number of valid phase transition rules.
+    pub num_rules: u32,
 }
 
 /// Push constants for the voxelize / clear_voxels shaders.
@@ -200,6 +201,7 @@ pub struct GpuSimulation {
     voxel_buffer: GpuBuffer,
     render_output_buffer: GpuBuffer,
     material_buffer: GpuBuffer,
+    reaction_buffer: GpuBuffer,
 
     // Compute passes
     clear_grid_pass: ComputePass,
@@ -221,6 +223,7 @@ pub struct GpuSimulation {
 
     // State
     num_particles: u32,
+    num_phase_rules: u32,
 
     // Reference to context (not owned — caller must keep alive)
     // We store raw device handle for recording commands; the context
@@ -300,11 +303,30 @@ impl GpuSimulation {
             material_buf_size
         );
 
+        // Phase transition rules buffer: MAX_PHASE_RULES * 32 bytes
+        let reaction_buf_size =
+            (MAX_PHASE_RULES * mem::size_of::<PhaseTransitionRule>()) as vk::DeviceSize;
+        let reaction_buffer = buffer::create_device_local_buffer(
+            ctx,
+            reaction_buf_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            "reaction-buffer",
+        )?;
+
+        // Upload default phase transition table
+        let (reaction_table, num_phase_rules) = reaction::default_phase_transition_table();
+        buffer::upload(ctx, &reaction_table, &reaction_buffer)?;
+        tracing::info!(
+            "Uploaded {} phase transition rules ({} bytes) to GPU",
+            num_phase_rules,
+            reaction_buf_size
+        );
+
         // -- Descriptor pool --
-        // 10 passes, max 3 bindings each = up to 30 storage buffer descriptors
+        // 10 passes, max 4 bindings each = up to 40 storage buffer descriptors
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 30,
+            descriptor_count: 40,
         }];
         let descriptor_pool =
             pipeline::create_descriptor_pool(ctx, &pool_sizes, 10, "sim-descriptor-pool")?;
@@ -345,7 +367,7 @@ impl GpuSimulation {
             ctx,
             shader_module,
             c"compute::g2p::g2p",
-            &[&particle_buffer, &grid_buffer, &voxel_buffer],
+            &[&particle_buffer, &grid_buffer, &voxel_buffer, &reaction_buffer],
             mem::size_of::<G2pPushConstants>() as u32,
             descriptor_pool,
             "g2p",
@@ -419,6 +441,7 @@ impl GpuSimulation {
             voxel_buffer,
             render_output_buffer,
             material_buffer,
+            reaction_buffer,
             clear_grid_pass,
             p2g_pass,
             grid_update_pass,
@@ -432,6 +455,7 @@ impl GpuSimulation {
             shader_module,
             descriptor_pool,
             num_particles: 0,
+            num_phase_rules: num_phase_rules as u32,
             device: ctx.device.clone(),
         })
     }
@@ -512,7 +536,7 @@ impl GpuSimulation {
             grid_size,
             dt,
             num_particles,
-            _pad: 0,
+            num_rules: self.num_phase_rules,
         };
         self.dispatch(
             cmd,
@@ -963,11 +987,20 @@ impl GpuSimulation {
                 size: 0,
             },
         );
+        let reaction_buf = std::mem::replace(
+            &mut self.reaction_buffer,
+            GpuBuffer {
+                buffer: vk::Buffer::null(),
+                allocation: None,
+                size: 0,
+            },
+        );
         buffer::destroy_buffer(ctx, particle_buf);
         buffer::destroy_buffer(ctx, grid_buf);
         buffer::destroy_buffer(ctx, voxel_buf);
         buffer::destroy_buffer(ctx, render_output_buf);
         buffer::destroy_buffer(ctx, material_buf);
+        buffer::destroy_buffer(ctx, reaction_buf);
     }
 }
 

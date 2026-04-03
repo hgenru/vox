@@ -112,6 +112,12 @@ Scene must produce particles under MAX_PARTICLES. Never hand off broken builds.
 G2P skips velocity/position update for phase=0 (solid). Falling solids check voxel below for support.
 Explosion debris must be converted to liquid (phase=1) + heated above melting point to fly properly.
 
+### 21. No references to storage buffer elements inside loops
+Taking `&buffer[i]` inside a `while` loop generates an `OpPhi` with pointer operands in SPIR-V,
+which requires `VariablePointers` capability that we don't enable. **WORKAROUND:** Copy the struct
+fields into local variables instead: `let mat = buffer[i].materials; let cond = buffer[i].conditions;`
+This avoids the phi node and works without extra capabilities.
+
 ### 20. Shader build.rs must track shader source files
 spirv-builder compiles shaders in a **separate** cargo invocation inside `crates/server/build.rs`.
 Cargo's build-script caching only watches files the build script itself reads, so it has no idea

@@ -5,7 +5,7 @@
 //! Updates particle velocity (PIC/FLIP blend), temperature, APIC C matrix,
 //! deformation gradient F, position, and phase transitions.
 
-use crate::types::{GridCell, Particle};
+use crate::types::{GridCell, Particle, PhaseTransitionRule, FLAG_EXPLOSION, FLAG_RESET_F, MAX_PHASE_RULES};
 use spirv_std::glam::{UVec3, Vec3, Vec4};
 use spirv_std::spirv;
 
@@ -21,8 +21,8 @@ pub struct G2pPushConstants {
     pub dt: f32,
     /// Total number of particles.
     pub num_particles: u32,
-    /// Padding for alignment.
-    pub _pad: u32,
+    /// Number of valid phase transition rules.
+    pub num_rules: u32,
 }
 
 /// PIC/FLIP blend ratio (0.0 = pure FLIP, 1.0 = pure PIC).
@@ -76,7 +76,7 @@ pub fn check_solid_support(pos: spirv_std::glam::Vec3, voxels: &[u32], grid_size
 /// 3. Compute APIC affine momentum matrix C
 /// 4. Update deformation gradient F
 /// 5. Advect position
-/// 6. Check phase transitions by temperature
+/// 6. Check phase transitions by temperature (data-driven via reaction table)
 ///
 /// For solid particles (phase==0), checks support from the voxel below.
 /// Supported solids update only F/C (pinned). Unsupported solids fall normally.
@@ -84,8 +84,10 @@ pub fn gather_particle(
     particle: &mut Particle,
     grid: &[GridCell],
     voxels: &[u32],
+    reactions: &[PhaseTransitionRule],
     grid_size: u32,
     dt: f32,
+    num_rules: u32,
 ) {
     let pos = particle.pos_mass.truncate();
     let old_vel = particle.vel_temp.truncate();
@@ -248,7 +250,7 @@ pub fn gather_particle(
             particle.vel_temp = Vec4::new(
                 particle.vel_temp.x, particle.vel_temp.y, particle.vel_temp.z, new_temp,
             );
-            apply_phase_transitions(particle);
+            apply_phase_transitions(particle, reactions, num_rules);
             return;
         }
         // Unsupported: fall through to position/velocity update below
@@ -264,8 +266,8 @@ pub fn gather_particle(
     particle.c_col1 = c_col1.extend(0.0);
     particle.c_col2 = c_col2.extend(0.0);
 
-    // Phase transitions by temperature
-    apply_phase_transitions(particle);
+    // Phase transitions by temperature (data-driven)
+    apply_phase_transitions(particle, reactions, num_rules);
 }
 
 /// Apply radiative cooling (Newton's cooling law) to a temperature value.
@@ -316,7 +318,7 @@ fn apply_gunpowder_explosion(particle: &mut Particle) {
     let hz = hash_f32(pz * 91.53 + py * 67.13);
 
     // Explosion speed: 150 grid-units/s.
-    // Against gravity=-196, max vertical rise = v^2/(2*g) ≈ 57 grid units.
+    // Against gravity=-196, max vertical rise = v^2/(2*g) ~ 57 grid units.
     // Horizontal spread is unimpeded. Good visual for 256-grid.
     let explosion_speed = 150.0_f32;
     particle.vel_temp = Vec4::new(
@@ -331,73 +333,71 @@ fn apply_gunpowder_explosion(particle: &mut Particle) {
     particle.f_col2 = Vec4::new(0.0, 0.0, 1.0, 0.0);
 }
 
-/// Check and apply phase transitions based on temperature thresholds.
+/// Check and apply phase transitions using the data-driven reaction table.
 ///
-/// - Stone (mat=0) T > 1500 -> Liquid (lava, mat=2)
-/// - Water (mat=1) T > 100 -> Gas (steam)
-/// - Water (mat=1) T < 0 -> Solid (ice, mat=5)
-/// - Lava (mat=2) T < 1500 -> Solid (stone, mat=0)
-/// - Ice (mat=5) T > 0 -> Liquid (water, mat=1)
+/// Loops over the reaction rules and applies the first matching rule.
+/// This replaces the previous hardcoded match block, avoiding trap #15
+/// (rust-gpu drops later branches in long if/else chains).
 ///
 /// On phase change: reset F = Identity, as per CLAUDE.md trap #8.
-pub fn apply_phase_transitions(particle: &mut Particle) {
+pub fn apply_phase_transitions(
+    particle: &mut Particle,
+    reactions: &[PhaseTransitionRule],
+    num_rules: u32,
+) {
     let material_id = particle.ids.x;
     let phase = particle.ids.y;
     let temp = particle.vel_temp.w;
 
-    let mut new_phase = phase;
-    let mut new_material = material_id;
+    let count = if (num_rules as usize) < MAX_PHASE_RULES {
+        num_rules
+    } else {
+        MAX_PHASE_RULES as u32
+    };
 
-    match material_id {
-        // Stone
-        0 => {
-            if phase == 0 && temp > 1500.0 {
-                new_phase = 1; // solid -> liquid (becomes lava)
-                new_material = 2; // MAT_LAVA
-            }
-        }
-        // Water
-        1 => {
-            if phase == 1 && temp > 100.0 {
-                new_phase = 2; // liquid -> gas (steam)
-            } else if phase == 1 && temp < 0.0 {
-                new_phase = 0; // liquid -> solid (ice)
-                new_material = 5; // MAT_ICE
-            }
-        }
-        // Lava
-        2 => {
-            if phase == 1 && temp < 1500.0 {
-                new_phase = 0; // liquid -> solid (becomes stone)
-                new_material = 0; // MAT_STONE
-            }
-        }
-        // Ice
-        5 => {
-            if phase == 0 && temp > 0.0 {
-                new_phase = 1; // solid -> liquid (melts to water)
-                new_material = 1; // MAT_WATER
-            }
-        }
-        // Gunpowder
-        6 => {
-            if phase == 0 && temp > 150.0 {
-                new_phase = 2; // solid -> gas (explosion)
-                // Explosion: outward velocity with pseudo-random direction per particle.
-                apply_gunpowder_explosion(particle);
-            }
-        }
-        _ => {}
-    }
+    let mut i = 0u32;
+    while i < count {
+        // Copy values out of storage buffer to avoid OpPhi pointer issues
+        // in SPIR-V (rust-gpu generates phi nodes for &reactions[i] across loop iterations).
+        let rule_materials = reactions[i as usize].materials;
+        let rule_conditions = reactions[i as usize].conditions;
+        if rule_materials.x == material_id && rule_materials.y == phase {
+            let temp_min = rule_conditions.x;
+            let temp_max = rule_conditions.y;
+            if temp > temp_min && temp < temp_max {
+                let flags = rule_conditions.z as u32;
+                let new_material = rule_materials.z;
+                let new_phase = rule_materials.w;
 
-    if new_phase != phase || new_material != material_id {
-        particle.ids.x = new_material;
-        particle.ids.y = new_phase;
-        // Reset deformation gradient on phase change (CLAUDE.md trap #8)
-        particle.f_col0 = Vec4::new(1.0, 0.0, 0.0, 0.0);
-        particle.f_col1 = Vec4::new(0.0, 1.0, 0.0, 0.0);
-        particle.f_col2 = Vec4::new(0.0, 0.0, 1.0, 0.0);
+                // Apply transition
+                particle.ids.x = new_material;
+                particle.ids.y = new_phase;
+
+                // Reset F if flag is set (trap #8)
+                if flags & FLAG_RESET_F != 0 {
+                    reset_deformation_gradient(particle);
+                }
+
+                // Apply explosion if flag is set
+                if flags & FLAG_EXPLOSION != 0 {
+                    apply_gunpowder_explosion(particle);
+                }
+
+                return;
+            }
+        }
+        i += 1;
     }
+}
+
+/// Reset the deformation gradient F to identity.
+///
+/// Helper function extracted to satisfy trap #4a (entry points must call
+/// at least one helper function).
+fn reset_deformation_gradient(particle: &mut Particle) {
+    particle.f_col0 = Vec4::new(1.0, 0.0, 0.0, 0.0);
+    particle.f_col1 = Vec4::new(0.0, 1.0, 0.0, 0.0);
+    particle.f_col2 = Vec4::new(0.0, 0.0, 1.0, 0.0);
 }
 
 /// Compute shader entry point: Grid-to-Particle transfer.
@@ -405,6 +405,7 @@ pub fn apply_phase_transitions(particle: &mut Particle) {
 /// Descriptor set 0, binding 0: storage buffer of `Particle` (read-write).
 /// Descriptor set 0, binding 1: storage buffer of `GridCell` (read).
 /// Descriptor set 0, binding 2: storage buffer of `u32` (voxel grid, 4 per cell, read).
+/// Descriptor set 0, binding 3: storage buffer of `PhaseTransitionRule` (read).
 /// Push constants: `G2pPushConstants`.
 /// Dispatch with `(ceil(num_particles / 64), 1, 1)` workgroups.
 #[spirv(compute(threads(64)))]
@@ -414,10 +415,19 @@ pub fn g2p(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] particles: &mut [Particle],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] grid: &[GridCell],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] voxels: &[u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] reactions: &[PhaseTransitionRule],
 ) {
     let idx = id.x as usize;
     if id.x >= push.num_particles {
         return;
     }
-    gather_particle(&mut particles[idx], grid, voxels, push.grid_size, push.dt);
+    gather_particle(
+        &mut particles[idx],
+        grid,
+        voxels,
+        reactions,
+        push.grid_size,
+        push.dt,
+        push.num_rules,
+    );
 }
