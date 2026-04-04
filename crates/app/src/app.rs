@@ -529,10 +529,11 @@ impl ApplicationHandler for App {
                     }
 
                     // Readback the any_active flag AFTER GPU work completes.
-                    // This is one frame late but avoids synchronization issues
-                    // during command buffer recording.
-                    if let Ok(any_active) = sim.readback_any_active(ctx) {
-                        self.world_is_static = !any_active;
+                    // This forces a GPU flush so we throttle it to 250ms.
+                    if now.duration_since(self.last_oob_check).as_millis() >= 250 {
+                        if let Ok(any_active) = sim.readback_any_active(ctx) {
+                            self.world_is_static = !any_active;
+                        }
                     }
 
                     if need_render {
@@ -566,7 +567,11 @@ impl ApplicationHandler for App {
                     let world_z = cam_eye.z - offset_xz;
                     let cam_chunk = world::chunk::chunk_coord_for_position(world_x, world_z);
 
-                    if cam_chunk != self.current_chunk {
+                    // TODO: async chunk streaming. For now, streaming is disabled
+                    // because synchronous readback (144MB particle download) causes
+                    // 50-100ms frame stutters every time the camera crosses a chunk
+                    // boundary. Player stays in the initially-loaded 36 chunks.
+                    if false && cam_chunk != self.current_chunk {
                         tracing::info!(
                             "Chunk boundary crossed: {:?} -> {:?}",
                             self.current_chunk,
