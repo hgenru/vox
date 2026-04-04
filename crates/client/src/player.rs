@@ -53,7 +53,7 @@ impl PlayerController {
             camera,
             velocity_y: 0.0,
             on_ground: false,
-            fly_mode: false,
+            fly_mode: true,
             player_height: DEFAULT_PLAYER_HEIGHT,
             jump_speed: DEFAULT_JUMP_SPEED,
             heightmap: None,
@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn test_new_defaults() {
         let pc = make_controller();
-        assert!(!pc.fly_mode);
+        assert!(pc.fly_mode);
         assert!(!pc.on_ground);
         assert_eq!(pc.velocity_y, 0.0);
         assert_eq!(pc.player_height, DEFAULT_PLAYER_HEIGHT);
@@ -235,11 +235,11 @@ mod tests {
     #[test]
     fn test_toggle_fly_mode() {
         let mut pc = make_controller();
-        assert!(!pc.fly_mode);
-        pc.toggle_fly_mode();
         assert!(pc.fly_mode);
         pc.toggle_fly_mode();
         assert!(!pc.fly_mode);
+        pc.toggle_fly_mode();
+        assert!(pc.fly_mode);
     }
 
     #[test]
