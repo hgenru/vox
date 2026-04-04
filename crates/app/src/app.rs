@@ -27,6 +27,8 @@ use crate::scene::{
     generate_heightmap, generate_mountain_heightmap, material_palette, spawn_cell,
 };
 
+use world::{ChunkCoord, WorldManager};
+
 /// Distance (in grid units) from the camera eye at which particles are
 /// spawned, removed, or explosions are centered.
 const SPAWN_DISTANCE: f32 = 15.0;
@@ -69,35 +71,100 @@ pub(crate) struct App {
     fps_timer: Instant,
     /// Most recently computed FPS value.
     current_fps: f32,
+    /// World manager for chunk streaming (used when `--world` flag is set or as default).
+    world: Option<WorldManager>,
+    /// Current chunk coordinate the camera is in.
+    current_chunk: ChunkCoord,
 }
 
 impl App {
     /// Create a new `App` with the given number of physics substeps per frame.
     ///
     /// If `scene_path` is `Some`, loads a RON scene definition from that file.
+    /// If `use_world` is `true`, the world manager generates terrain procedurally.
     /// Otherwise falls back to the default procedural island scene.
     /// If `model_path` is provided, the `.vox` model is loaded and its
     /// particles are added to the scene at `model_pos` (default 32,20,32).
-    pub(crate) fn new(substeps: u32, scene_path: Option<&str>, big: bool, model_path: Option<&str>, model_pos: Option<(f32, f32, f32)>) -> Self {
-        let (mut particles, scene_camera, use_mountain) = if let Some(path) = scene_path {
+    pub(crate) fn new(
+        substeps: u32,
+        scene_path: Option<&str>,
+        big: bool,
+        model_path: Option<&str>,
+        model_pos: Option<(f32, f32, f32)>,
+        use_world: bool,
+    ) -> Self {
+        // Try loading materials from RON file, fall back to hardcoded defaults
+        let material_db = match content::load_material_database("assets/materials.ron") {
+            Ok(db) => {
+                tracing::info!("Loaded material database from assets/materials.ron");
+                Some(db)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load assets/materials.ron, using hardcoded defaults: {}",
+                    e
+                );
+                None
+            }
+        };
+
+        // Determine scene source: WorldManager, RON scene, or built-in procedural.
+        let (particles, scene_camera, use_mountain, world_mgr, start_chunk) = if use_world {
+            tracing::info!("Using WorldManager for chunk-streamed terrain");
+            let seed = 12345u64;
+            let cache_dir = std::path::PathBuf::from("world_cache");
+            std::fs::create_dir_all(&cache_dir).ok();
+            match WorldManager::new(seed, cache_dir) {
+                Ok(mut world_mgr) => {
+                    // Start at world origin chunk
+                    let start_chunk = ChunkCoord::new(0, 0, 0);
+                    if let Err(e) = world_mgr.update_center(start_chunk) {
+                        tracing::error!("Failed to initialize world center: {}", e);
+                    }
+                    let mut particles = world_mgr.pack_particles_for_gpu();
+                    // Offset particles so all positions are within [0, GRID_SIZE).
+                    // pack_particles_for_gpu places center chunk at origin, so chunks
+                    // at negative offsets produce negative coordinates. Shift by
+                    // sim_radius * CHUNK_SIZE in X and Z to make everything positive.
+                    let offset_xz =
+                        world_mgr.sim_radius() as f32 * shared::constants::CHUNK_SIZE as f32;
+                    for p in &mut particles {
+                        let pos = p.position();
+                        p.set_position(Vec3::new(pos.x + offset_xz, pos.y, pos.z + offset_xz));
+                    }
+                    tracing::info!(
+                        "World: {} chunks loaded, {} particles",
+                        world_mgr.active_chunk_count(),
+                        particles.len(),
+                    );
+                    (particles, None, false, Some(world_mgr), start_chunk)
+                }
+                Err(e) => {
+                    tracing::error!("Failed to create WorldManager: {}, falling back to island", e);
+                    (create_island_particles(), None, false, None, ChunkCoord::new(0, 0, 0))
+                }
+            }
+        } else if let Some(path) = scene_path {
             match content::load_scene(path) {
                 Ok(scene) => {
                     tracing::info!("Loaded scene '{}' from {}", scene.name, path);
                     let cam = scene.camera.clone();
                     let p = scene.spawn_particles();
-                    (p, cam, false)
+                    (p, cam, false, None, ChunkCoord::new(0, 0, 0))
                 }
                 Err(e) => {
                     tracing::warn!("Failed to load scene '{}': {}, using default", path, e);
-                    (create_island_particles(), None, false)
+                    (create_island_particles(), None, false, None, ChunkCoord::new(0, 0, 0))
                 }
             }
         } else if big {
             tracing::info!("Using mountain range scene (--big)");
-            (create_mountain_particles(), None, true)
+            (create_mountain_particles(), None, true, None, ChunkCoord::new(0, 0, 0))
         } else {
-            (create_island_particles(), None, false)
+            (create_island_particles(), None, false, None, ChunkCoord::new(0, 0, 0))
         };
+
+        let mut particles = particles;
         if let Some(path) = model_path {
             let pos = model_pos.unwrap_or((32.0, 20.0, 32.0));
             let offset = Vec3::new(pos.0, pos.1, pos.2);
@@ -114,25 +181,17 @@ impl App {
         }
         tracing::info!("Created {} initial particles", particles.len());
 
-        // Try loading materials from RON file, fall back to hardcoded defaults
-        let material_db = match content::load_material_database("assets/materials.ron") {
-            Ok(db) => {
-                tracing::info!("Loaded material database from assets/materials.ron");
-                Some(db)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to load assets/materials.ron, using hardcoded defaults: {}",
-                    e
-                );
-                None
-            }
-        };
-
         let camera = if let Some(ref cam) = scene_camera {
             Camera::look_at(
                 Vec3::new(cam.eye.0, cam.eye.1, cam.eye.2),
                 Vec3::new(cam.target.0, cam.target.1, cam.target.2),
+            )
+        } else if world_mgr.is_some() {
+            // For world mode: start camera in the center of the active grid, looking forward
+            let gs = GRID_SIZE as f32;
+            Camera::look_at(
+                Vec3::new(gs * 0.5, gs * 0.7, gs * 0.5),
+                Vec3::new(gs * 0.5, gs * 0.3, gs * 0.5 + 1.0),
             )
         } else {
             let gs = GRID_SIZE as f32;
@@ -143,7 +202,7 @@ impl App {
         };
         let mut player = PlayerController::new(camera);
         // Only generate heightmap for procedural scenes (RON scenes don't have procedural terrain)
-        if scene_camera.is_none() {
+        if scene_camera.is_none() && world_mgr.is_none() {
             let heightmap = if use_mountain {
                 generate_mountain_heightmap()
             } else {
@@ -173,6 +232,8 @@ impl App {
             fps_frame_count: 0,
             fps_timer: Instant::now(),
             current_fps: 0.0,
+            world: world_mgr,
+            current_chunk: start_chunk,
         }
     }
 
@@ -487,6 +548,87 @@ impl ApplicationHandler for App {
                         match renderer.draw_frame_with_buffer(ctx, sim.render_output_buffer(), RENDER_WIDTH, RENDER_HEIGHT) {
                             Ok(_) => {}
                             Err(e) => tracing::error!("Frame error: {}", e),
+                        }
+                    }
+                }
+
+                // --- Chunk streaming: check if camera crossed a chunk boundary ---
+                if let Some(ref mut world) = self.world {
+                    let cam_eye = self.player.camera.eye();
+                    // Convert grid-space eye back to world-space for chunk lookup.
+                    // Grid-space has an offset of sim_radius * CHUNK_SIZE in X/Z.
+                    let offset_xz =
+                        world.sim_radius() as f32 * shared::constants::CHUNK_SIZE as f32;
+                    let world_x = cam_eye.x - offset_xz;
+                    let world_z = cam_eye.z - offset_xz;
+                    let cam_chunk = world::chunk::chunk_coord_for_position(world_x, world_z);
+
+                    if cam_chunk != self.current_chunk {
+                        tracing::info!(
+                            "Chunk boundary crossed: {:?} -> {:?}",
+                            self.current_chunk,
+                            cam_chunk,
+                        );
+
+                        // Read back current particles so we can save them to chunks
+                        if let (Some(sim), Some(ctx)) =
+                            (self.sim.as_ref(), self.ctx.as_ref())
+                        {
+                            match sim.readback_particles(ctx) {
+                                Ok(mut gpu_particles) => {
+                                    // Remove the grid offset before unpacking
+                                    for p in &mut gpu_particles {
+                                        let pos = p.position();
+                                        p.set_position(Vec3::new(
+                                            pos.x - offset_xz,
+                                            pos.y,
+                                            pos.z - offset_xz,
+                                        ));
+                                    }
+                                    world.unpack_particles_from_gpu(&gpu_particles);
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to readback particles for chunk save: {}", e);
+                                }
+                            }
+                        }
+
+                        // Update center: evict old chunks, load new ones
+                        if let Err(e) = world.update_center(cam_chunk) {
+                            tracing::error!("Failed to update world center: {}", e);
+                        }
+                        self.current_chunk = cam_chunk;
+
+                        // Pack new particle set with grid offset and upload
+                        let mut new_particles = world.pack_particles_for_gpu();
+                        for p in &mut new_particles {
+                            let pos = p.position();
+                            p.set_position(Vec3::new(
+                                pos.x + offset_xz,
+                                pos.y,
+                                pos.z + offset_xz,
+                            ));
+                        }
+                        if let (Some(sim), Some(ctx)) =
+                            (self.sim.as_mut(), self.ctx.as_ref())
+                        {
+                            if let Err(e) = sim.reload_particles(ctx, &new_particles) {
+                                tracing::error!("Failed to reload particles: {}", e);
+                            } else {
+                                tracing::info!(
+                                    "Reloaded {} particles after chunk shift",
+                                    new_particles.len(),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // --- OOB particle detection ---
+                if self.world.is_some() {
+                    if let (Some(sim), Some(ctx)) = (self.sim.as_ref(), self.ctx.as_ref()) {
+                        if sim.readback_oob_flag(ctx).unwrap_or(false) {
+                            tracing::warn!("Particles out of bounds detected");
                         }
                     }
                 }

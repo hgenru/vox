@@ -16,3 +16,4 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 image = { workspace = true }
+world = { workspace = true }

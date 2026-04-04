@@ -55,6 +55,7 @@ gpu-core = { path = "crates/gpu-core" }
 server = { path = "crates/server" }
 client = { path = "crates/client" }
 content = { path = "crates/content" }
+world = { path = "crates/world" }
 
 [profile.dev.build-override]
 opt-level = 3
