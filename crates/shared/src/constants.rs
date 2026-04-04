@@ -32,7 +32,7 @@ pub const RENDER_WIDTH: u32 = 1280;
 pub const RENDER_HEIGHT: u32 = 720;
 
 /// Maximum number of particles for MVP.
-pub const MAX_PARTICLES: u32 = 2_000_000;
+pub const MAX_PARTICLES: u32 = 4_000_000;
 
 /// Physics tick rate (Hz).
 pub const PHYSICS_HZ: u32 = 60;
@@ -64,7 +64,7 @@ pub const DIRTY_TILE_COUNT: u32 = DIRTY_TILES_X * DIRTY_TILES_Y;
 /// Default hash grid capacity (number of slots).
 /// Should be ~2x the expected max active cells for low collision rate.
 /// Must be a power of 2 for fast modulo via bitwise AND.
-pub const HASH_GRID_DEFAULT_CAPACITY: u32 = 1 << 20; // 1M slots = ~52MB
+pub const HASH_GRID_DEFAULT_CAPACITY: u32 = 1 << 21; // 2M slots = ~104MB
 
 /// Empty sentinel for hash grid keys.
 /// Represents an unoccupied slot in the hash grid.
@@ -119,6 +119,7 @@ mod tests {
     fn hash_grid_capacity_is_power_of_two() {
         assert!(HASH_GRID_DEFAULT_CAPACITY.is_power_of_two());
         assert!(HASH_GRID_DEFAULT_CAPACITY > 0);
+        assert_eq!(HASH_GRID_DEFAULT_CAPACITY, 1 << 21); // 2M slots
     }
 
     #[test]
