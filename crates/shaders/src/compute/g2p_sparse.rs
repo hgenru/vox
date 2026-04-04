@@ -251,6 +251,21 @@ fn apply_radiative_cooling_sparse(temp: f32) -> f32 {
     temp + cooling_rate * (ambient_temp - temp)
 }
 
+/// Check if a position is near the domain boundary and flag it.
+///
+/// Sets `oob_flag[0]` to 1 via atomic max if the particle position is within
+/// `margin` of the grid edge. This allows the CPU to detect when particles
+/// are being clamped and trigger chunk streaming.
+fn check_and_flag_oob_sparse(pos: Vec3, grid_size: u32, oob_flag: &mut [u32]) {
+    let margin = 2.0_f32;
+    let upper = grid_size as f32 - margin;
+    if pos.x < margin || pos.x > upper || pos.y < margin || pos.y > upper || pos.z < margin || pos.z > upper {
+        unsafe {
+            spirv_std::arch::atomic_u_max::<u32, 1u32, 0x0u32>(&mut oob_flag[0], 1);
+        }
+    }
+}
+
 /// Compute shader entry point: sparse Grid-to-Particle transfer.
 ///
 /// Descriptor set 0, binding 0: storage buffer of `Particle` (read-write).
@@ -259,6 +274,7 @@ fn apply_radiative_cooling_sparse(temp: f32) -> f32 {
 /// Descriptor set 0, binding 3: storage buffer of `u32` (voxels, read).
 /// Descriptor set 0, binding 4: storage buffer of `PhaseTransitionRule` (read).
 /// Descriptor set 0, binding 5: storage buffer of `u32` (sleep_state, read).
+/// Descriptor set 0, binding 6: storage buffer of `u32` (oob_flag, write).
 /// Push constants: `G2pSparsePushConstants`.
 #[spirv(compute(threads(64)))]
 pub fn g2p_sparse(
@@ -270,6 +286,7 @@ pub fn g2p_sparse(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] voxels: &[u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] reactions: &[PhaseTransitionRule],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 5)] sleep_state: &[u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 6)] oob_flag: &mut [u32],
 ) {
     let idx = id.x as usize;
     if id.x >= push.num_particles {
@@ -292,4 +309,8 @@ pub fn g2p_sparse(
         push.hash_capacity,
         push.num_rules,
     );
+
+    // Check OOB after position update
+    let new_pos = particles[idx].pos_mass.truncate();
+    check_and_flag_oob_sparse(new_pos, push.grid_size, oob_flag);
 }
