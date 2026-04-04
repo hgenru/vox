@@ -16,7 +16,7 @@ use anyhow::Result;
 use winit::event_loop::EventLoop;
 
 /// Default number of physics substeps per frame.
-const DEFAULT_SUBSTEPS: u32 = 2;
+const DEFAULT_SUBSTEPS: u32 = 1;
 
 struct Args {
     headless: bool,
