@@ -20,9 +20,10 @@ pub mod simulation;
 
 pub use push_constants::{
     ComputeActivityPushConstants, DirtyTilesPushConstants, ExplosionPushConstants,
-    G2pPushConstants, GridUpdatePushConstants, GridUpdateSparsePushConstants,
-    MarkActivePushConstants, P2gPushConstants, ReactPushConstants, RenderPushConstants,
-    ToolbarPushConstants, VoxelizePushConstants, TOOLBAR_MAX_MATERIALS,
+    FarFieldPushConstants, G2pPushConstants, GridUpdatePushConstants,
+    GridUpdateSparsePushConstants, MarkActivePushConstants, P2gPushConstants,
+    ReactPushConstants, RenderPushConstants, ToolbarPushConstants, VoxelizePushConstants,
+    TOOLBAR_MAX_MATERIALS,
 };
 pub use simulation::GpuSimulation;
 
@@ -90,6 +91,8 @@ mod tests {
         assert_eq!(mem::size_of::<ToolbarPushConstants>(), 144);
         // DirtyTilesPushConstants: 4 u32s (16 bytes) + 2 Vec4s (32 bytes) = 48 bytes
         assert_eq!(mem::size_of::<DirtyTilesPushConstants>(), 48);
+        // FarFieldPushConstants: 4 u32s (16 bytes) + 3 Vec4s (48 bytes) = 64 bytes
+        assert_eq!(mem::size_of::<FarFieldPushConstants>(), 64);
     }
 
     #[test]

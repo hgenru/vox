@@ -12,6 +12,34 @@
 
 use spirv_std::glam::{UVec4, Vec4};
 
+// ---------------------------------------------------------------------------
+// Far-field rendering constants (synced with shared::far_field)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of far-field chunks in the atlas.
+pub const MAX_FAR_CHUNKS: u32 = 128;
+
+/// Voxels per far-field chunk axis (64).
+pub const FAR_CHUNK_SIZE: u32 = 64;
+
+/// Total voxels per chunk (64^3 = 262144).
+pub const FAR_FIELD_VOXELS_PER_CHUNK: u32 = FAR_CHUNK_SIZE * FAR_CHUNK_SIZE * FAR_CHUNK_SIZE;
+
+/// Entry in the far-field chunk table mapping a chunk to its voxel data.
+///
+/// 32 bytes, 16-byte aligned. Mirrors `shared::far_field::ChunkTableEntry`.
+/// CPU side: origin=[f32;4], voxel_offset=u32, _pad=[u32;3].
+/// GPU side: origin=Vec4, offset_pad=UVec4 where x=voxel_offset.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct ChunkTableEntry {
+    /// World-space origin of this chunk (chunk_coord * FAR_CHUNK_SIZE).
+    /// `w` = 1.0 if this entry is valid, 0.0 otherwise.
+    pub origin: Vec4,
+    /// x = voxel_offset (in voxels, not bytes), yzw = padding.
+    pub offset_pad: UVec4,
+}
+
 /// A single MPM particle. 144 bytes, 16-byte aligned.
 ///
 /// Fields pack multiple values into Vec4 components:

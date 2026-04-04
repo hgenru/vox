@@ -3,6 +3,8 @@
 use std::mem;
 use std::time::Instant;
 
+use bytemuck::Zeroable;
+
 use ash::vk;
 use gpu_core::{
     VulkanContext,
@@ -10,9 +12,9 @@ use gpu_core::{
     pipeline,
 };
 use shared::{
-    DIRTY_TILE_COUNT, GRID_CELL_COUNT, GRID_SIZE, GridCell, HASH_GRID_DEFAULT_CAPACITY,
-    MAX_ACTIVE_CELLS, MAX_PARTICLES,
-    Particle, RENDER_HEIGHT, RENDER_WIDTH, SLEEP_THRESHOLD, TOTAL_BRICKS,
+    ChunkTableEntry, DIRTY_TILE_COUNT, FAR_FIELD_VOXEL_BUFFER_SIZE, GRID_CELL_COUNT,
+    GRID_SIZE, GridCell, HASH_GRID_DEFAULT_CAPACITY, MAX_ACTIVE_CELLS, MAX_FAR_CHUNKS,
+    MAX_PARTICLES, Particle, RENDER_HEIGHT, RENDER_WIDTH, SLEEP_THRESHOLD, TOTAL_BRICKS,
     TOTAL_SUPER_BRICKS,
     material::{self, MATERIAL_COUNT, MaterialParams},
     reaction::{self, MAX_PHASE_RULES, PhaseTransitionRule},
@@ -50,6 +52,10 @@ pub struct GpuSimulation {
     // Brick occupancy (render optimization)
     brick_occupancy_buffer: GpuBuffer,
     super_brick_occupancy_buffer: GpuBuffer,
+
+    // Far-field rendering buffers
+    far_field_voxel_buffer: GpuBuffer,
+    far_field_chunk_table: GpuBuffer,
 
     // Any-active flag (1 u32, set by update_sleep if any brick is active)
     pub(crate) any_active_buffer: GpuBuffer,
@@ -89,6 +95,9 @@ pub struct GpuSimulation {
 
     // Brick occupancy pass (render optimization)
     compute_occupancy_pass: ComputePass,
+
+    // Far-field render pass
+    render_far_field_pass: ComputePass,
 
     // Dirty-tile pass
     compute_dirty_tiles_pass: ComputePass,
@@ -130,6 +139,10 @@ pub struct GpuSimulation {
     // State
     pub(crate) num_particles: u32,
     num_phase_rules: u32,
+    /// Number of far-field chunks currently uploaded to the GPU.
+    far_field_chunk_count: u32,
+    /// World-space origin of the simulation domain (grid [0,0,0] in world coords).
+    sim_origin: [f32; 3],
     /// Monotonically increasing frame counter for graduated sleep scheduling.
     frame_number: core::cell::Cell<u32>,
     /// Previous frame camera eye (for dirty-tile camera-moved detection).
@@ -331,6 +344,33 @@ impl GpuSimulation {
             "super-brick-occupancy-buffer",
         )?;
 
+        // -- Far-field rendering buffers --
+        // Voxel buffer: u8 per voxel packed as u32s → total bytes / 4
+        let far_field_voxel_buf_size =
+            (FAR_FIELD_VOXEL_BUFFER_SIZE as usize) as vk::DeviceSize;
+        let far_field_voxel_buffer = buffer::create_device_local_buffer(
+            ctx,
+            far_field_voxel_buf_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "far-field-voxel-buffer",
+        )?;
+        tracing::info!(
+            "Far-field voxel buffer: {:.1}MB ({} chunks * {}³ voxels)",
+            far_field_voxel_buf_size as f64 / (1024.0 * 1024.0),
+            MAX_FAR_CHUNKS,
+            64,
+        );
+
+        // Chunk table: ChunkTableEntry (32 bytes) * MAX_FAR_CHUNKS
+        let far_field_table_size =
+            (MAX_FAR_CHUNKS as usize * mem::size_of::<ChunkTableEntry>()) as vk::DeviceSize;
+        let far_field_chunk_table = buffer::create_device_local_buffer(
+            ctx,
+            far_field_table_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "far-field-chunk-table",
+        )?;
+
         // -- Any-active flag buffer (1 u32, set by update_sleep via atomicMax) --
         let any_active_buffer = buffer::create_device_local_buffer(
             ctx,
@@ -443,13 +483,13 @@ impl GpuSimulation {
         )?;
 
         // -- Descriptor pool --
-        // All passes combined: dirty tiles + hash grid + counting sort + super bricks
+        // All passes combined: dirty tiles + hash grid + counting sort + super bricks + far-field
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 180,
+            descriptor_count: 184,
         }];
         let descriptor_pool =
-            pipeline::create_descriptor_pool(ctx, &pool_sizes, 30, "sim-descriptor-pool")?;
+            pipeline::create_descriptor_pool(ctx, &pool_sizes, 31, "sim-descriptor-pool")?;
 
         // -- Create each compute pass --
         // Entry point names are fully qualified module paths in rust-gpu SPIR-V.
@@ -583,6 +623,23 @@ impl GpuSimulation {
             mem::size_of::<ComputeOccupancyPushConstants>() as u32,
             descriptor_pool,
             "compute-occupancy",
+        )?;
+
+        // -- Far-field render pass --
+        // render_far_field: render_output(rw), far_field_voxels(r), far_field_table(r), materials(r)
+        let render_far_field_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::render_far_field::render_far_field",
+            &[
+                &render_output_buffer,
+                &far_field_voxel_buffer,
+                &far_field_chunk_table,
+                &material_buffer,
+            ],
+            mem::size_of::<FarFieldPushConstants>() as u32,
+            descriptor_pool,
+            "render-far-field",
         )?;
 
         // -- Dirty-tile pass --
@@ -728,6 +785,8 @@ impl GpuSimulation {
             sleep_state_buffer,
             brick_occupancy_buffer,
             super_brick_occupancy_buffer,
+            far_field_voxel_buffer,
+            far_field_chunk_table,
             any_active_buffer,
             brick_count_buffer,
             brick_offset_buffer,
@@ -753,6 +812,7 @@ impl GpuSimulation {
             explosion_pass,
             compute_activity_pass,
             compute_occupancy_pass,
+            render_far_field_pass,
             compute_dirty_tiles_pass,
             update_sleep_pass,
             count_per_brick_pass,
@@ -774,6 +834,8 @@ impl GpuSimulation {
             descriptor_pool,
             num_particles: 0,
             num_phase_rules: num_phase_rules as u32,
+            far_field_chunk_count: 0,
+            sim_origin: [0.0; 3],
             frame_number: core::cell::Cell::new(0),
             prev_eye: core::cell::Cell::new([f32::NAN; 3]),
             prev_target: core::cell::Cell::new([f32::NAN; 3]),
@@ -1728,6 +1790,121 @@ impl GpuSimulation {
         dx > eps || dy > eps || dz > eps
     }
 
+    /// Set the world-space origin of the simulation domain.
+    ///
+    /// This defines where grid voxel [0,0,0] sits in world coordinates.
+    /// Used by the far-field render pass to convert between grid-local and world space.
+    pub fn set_sim_origin(&mut self, origin: [f32; 3]) {
+        self.sim_origin = origin;
+    }
+
+    /// Upload far-field voxel data for a set of chunks.
+    ///
+    /// Each chunk provides its world-space origin and a 64^3 u8 material palette.
+    /// The `data` slice for each chunk must be exactly `FAR_FIELD_VOXELS_PER_CHUNK` bytes.
+    /// Chunks are appended sequentially starting from offset 0.
+    ///
+    /// All voxel data is concatenated into a single upload to avoid per-chunk
+    /// staging buffer overhead.
+    ///
+    /// Returns the number of chunks actually uploaded (may be less than provided
+    /// if `MAX_FAR_CHUNKS` is exceeded).
+    pub fn update_far_field(
+        &mut self,
+        ctx: &VulkanContext,
+        chunks: &[(ChunkTableEntry, &[u8])],
+    ) -> Result<u32> {
+        let max = MAX_FAR_CHUNKS as usize;
+        let count = chunks.len().min(max);
+
+        // Build table entries with sequential offsets
+        let mut table = vec![ChunkTableEntry::zeroed(); max];
+        let voxels_per_chunk = shared::FAR_FIELD_VOXELS_PER_CHUNK as usize;
+
+        // Concatenate all voxel data into a single buffer for one upload
+        let mut all_voxels = vec![0u8; count * voxels_per_chunk];
+
+        for (i, (entry, data)) in chunks.iter().take(count).enumerate() {
+            table[i] = ChunkTableEntry {
+                origin: entry.origin,
+                voxel_offset: (i * voxels_per_chunk) as u32,
+                _pad: [0; 3],
+            };
+            // Ensure w=1 for valid entries
+            table[i].origin[3] = 1.0;
+
+            // Copy voxel data into concatenated buffer
+            let dst_start = i * voxels_per_chunk;
+            let copy_len = data.len().min(voxels_per_chunk);
+            all_voxels[dst_start..dst_start + copy_len].copy_from_slice(&data[..copy_len]);
+        }
+
+        // Upload chunk table
+        buffer::upload(ctx, &table, &self.far_field_chunk_table)?;
+
+        // Upload all voxel data in a single transfer
+        if count > 0 {
+            buffer::upload(ctx, &all_voxels, &self.far_field_voxel_buffer)?;
+        }
+
+        self.far_field_chunk_count = count as u32;
+        tracing::info!(
+            "Uploaded {} far-field chunks ({:.1}MB voxel data)",
+            count,
+            (count * voxels_per_chunk) as f64 / (1024.0 * 1024.0),
+        );
+
+        Ok(count as u32)
+    }
+
+    /// Record a far-field render dispatch into the given command buffer.
+    ///
+    /// Runs after the main render pass. For each pixel showing sky, casts rays
+    /// into far-field chunks and writes hit colors.
+    /// The command buffer must be in recording state.
+    pub fn render_far_field(
+        &self,
+        cmd: vk::CommandBuffer,
+        width: u32,
+        height: u32,
+        eye: [f32; 3],
+        target: [f32; 3],
+    ) {
+        if self.far_field_chunk_count == 0 {
+            return;
+        }
+
+        passes::barrier(cmd, &self.device);
+
+        let push = FarFieldPushConstants {
+            width,
+            height,
+            chunk_count: self.far_field_chunk_count,
+            grid_size: GRID_SIZE,
+            eye: glam::Vec4::new(eye[0], eye[1], eye[2], 0.0),
+            target: glam::Vec4::new(target[0], target[1], target[2], 0.0),
+            sim_origin: glam::Vec4::new(
+                self.sim_origin[0],
+                self.sim_origin[1],
+                self.sim_origin[2],
+                0.0,
+            ),
+        };
+
+        let wg_x = (width + 7) / 8;
+        let wg_y = (height + 7) / 8;
+
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.render_far_field_pass,
+            wg_x,
+            wg_y,
+            1,
+            bytemuck::bytes_of(&push),
+        );
+    }
+
     /// Record a toolbar overlay dispatch into the given command buffer.
     ///
     /// Draws a material selection toolbar on top of the render output buffer.
@@ -1859,6 +2036,7 @@ impl GpuSimulation {
             &self.explosion_pass,
             &self.compute_activity_pass,
             &self.compute_occupancy_pass,
+            &self.render_far_field_pass,
             &self.compute_dirty_tiles_pass,
             &self.update_sleep_pass,
             &self.count_per_brick_pass,
@@ -1972,6 +2150,14 @@ impl GpuSimulation {
             &mut self.super_brick_occupancy_buffer,
             GpuBuffer { buffer: vk::Buffer::null(), allocation: None, size: 0 },
         );
+        let far_field_voxel_buf = std::mem::replace(
+            &mut self.far_field_voxel_buffer,
+            GpuBuffer { buffer: vk::Buffer::null(), allocation: None, size: 0 },
+        );
+        let far_field_table_buf = std::mem::replace(
+            &mut self.far_field_chunk_table,
+            GpuBuffer { buffer: vk::Buffer::null(), allocation: None, size: 0 },
+        );
         let any_active_buf = std::mem::replace(
             &mut self.any_active_buffer,
             GpuBuffer { buffer: vk::Buffer::null(), allocation: None, size: 0 },
@@ -2071,6 +2257,8 @@ impl GpuSimulation {
         buffer::destroy_buffer(ctx, sleep_state_buf);
         buffer::destroy_buffer(ctx, brick_occupancy_buf);
         buffer::destroy_buffer(ctx, super_brick_occupancy_buf);
+        buffer::destroy_buffer(ctx, far_field_voxel_buf);
+        buffer::destroy_buffer(ctx, far_field_table_buf);
         buffer::destroy_buffer(ctx, any_active_buf);
         buffer::destroy_buffer(ctx, prev_render_output_buf);
         buffer::destroy_buffer(ctx, dirty_tile_buf);
