@@ -82,6 +82,15 @@ pub const SUPER_BRICKS_PER_AXIS: u32 = BRICKS_PER_AXIS / SUPER_BRICK_SIZE;
 /// Total number of super-bricks in the grid (SUPER_BRICKS_PER_AXIS³).
 pub const TOTAL_SUPER_BRICKS: u32 = SUPER_BRICKS_PER_AXIS * SUPER_BRICKS_PER_AXIS * SUPER_BRICKS_PER_AXIS;
 
+/// Chunk size in voxels per axis.
+pub const CHUNK_SIZE: u32 = 64;
+
+/// Number of chunks per grid axis (GRID_SIZE / CHUNK_SIZE).
+pub const CHUNKS_PER_GRID_AXIS: u32 = GRID_SIZE / CHUNK_SIZE;
+
+/// World height in chunks (same as horizontal for now).
+pub const WORLD_HEIGHT_CHUNKS: u32 = CHUNKS_PER_GRID_AXIS;
+
 /// Velocity² threshold below which a particle is considered inactive.
 /// Particles with speed² <= this won't increment the activity counter.
 pub const ACTIVITY_VELOCITY_THRESHOLD_SQ: f32 = 0.01;
