@@ -63,6 +63,8 @@ pub(crate) struct App {
     /// Cached result from `readback_any_active()` — one frame late but safe
     /// to query outside command buffer recording.
     world_is_static: bool,
+    /// Last time OOB flag was checked (throttled to avoid GPU stalls).
+    last_oob_check: Instant,
     /// Number of consecutive frames with no render (for logging).
     frames_skipped: u64,
     /// Frame counter for FPS calculation, reset every second.
@@ -228,6 +230,7 @@ impl App {
             prev_eye: [0.0; 3],
             prev_target: [0.0; 3],
             world_is_static: false,
+            last_oob_check: Instant::now(),
             frames_skipped: 0,
             fps_frame_count: 0,
             fps_timer: Instant::now(),
@@ -624,8 +627,9 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                // --- OOB particle detection ---
-                if self.world.is_some() {
+                // --- OOB particle detection (throttled to avoid GPU stalls) ---
+                if self.world.is_some() && now.duration_since(self.last_oob_check).as_millis() >= 500 {
+                    self.last_oob_check = now;
                     if let (Some(sim), Some(ctx)) = (self.sim.as_ref(), self.ctx.as_ref()) {
                         if sim.readback_oob_flag(ctx).unwrap_or(false) {
                             tracing::warn!("Particles out of bounds detected");

@@ -62,9 +62,12 @@ pub const DIRTY_TILES_Y: u32 = (RENDER_HEIGHT + DIRTY_TILE_SIZE - 1) / DIRTY_TIL
 pub const DIRTY_TILE_COUNT: u32 = DIRTY_TILES_X * DIRTY_TILES_Y;
 
 /// Default hash grid capacity (number of slots).
-/// Should be ~2x the expected max active cells for low collision rate.
+/// Each particle touches up to 27 grid cells during P2G; with 4M particles
+/// the number of unique cells can reach 2-3M. Capacity must be well above
+/// that to keep the open-addressing load factor below 50%.
+/// 8M slots: keys = 32MB, values = 384MB, total ~416MB.
 /// Must be a power of 2 for fast modulo via bitwise AND.
-pub const HASH_GRID_DEFAULT_CAPACITY: u32 = 1 << 21; // 2M slots = ~104MB
+pub const HASH_GRID_DEFAULT_CAPACITY: u32 = 1 << 23; // 8M slots
 
 /// Empty sentinel for hash grid keys.
 /// Represents an unoccupied slot in the hash grid.
@@ -128,7 +131,7 @@ mod tests {
     fn hash_grid_capacity_is_power_of_two() {
         assert!(HASH_GRID_DEFAULT_CAPACITY.is_power_of_two());
         assert!(HASH_GRID_DEFAULT_CAPACITY > 0);
-        assert_eq!(HASH_GRID_DEFAULT_CAPACITY, 1 << 21); // 2M slots
+        assert_eq!(HASH_GRID_DEFAULT_CAPACITY, 1 << 23); // 8M slots
     }
 
     #[test]
