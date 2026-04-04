@@ -19,3 +19,4 @@ Thumbs.db
 .env
 .claude/worktrees/
 screenshots/
+world_cache/
