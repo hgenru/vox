@@ -5,9 +5,11 @@
 use std::time::Instant;
 
 use anyhow::Result;
+use glam::Vec3;
 use gpu_core::VulkanContext;
 use server::GpuSimulation;
 use shared::{GRID_SIZE, RENDER_HEIGHT, RENDER_WIDTH};
+use world::{ChunkCoord, WorldManager};
 
 use crate::scene::create_island_particles;
 use crate::Args;
@@ -31,7 +33,31 @@ pub(crate) fn run_headless(args: &Args) -> Result<()> {
             GpuSimulation::new(&ctx)?
         }
     };
-    let (mut particles, scene_camera) = if let Some(scene_path) = &args.scene {
+    let (mut particles, scene_camera) = if args.world {
+        tracing::info!("Headless: using WorldManager for chunk-streamed terrain");
+        let seed = 12345u64;
+        let cache_dir = std::path::PathBuf::from("world_cache");
+        std::fs::create_dir_all(&cache_dir)?;
+        let mut world_mgr = WorldManager::new(seed, cache_dir)
+            .map_err(|e| anyhow::anyhow!("WorldManager init failed: {}", e))?;
+        let start_chunk = ChunkCoord::new(0, 0, 0);
+        world_mgr
+            .update_center(start_chunk)
+            .map_err(|e| anyhow::anyhow!("World update_center failed: {}", e))?;
+        let mut packed = world_mgr.pack_particles_for_gpu();
+        let offset_xz =
+            world_mgr.sim_radius() as f32 * shared::constants::CHUNK_SIZE as f32;
+        for p in &mut packed {
+            let pos = p.position();
+            p.set_position(Vec3::new(pos.x + offset_xz, pos.y, pos.z + offset_xz));
+        }
+        tracing::info!(
+            "World: {} chunks, {} particles",
+            world_mgr.active_chunk_count(),
+            packed.len(),
+        );
+        (packed, None)
+    } else if let Some(scene_path) = &args.scene {
         let scene = content::load_scene(scene_path)?;
         tracing::info!("Loaded scene '{}' from {}", scene.name, scene_path);
         let cam = scene.camera.clone();

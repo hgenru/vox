@@ -31,6 +31,8 @@ struct Args {
     model: Option<String>,
     /// World-space offset (x,y,z) at which to place the loaded model.
     model_pos: Option<(f32, f32, f32)>,
+    /// If true, use WorldManager for chunk-streamed procedural terrain.
+    world: bool,
 }
 
 fn parse_args() -> Args {
@@ -61,6 +63,7 @@ fn parse_args() -> Args {
         .position(|a| a == "--model")
         .and_then(|i| args.get(i + 1).cloned());
     let big = args.contains(&"--big".to_string());
+    let world = args.contains(&"--world".to_string());
     let model_pos = args
         .iter()
         .position(|a| a == "--model-pos")
@@ -77,7 +80,7 @@ fn parse_args() -> Args {
                 None
             }
         });
-    Args { headless, frames, output, substeps, scene, big, model, model_pos }
+    Args { headless, frames, output, substeps, scene, big, model, model_pos, world }
 }
 
 fn main() -> Result<()> {
@@ -91,7 +94,7 @@ fn main() -> Result<()> {
     if args.headless { return headless::run_headless(&args); }
 
     let event_loop = EventLoop::new()?;
-    let mut application = app::App::new(args.substeps, args.scene.as_deref(), args.big, args.model.as_deref(), args.model_pos);
+    let mut application = app::App::new(args.substeps, args.scene.as_deref(), args.big, args.model.as_deref(), args.model_pos, args.world);
     event_loop.run_app(&mut application)?;
     tracing::info!("VOX Engine shut down");
     Ok(())

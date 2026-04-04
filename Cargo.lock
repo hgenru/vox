@@ -99,6 +99,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "winit",
+ "world",
 ]
 
 [[package]]
