@@ -92,7 +92,7 @@ pub struct GridCell {
 pub const GRID_SIZE: u32 = 256;
 
 /// Default hash grid capacity (synced with shared::constants).
-pub const HASH_GRID_DEFAULT_CAPACITY: u32 = 1 << 21;
+pub const HASH_GRID_DEFAULT_CAPACITY: u32 = 1 << 23;
 
 /// Empty sentinel for hash grid keys (synced with shared::constants).
 pub const HASH_GRID_EMPTY_KEY: u32 = 0xFFFF_FFFF;
