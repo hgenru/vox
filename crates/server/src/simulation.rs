@@ -187,17 +187,32 @@ impl GpuSimulation {
             "particle-buffer",
         )?;
 
-        // Grid buffer: must fit both GridCell view and flat f32 view.
-        // GridCell = 48 bytes = 12 * f32, so GRID_CELL_COUNT * sizeof(GridCell)
-        // equals GRID_CELL_COUNT * 12 * sizeof(f32). Same size, no issue.
+        // Grid buffer: used by the dense physics path.
+        // When sparse hash grid is active, we allocate a small placeholder
+        // since the dense passes won't run and this saves ~768MB at 256³.
+        // GridCell = 48 bytes = 12 * f32.
+        let use_sparse = true; // matches use_sparse_grid default
+        let grid_buf_cells = if use_sparse {
+            // Small placeholder — dense passes (clear_grid_sparse, mark_active,
+            // prepare_indirect, grid_update_sparse, P2G, G2P) won't run.
+            64 * 64 * 64_usize
+        } else {
+            GRID_CELL_COUNT as usize
+        };
         let grid_buf_size =
-            (GRID_CELL_COUNT as usize * mem::size_of::<GridCell>()) as vk::DeviceSize;
+            (grid_buf_cells * mem::size_of::<GridCell>()) as vk::DeviceSize;
         let grid_buffer = buffer::create_device_local_buffer(
             ctx,
             grid_buf_size,
             vk::BufferUsageFlags::STORAGE_BUFFER,
             "grid-buffer",
         )?;
+        tracing::info!(
+            "Grid buffer: {} cells ({:.1}MB) [sparse={}]",
+            grid_buf_cells,
+            grid_buf_size as f64 / (1024.0 * 1024.0),
+            use_sparse,
+        );
 
         let voxel_buf_size =
             (GRID_CELL_COUNT as usize * mem::size_of::<glam::UVec4>()) as vk::DeviceSize;
@@ -327,15 +342,27 @@ impl GpuSimulation {
         )?;
 
         // -- Sparse dispatch buffers --
+        // When hash grid is active, mark_buffer and active_cells are unused (dense path only).
+        // Allocate small placeholders to save memory.
+        let sparse_dispatch_cells = if use_sparse {
+            64_usize // minimal placeholder
+        } else {
+            GRID_CELL_COUNT as usize
+        };
+        let sparse_active_cells = if use_sparse {
+            64_usize
+        } else {
+            MAX_ACTIVE_CELLS as usize
+        };
         let mark_buffer = buffer::create_device_local_buffer(
             ctx,
-            (GRID_CELL_COUNT as usize * 4) as vk::DeviceSize,
+            (sparse_dispatch_cells * 4) as vk::DeviceSize,
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             "mark-buffer",
         )?;
         let active_cells_buffer = buffer::create_device_local_buffer(
             ctx,
-            (MAX_ACTIVE_CELLS as usize * 4) as vk::DeviceSize,
+            (sparse_active_cells * 4) as vk::DeviceSize,
             vk::BufferUsageFlags::STORAGE_BUFFER,
             "active-cells-buffer",
         )?;
@@ -742,7 +769,7 @@ impl GpuSimulation {
             p2g_hash_pass,
             g2p_hash_pass,
             grid_update_hash_pass,
-            use_sparse_grid: false,
+            use_sparse_grid: true,
             shader_module,
             descriptor_pool,
             num_particles: 0,
@@ -847,11 +874,23 @@ impl GpuSimulation {
         self.frame_number.set(self.frame_number.get().wrapping_add(1));
     }
 
-    /// Record core physics dispatches: sparse clear, P2G, mark_active,
-    /// prepare_indirect, grid_update_sparse, G2P.
+    /// Record core physics dispatches, choosing between sparse hash grid and
+    /// dense flat grid paths based on `use_sparse_grid`.
     ///
     /// These MUST run every substep for correct simulation.
     fn record_core_physics(&self, cmd: vk::CommandBuffer) {
+        if self.use_sparse_grid {
+            self.record_core_physics_sparse(cmd);
+        } else {
+            self.record_core_physics_dense(cmd);
+        }
+    }
+
+    /// Dense flat-grid physics path: clear_grid_sparse (indirect on active list),
+    /// mark_active, prepare_indirect, grid_update_sparse (indirect), dense P2G/G2P.
+    ///
+    /// This is the original dispatch chain using the flat `grid_buffer`.
+    fn record_core_physics_dense(&self, cmd: vk::CommandBuffer) {
         let num_particles = self.num_particles;
         let grid_size = GRID_SIZE;
         let dt = shared::DT;
@@ -859,8 +898,6 @@ impl GpuSimulation {
         let particle_wg = (num_particles + 63) / 64;
 
         // 1. Clear grid (sparse) — clears only cells that were active last frame.
-        // Uses indirect dispatch from previous frame's active cell list.
-        // On the first frame, indirect buffer is (0,0,0) so this is a no-op.
         unsafe {
             self.device.cmd_bind_pipeline(
                 cmd,
@@ -885,16 +922,12 @@ impl GpuSimulation {
         passes::barrier(cmd, &self.device);
 
         // 2. Reset active_count to 0 AND clear mark_buffer for this frame.
-        // mark_buffer must be zeroed every frame — otherwise mark_active finds
-        // cells already marked from the previous frame, skips adding them to
-        // active_cells, and grid_update_sparse processes 0 cells (#221).
         unsafe {
             self.device
                 .cmd_fill_buffer(cmd, self.active_count_buffer.buffer, 0, 4, 0);
             self.device
                 .cmd_fill_buffer(cmd, self.mark_buffer.buffer, 0, vk::WHOLE_SIZE, 0);
         }
-        // Barrier: TRANSFER_WRITE → SHADER_READ | SHADER_WRITE
         {
             let memory_barrier = vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -1013,6 +1046,110 @@ impl GpuSimulation {
             &self.device,
             cmd,
             &self.g2p_pass,
+            particle_wg,
+            1,
+            1,
+            bytemuck::bytes_of(&g2p_pc),
+        );
+        passes::barrier(cmd, &self.device);
+    }
+
+    /// Sparse hash-grid physics path: clear_hash_grid, p2g_sparse, grid_update_hash,
+    /// g2p_sparse.
+    ///
+    /// Uses a hash table instead of a flat 3D grid buffer. Only occupied cells are
+    /// allocated in the hash table, so memory usage is proportional to particle count
+    /// rather than grid volume. This enables much larger grids (512³+) without
+    /// allocating terabytes of flat buffer.
+    ///
+    /// Dispatch order:
+    /// 1. `clear_hash_grid` — reset all keys to EMPTY sentinel, zero all values
+    /// 2. `p2g_sparse` — scatter particle data into hash grid via atomic insert
+    /// 3. `grid_update_hash` — update physics on all occupied hash grid slots
+    /// 4. `g2p_sparse` — gather grid data back to particles via hash grid lookup
+    fn record_core_physics_sparse(&self, cmd: vk::CommandBuffer) {
+        let num_particles = self.num_particles;
+        let grid_size = GRID_SIZE;
+        let dt = shared::DT;
+        let gravity = shared::GRAVITY;
+        let particle_wg = (num_particles + 63) / 64;
+        let hash_capacity = HASH_GRID_DEFAULT_CAPACITY;
+        let hash_wg = (hash_capacity + 63) / 64;
+        let frame = self.frame_number.get();
+
+        // 1. Clear hash grid — reset keys to EMPTY, zero values
+        let clear_pc = ClearHashGridPushConstants {
+            hash_capacity,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.clear_hash_grid_pass,
+            hash_wg,
+            1,
+            1,
+            bytemuck::bytes_of(&clear_pc),
+        );
+        passes::barrier(cmd, &self.device);
+
+        // 2. P2G sparse (particle dispatch) — scatter into hash grid
+        let p2g_pc = P2gSparsePushConstants {
+            grid_size,
+            dt,
+            num_particles,
+            frame_number: frame,
+            hash_capacity,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.p2g_hash_pass,
+            particle_wg,
+            1,
+            1,
+            bytemuck::bytes_of(&p2g_pc),
+        );
+        passes::barrier(cmd, &self.device);
+
+        // 3. Grid update hash — physics on occupied hash grid slots only
+        let grid_pc = GridUpdateHashPushConstants {
+            grid_size,
+            dt,
+            gravity,
+            hash_capacity,
+        };
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.grid_update_hash_pass,
+            hash_wg,
+            1,
+            1,
+            bytemuck::bytes_of(&grid_pc),
+        );
+        passes::barrier(cmd, &self.device);
+
+        // 4. G2P sparse (particle dispatch) — gather from hash grid
+        let g2p_pc = G2pSparsePushConstants {
+            grid_size,
+            dt,
+            num_particles,
+            num_rules: self.num_phase_rules,
+            frame_number: frame,
+            hash_capacity,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.g2p_hash_pass,
             particle_wg,
             1,
             1,

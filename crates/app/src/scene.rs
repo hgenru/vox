@@ -330,7 +330,8 @@ pub(crate) fn mountain_height(x: f32, z: f32) -> f32 {
 /// Create the initial set of particles for the mountain range scene.
 ///
 /// Features multiple mountain peaks, valleys with water pools, a lava river,
-/// and a cave tunnel through one mountain. Targets 800K-1M particles.
+/// and a cave tunnel through one mountain. With 4M max particles, the terrain
+/// shell is thicker and water pools are deeper for a denser world.
 pub(crate) fn create_mountain_particles() -> Vec<Particle> {
     let mut particles = Vec::new();
     let gs = GRID_SIZE;
@@ -351,8 +352,8 @@ pub(crate) fn create_mountain_particles() -> Vec<Particle> {
         }
     }
 
-    // 2. Terrain shell — thick shell for mountains to look solid
-    let shell = 8_i32;
+    // 2. Terrain shell — thicker shell (16 layers) for dense mountains
+    let shell = 16_i32;
     let gs_f = gs as f32;
     let cx = gs_f * 0.5;
     let cz = gs_f * 0.5;
@@ -395,13 +396,13 @@ pub(crate) fn create_mountain_particles() -> Vec<Particle> {
         }
     }
 
-    // 3. Water pools in valleys — fill low areas between mountains
-    let water_level = (gs_f * 0.15) as i32; // valleys fill up to ~15% of grid height
-    // Only fill water in specific valley regions to control particle count
-    let valley_regions: [(f32, f32, f32); 3] = [
-        (cx + 10.0, cz + 10.0, 40.0),  // valley between peaks 1,2,3
-        (cx - 40.0, cz - 30.0, 25.0),  // small pool near peak1
-        (cx + 50.0, cz - 20.0, 20.0),  // pool near peak5
+    // 3. Water pools in valleys — deeper (3 layers, 8 PPC) for denser world
+    let water_level = (gs_f * 0.18) as i32; // valleys fill up to ~18% of grid height
+    let valley_regions: [(f32, f32, f32); 4] = [
+        (cx + 10.0, cz + 10.0, 45.0),  // valley between peaks 1,2,3 (bigger)
+        (cx - 40.0, cz - 30.0, 30.0),  // pool near peak1 (bigger)
+        (cx + 50.0, cz - 20.0, 25.0),  // pool near peak5 (bigger)
+        (cx - 10.0, cz - 45.0, 20.0),  // new pool near peak7
     ];
     for x in margin..upper {
         for z in margin..upper {
@@ -419,7 +420,7 @@ pub(crate) fn create_mountain_particles() -> Vec<Particle> {
 
             if terrain_h < water_level as f32 {
                 let top = water_level.min(upper as i32);
-                let bottom = (top - 1).max(terrain_h.ceil() as i32);
+                let bottom = (top - 3).max(terrain_h.ceil() as i32); // 3 layers deep
                 for y in bottom..top {
                     spawn_cell(&mut particles, fx - 0.5, y as f32, fz - 0.5,
                         0.125, MAT_WATER, PHASE_LIQUID);
@@ -428,15 +429,14 @@ pub(crate) fn create_mountain_particles() -> Vec<Particle> {
         }
     }
 
-    // 4. Lava river in a valley between peak4 and peak3
-    // River flows roughly from (cx-50, cz+40) toward (cx, cz+55)
+    // 4. Lava river in a valley between peak4 and peak3 — wider
     let lava_segments: [(f32, f32, f32, f32); 4] = [
         (cx - 50.0, cz + 40.0, cx - 35.0, cz + 45.0),
         (cx - 35.0, cz + 45.0, cx - 20.0, cz + 50.0),
         (cx - 20.0, cz + 50.0, cx - 5.0, cz + 53.0),
         (cx - 5.0, cz + 53.0, cx + 10.0, cz + 55.0),
     ];
-    let river_width = 4.0_f32;
+    let river_width = 6.0_f32; // wider river
     for x in margin..upper {
         for z in margin..upper {
             let fx = x as f32 + 0.5;
@@ -535,10 +535,10 @@ mod tests {
             particles.len(),
             shared::MAX_PARTICLES
         );
-        // Should be significantly more than island scene
+        // Dense scene should have >1M particles with thicker shells and deeper pools
         assert!(
-            particles.len() > 600_000,
-            "Mountain scene should have >600K particles, got {}",
+            particles.len() > 1_000_000,
+            "Mountain scene should have >1M particles, got {}",
             particles.len()
         );
     }
