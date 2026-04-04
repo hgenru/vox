@@ -63,6 +63,12 @@ pub(crate) struct App {
     world_is_static: bool,
     /// Number of consecutive frames with no render (for logging).
     frames_skipped: u64,
+    /// Frame counter for FPS calculation, reset every second.
+    fps_frame_count: u32,
+    /// Timer reset every second for FPS calculation.
+    fps_timer: Instant,
+    /// Most recently computed FPS value.
+    current_fps: f32,
 }
 
 impl App {
@@ -164,6 +170,9 @@ impl App {
             prev_target: [0.0; 3],
             world_is_static: false,
             frames_skipped: 0,
+            fps_frame_count: 0,
+            fps_timer: Instant::now(),
+            current_fps: 0.0,
         }
     }
 
@@ -480,6 +489,31 @@ impl ApplicationHandler for App {
                             Err(e) => tracing::error!("Frame error: {}", e),
                         }
                     }
+                }
+
+                // FPS tracking: count frames and update once per second.
+                let frame_time_ms = dt as f64 * 1000.0;
+                self.fps_frame_count += 1;
+                let elapsed = self.fps_timer.elapsed().as_secs_f32();
+                if elapsed >= 1.0 {
+                    self.current_fps = self.fps_frame_count as f32 / elapsed;
+                    let num_particles = self.sim.as_ref().map_or(0, |s| s.num_particles());
+                    tracing::info!(
+                        "FPS: {:.0} | Frame: {:.1}ms | Particles: {}",
+                        self.current_fps,
+                        frame_time_ms,
+                        num_particles,
+                    );
+                    if let Some(window) = &self.window {
+                        window.set_title(&format!(
+                            "VOX | {:.0} FPS | {:.1}ms | {} particles",
+                            self.current_fps,
+                            frame_time_ms,
+                            num_particles,
+                        ));
+                    }
+                    self.fps_frame_count = 0;
+                    self.fps_timer = Instant::now();
                 }
             }
             _ => {}
