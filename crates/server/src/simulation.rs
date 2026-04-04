@@ -207,7 +207,7 @@ impl GpuSimulation {
         // When sparse hash grid is active, we allocate a small placeholder
         // since the dense passes won't run and this saves ~768MB at 256³.
         // GridCell = 48 bytes = 12 * f32.
-        let use_sparse = true; // matches use_sparse_grid default
+        let use_sparse = false; // dense grid needed for correct physics until sparse is debugged
         let grid_buf_cells = if use_sparse {
             // Small placeholder — dense passes (clear_grid_sparse, mark_active,
             // prepare_indirect, grid_update_sparse, P2G, G2P) won't run.
@@ -843,7 +843,7 @@ impl GpuSimulation {
             p2g_hash_pass,
             g2p_hash_pass,
             grid_update_hash_pass,
-            use_sparse_grid: true,
+            use_sparse_grid: false,
             shader_module,
             descriptor_pool,
             num_particles: 0,
