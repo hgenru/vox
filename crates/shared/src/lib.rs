@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod constants;
+pub mod far_field;
 pub mod indirect;
 pub mod material;
 pub mod particle;
@@ -20,6 +21,7 @@ pub mod svd;
 
 pub use config::*;
 pub use constants::*;
+pub use far_field::*;
 pub use indirect::IndirectDispatchArgs;
 pub use material::*;
 pub use particle::*;

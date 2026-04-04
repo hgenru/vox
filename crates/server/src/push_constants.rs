@@ -331,6 +331,26 @@ pub struct DirtyTilesPushConstants {
     pub target: glam::Vec4,
 }
 
+/// Push constants for the far-field render shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct FarFieldPushConstants {
+    /// Render target width in pixels.
+    pub width: u32,
+    /// Render target height in pixels.
+    pub height: u32,
+    /// Number of valid entries in the chunk table.
+    pub chunk_count: u32,
+    /// Grid dimension of the sim domain (cells per axis).
+    pub grid_size: u32,
+    /// Camera eye position (xyz) + padding (w).
+    pub eye: glam::Vec4,
+    /// Camera target position (xyz) + padding (w).
+    pub target: glam::Vec4,
+    /// World-space origin of the sim domain (xyz) + padding (w).
+    pub sim_origin: glam::Vec4,
+}
+
 /// Maximum number of material slots in the toolbar.
 pub const TOOLBAR_MAX_MATERIALS: usize = 8;
 

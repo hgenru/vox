@@ -31,6 +31,7 @@ pub mod prefix_sum;
 pub mod prepare_indirect;
 pub mod react;
 pub mod render;
+pub mod render_far_field;
 pub mod scatter_particles;
 pub mod toolbar_overlay;
 pub mod update_sleep;
