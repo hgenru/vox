@@ -83,4 +83,25 @@ impl GpuSimulation {
     pub fn any_active_buffer(&self) -> &GpuBuffer {
         &self.any_active_buffer
     }
+
+    /// Read the out-of-bounds flag from the GPU.
+    ///
+    /// Returns `true` if any particle was clamped back into the domain during
+    /// the last `step_physics()`. The CPU can use this to trigger chunk
+    /// streaming when particles approach the simulation boundary.
+    ///
+    /// This is a synchronous readback operation; call after `step_physics()`
+    /// completes and the GPU is idle.
+    pub fn readback_oob_flag(&self, ctx: &VulkanContext) -> Result<bool> {
+        let data = buffer::readback::<u32>(ctx, &self.oob_flag_buffer, 1)?;
+        Ok(data[0] != 0)
+    }
+
+    /// Returns a reference to the out-of-bounds flag buffer.
+    ///
+    /// Contains a single `u32`: 0 = all particles within margin, non-zero = at
+    /// least one particle hit the domain boundary during G2P.
+    pub fn oob_flag_buffer(&self) -> &GpuBuffer {
+        &self.oob_flag_buffer
+    }
 }

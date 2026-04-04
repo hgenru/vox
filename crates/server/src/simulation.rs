@@ -54,6 +54,9 @@ pub struct GpuSimulation {
     // Any-active flag (1 u32, set by update_sleep if any brick is active)
     pub(crate) any_active_buffer: GpuBuffer,
 
+    // Out-of-bounds flag (1 u32, set by G2P if any particle escapes domain)
+    pub(crate) oob_flag_buffer: GpuBuffer,
+
     // Counting sort buffers (particle-by-brick sorting)
     brick_count_buffer: GpuBuffer,
     brick_offset_buffer: GpuBuffer,
@@ -341,6 +344,16 @@ impl GpuSimulation {
             "any-active-buffer",
         )?;
 
+        // -- OOB flag buffer (1 u32, set by G2P if any particle escapes domain) --
+        let oob_flag_buffer = buffer::create_device_local_buffer(
+            ctx,
+            16 as vk::DeviceSize, // min 16 for alignment
+            vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST
+                | vk::BufferUsageFlags::TRANSFER_SRC,
+            "oob-flag-buffer",
+        )?;
+
         // -- Sparse dispatch buffers --
         // When hash grid is active, mark_buffer and active_cells are unused (dense path only).
         // Allocate small placeholders to save memory.
@@ -446,7 +459,7 @@ impl GpuSimulation {
         // All passes combined: dirty tiles + hash grid + counting sort + super bricks
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 180,
+            descriptor_count: 184,
         }];
         let descriptor_pool =
             pipeline::create_descriptor_pool(ctx, &pool_sizes, 30, "sim-descriptor-pool")?;
@@ -487,7 +500,7 @@ impl GpuSimulation {
             ctx,
             shader_module,
             c"compute::g2p::g2p",
-            &[&particle_buffer, &grid_buffer, &voxel_buffer, &reaction_buffer, &sleep_state_buffer],
+            &[&particle_buffer, &grid_buffer, &voxel_buffer, &reaction_buffer, &sleep_state_buffer, &oob_flag_buffer],
             mem::size_of::<G2pPushConstants>() as u32,
             descriptor_pool,
             "g2p",
@@ -672,7 +685,7 @@ impl GpuSimulation {
         let g2p_hash_pass = passes::create_pass(
             ctx, shader_module,
             c"compute::g2p_sparse::g2p_sparse",
-            &[&particle_buffer, &hash_grid_keys_buffer, &hash_grid_values_buffer, &voxel_buffer, &reaction_buffer, &sleep_state_buffer],
+            &[&particle_buffer, &hash_grid_keys_buffer, &hash_grid_values_buffer, &voxel_buffer, &reaction_buffer, &sleep_state_buffer, &oob_flag_buffer],
             mem::size_of::<G2pSparsePushConstants>() as u32,
             descriptor_pool, "g2p-hash",
         )?;
@@ -729,6 +742,7 @@ impl GpuSimulation {
             brick_occupancy_buffer,
             super_brick_occupancy_buffer,
             any_active_buffer,
+            oob_flag_buffer,
             brick_count_buffer,
             brick_offset_buffer,
             write_offset_buffer,
@@ -794,6 +808,21 @@ impl GpuSimulation {
         self.num_particles = particles.len() as u32;
         buffer::upload(ctx, particles, &self.particle_buffer)?;
         tracing::info!("Uploaded {} particles to GPU", self.num_particles);
+        Ok(())
+    }
+
+    /// Upload a new set of particles, replacing the current set.
+    ///
+    /// Unlike [`init_particles`](Self::init_particles), this preserves sleep state
+    /// for bricks that haven't changed occupancy. Sleep state will naturally
+    /// adapt via the activity tracking system.
+    pub fn reload_particles(&mut self, ctx: &VulkanContext, particles: &[Particle]) -> Result<()> {
+        if particles.len() > MAX_PARTICLES as usize {
+            return Err(ServerError::TooManyParticles(particles.len()));
+        }
+        self.num_particles = particles.len() as u32;
+        buffer::upload(ctx, particles, &self.particle_buffer)?;
+        tracing::info!("Reloaded {} particles to GPU", self.num_particles);
         Ok(())
     }
 
@@ -879,6 +908,28 @@ impl GpuSimulation {
     ///
     /// These MUST run every substep for correct simulation.
     fn record_core_physics(&self, cmd: vk::CommandBuffer) {
+        // Clear OOB flag before physics (G2P will set it if any particle escapes)
+        unsafe {
+            self.device
+                .cmd_fill_buffer(cmd, self.oob_flag_buffer.buffer, 0, 4, 0);
+        }
+        {
+            let memory_barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[memory_barrier],
+                    &[],
+                    &[],
+                );
+            }
+        }
+
         if self.use_sparse_grid {
             self.record_core_physics_sparse(cmd);
         } else {
@@ -1976,6 +2027,10 @@ impl GpuSimulation {
             &mut self.any_active_buffer,
             GpuBuffer { buffer: vk::Buffer::null(), allocation: None, size: 0 },
         );
+        let oob_flag_buf = std::mem::replace(
+            &mut self.oob_flag_buffer,
+            GpuBuffer { buffer: vk::Buffer::null(), allocation: None, size: 0 },
+        );
         let prev_render_output_buf = std::mem::replace(
             &mut self.prev_render_output_buffer,
             GpuBuffer {
@@ -2072,6 +2127,7 @@ impl GpuSimulation {
         buffer::destroy_buffer(ctx, brick_occupancy_buf);
         buffer::destroy_buffer(ctx, super_brick_occupancy_buf);
         buffer::destroy_buffer(ctx, any_active_buf);
+        buffer::destroy_buffer(ctx, oob_flag_buf);
         buffer::destroy_buffer(ctx, prev_render_output_buf);
         buffer::destroy_buffer(ctx, dirty_tile_buf);
         buffer::destroy_buffer(ctx, brick_count_buf);
