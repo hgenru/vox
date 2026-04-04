@@ -826,9 +826,13 @@ impl GpuSimulation {
 
         self.record_voxelize(cmd);
 
-        // Particle sorting (improves cache coherence): every 500ms
+        // Particle sorting (improves cache coherence + warp uniformity): every 500ms
         let sort_elapsed = now.duration_since(self.last_sort_time.get());
         if sort_elapsed.as_millis() >= 500 {
+            tracing::debug!(
+                num_particles = self.num_particles,
+                "Sorting particles by brick (copy sorted->main)"
+            );
             self.sort_particles(cmd);
             self.last_sort_time.set(now);
         }
@@ -1233,12 +1237,14 @@ impl GpuSimulation {
     /// Record the counting sort dispatch chain into the given command buffer.
     ///
     /// Sorts particles by brick_id so that all particles in the same brick are
-    /// contiguous in the sorted_particle_buffer. Also builds a compact list of
-    /// active (non-sleeping, non-empty) bricks.
+    /// contiguous in the sorted_particle_buffer, then copies sorted particles
+    /// back to the main particle_buffer. This improves cache coherence for
+    /// P2G/G2P and ensures sleeping particles form complete warps that can
+    /// early-exit without divergence.
+    ///
+    /// Also builds a compact list of active (non-sleeping, non-empty) bricks.
     ///
     /// The command buffer must already be in the recording state.
-    /// This method does NOT integrate with step_physics yet -- call it separately
-    /// for testing. Integration with the main dispatch chain comes later.
     ///
     /// Dispatch order:
     /// 1. `vkCmdFillBuffer` -- clear brick_count to 0
@@ -1373,6 +1379,44 @@ impl GpuSimulation {
             bytemuck::bytes_of(&scatter_pc),
         );
         passes::barrier(cmd, &self.device);
+
+        // 10. Copy sorted particles back to main particle buffer.
+        // This gives P2G/G2P brick-sorted particles, improving cache coherence
+        // and warp uniformity: sleeping particles form complete warps that skip
+        // immediately instead of causing divergence within mixed warps.
+        {
+            let copy_size = (num_particles as u64) * (mem::size_of::<Particle>() as u64);
+            let region = vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: copy_size,
+            };
+            unsafe {
+                self.device.cmd_copy_buffer(
+                    cmd,
+                    self.sorted_particle_buffer.buffer,
+                    self.particle_buffer.buffer,
+                    &[region],
+                );
+            }
+        }
+        // Barrier: TRANSFER_WRITE -> COMPUTE_SHADER (P2G/G2P will read particle_buffer)
+        {
+            let memory_barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[memory_barrier],
+                    &[],
+                    &[],
+                );
+            }
+        }
 
         // 11. Clear active_brick_count to 0
         unsafe {
