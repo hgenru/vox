@@ -27,7 +27,6 @@ use crate::types::Particle;
 use spirv_std::glam::{UVec3, UVec4};
 use spirv_std::spirv;
 
-use super::p2g::should_skip_brick;
 
 /// Number of u32 values per voxel cell.
 const U32S_PER_VOXEL: u32 = 4;
@@ -230,10 +229,10 @@ pub fn clear_voxels(
     if id.x >= grid_size || id.y >= grid_size || id.z >= grid_size {
         return;
     }
-    // Skip clearing voxels in frozen bricks — their data is still valid
-    if is_frozen_brick(id.x, id.y, id.z, sleep_state) {
-        return;
-    }
+    // NOTE: Do NOT skip clearing based on sleep state. When a brick wakes up,
+    // stale voxel data from the previous frame causes visible rectangular artifacts
+    // at brick boundaries. The clear pass is cheap — always clear all cells.
+    let _sleep_state = sleep_state;
     let cell_idx = (id.z * grid_size * grid_size + id.y * grid_size + id.x) as usize;
     let base = cell_idx * U32S_PER_VOXEL as usize;
     clear_voxel_cell(voxels, base);
@@ -261,10 +260,8 @@ pub fn voxelize(
     if id.x >= push.num_particles {
         return;
     }
-    // Copy position to locals (trap #21) and check sleep state before writing
-    let pos_mass = particles[idx].pos_mass;
-    if should_skip_brick(pos_mass.x, pos_mass.y, pos_mass.z, sleep_state, push.frame_number) {
-        return;
-    }
+    // NOTE: Do NOT skip voxelization based on sleep state. Skipping causes
+    // stale voxel data and visible brick boundary artifacts. Voxelize is cheap.
+    let _sleep_state = sleep_state;
     write_voxel(&particles[idx], voxels, push.grid_size);
 }

@@ -206,11 +206,13 @@ pub fn p2g_sparse(
         return;
     }
 
-    // Copy position to locals (trap #21) and check graduated sleep
-    let pos_mass = particles[idx].pos_mass;
-    if p2g::should_skip_brick(pos_mass.x, pos_mass.y, pos_mass.z, sleep_state, push.frame_number) {
-        return;
-    }
+    // NOTE: In sparse mode, the hash grid itself is the sparsity optimization.
+    // Sleep-based brick skipping is NOT used here because record_core_physics_sparse()
+    // skips mark_active/compute_activity passes, so sleep_state is never updated.
+    // Using should_skip_brick() here causes a deadlock: all bricks sleep -> P2G skips
+    // all particles -> grid empty -> G2P reads nothing -> particles freeze.
+    // The sleep_state binding is kept to avoid descriptor set layout changes.
+    let _sleep_state = sleep_state;
 
     scatter_particle_sparse(
         &particles[idx],

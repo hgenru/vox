@@ -276,11 +276,10 @@ pub fn g2p_sparse(
         return;
     }
 
-    // Copy position to locals (trap #21) and check graduated sleep
-    let pos_mass = particles[idx].pos_mass;
-    if g2p::should_skip_brick(pos_mass.x, pos_mass.y, pos_mass.z, sleep_state, push.frame_number) {
-        return;
-    }
+    // NOTE: In sparse mode, the hash grid itself is the sparsity optimization.
+    // Sleep-based brick skipping is NOT used here — see p2g_sparse.rs for details.
+    // The sleep_state binding is kept to avoid descriptor set layout changes.
+    let _sleep_state = sleep_state;
 
     gather_particle_sparse(
         &mut particles[idx],
