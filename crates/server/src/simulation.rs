@@ -2009,6 +2009,53 @@ impl GpuSimulation {
             1,
             bytemuck::bytes_of(&push),
         );
+
+        // Wake all bricks after explosion so the impulse propagates through
+        // P2G/G2P on the next frame. Otherwise sleeping bricks ignore the
+        // new particle velocities.
+        self.wake_all_bricks(cmd);
+    }
+
+    /// Wake all bricks by resetting sleep_state to tick_period=1 (awake).
+    /// Call this after sudden events (explosions, spawning) that need
+    /// the physics system to immediately process affected particles.
+    pub fn wake_all_bricks(&self, cmd: vk::CommandBuffer) {
+        // Fill sleep_state with 1 (awake, tick every frame) and sleep_counter with 0
+        let ones: u32 = 0x01010101; // every byte = 1, but we want u32=1 per entry
+        // Actually fill_buffer fills with a u32 pattern. We want each u32 = 1.
+        // vkCmdFillBuffer fills with a u32 pattern, so data=1 gives us 1 per u32.
+        unsafe {
+            self.device.cmd_fill_buffer(
+                cmd,
+                self.sleep_state_buffer.buffer,
+                0,
+                (TOTAL_BRICKS as u64) * 4,
+                1, // each u32 = 1 (awake)
+            );
+            self.device.cmd_fill_buffer(
+                cmd,
+                self.sleep_counter_buffer.buffer,
+                0,
+                (TOTAL_BRICKS as u64) * 4,
+                0, // reset counter to 0
+            );
+        }
+        let _ = ones; // silence unused warning
+        // Transfer → compute barrier so next P2G/G2P sees the new sleep state
+        let memory_barrier = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ);
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[memory_barrier],
+                &[],
+                &[],
+            );
+        }
     }
 
     /// Insert a final barrier to ensure all render output writes are complete
