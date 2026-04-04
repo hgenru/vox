@@ -3389,6 +3389,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "world"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "bytemuck",
+ "glam",
+ "shared",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
