@@ -64,7 +64,7 @@ pub fn apply_explosion(particle: &mut Particle, center: Vec4, radius: f32, stren
     // Solid particles near blast center: convert to liquid (debris)
     // so they start moving via normal physics
     if particle.ids.y == 0 {
-        let damage_add = (strength * falloff * 0.1) as u32;
+        let damage_add = (strength * falloff * 0.5) as u32;
         let new_damage = particle.ids.z + damage_add;
         particle.ids.z = if new_damage > 255 { 255 } else { new_damage };
 
