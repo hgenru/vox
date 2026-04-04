@@ -54,6 +54,15 @@ pub(crate) struct App {
     pending_explosion: Option<[f32; 3]>,
     material_db: Option<MaterialDatabase>,
     last_react_time: Instant,
+    /// Previous camera eye position for change detection.
+    prev_eye: [f32; 3],
+    /// Previous camera target position for change detection.
+    prev_target: [f32; 3],
+    /// Cached result from `readback_any_active()` — one frame late but safe
+    /// to query outside command buffer recording.
+    world_is_static: bool,
+    /// Number of consecutive frames with no render (for logging).
+    frames_skipped: u64,
 }
 
 impl App {
@@ -151,6 +160,10 @@ impl App {
             pending_explosion: None,
             material_db,
             last_react_time: Instant::now(),
+            prev_eye: [0.0; 3],
+            prev_target: [0.0; 3],
+            world_is_static: false,
+            frames_skipped: 0,
         }
     }
 
@@ -412,6 +425,18 @@ impl ApplicationHandler for App {
                 let toolbar_pc = self.toolbar_push_constants();
                 let explosion = self.pending_explosion.take();
                 let run_react = self.should_run_react(now);
+
+                // Detect camera movement since last frame.
+                let eye_arr = [eye.x, eye.y, eye.z];
+                let target_arr = [target.x, target.y, target.z];
+                let camera_moved = self.prev_eye != eye_arr || self.prev_target != target_arr;
+                self.prev_eye = eye_arr;
+                self.prev_target = target_arr;
+
+                // Explosions and spawning always dirty the world.
+                let has_explosion = explosion.is_some();
+                let need_render = camera_moved || !self.world_is_static || has_explosion;
+
                 if let (Some(renderer), Some(ctx), Some(sim)) = (self.renderer.as_mut(), self.ctx.as_ref(), self.sim.as_ref()) {
                     if let Err(e) = ctx.execute_one_shot(|cmd| {
                         for _ in 0..substeps { sim.step_physics_with_time(cmd, now); }
@@ -421,15 +446,39 @@ impl ApplicationHandler for App {
                         if let Some(center) = explosion {
                             sim.apply_explosion(cmd, center, EXPLOSION_RADIUS, EXPLOSION_STRENGTH);
                         }
-                        sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, [eye.x, eye.y, eye.z], [target.x, target.y, target.z]);
-                        sim.render_toolbar(cmd, &toolbar_pc);
-                        sim.finalize_render(cmd);
+                        if need_render {
+                            sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye_arr, target_arr);
+                            sim.render_toolbar(cmd, &toolbar_pc);
+                            sim.finalize_render(cmd);
+                        }
                     }) {
                         tracing::error!("Simulation/render error: {}", e);
                     }
-                    match renderer.draw_frame_with_buffer(ctx, sim.render_output_buffer(), RENDER_WIDTH, RENDER_HEIGHT) {
-                        Ok(_) => {}
-                        Err(e) => tracing::error!("Frame error: {}", e),
+
+                    // Readback the any_active flag AFTER GPU work completes.
+                    // This is one frame late but avoids synchronization issues
+                    // during command buffer recording.
+                    if let Ok(any_active) = sim.readback_any_active(ctx) {
+                        self.world_is_static = !any_active;
+                    }
+
+                    if need_render {
+                        if self.frames_skipped > 0 {
+                            tracing::debug!("Render resumed after {} skipped frames", self.frames_skipped);
+                            self.frames_skipped = 0;
+                        }
+                        match renderer.draw_frame_with_buffer(ctx, sim.render_output_buffer(), RENDER_WIDTH, RENDER_HEIGHT) {
+                            Ok(_) => {}
+                            Err(e) => tracing::error!("Frame error: {}", e),
+                        }
+                    } else {
+                        self.frames_skipped += 1;
+                        // Still present the previous frame to the swapchain so
+                        // the window stays responsive.
+                        match renderer.draw_frame_with_buffer(ctx, sim.render_output_buffer(), RENDER_WIDTH, RENDER_HEIGHT) {
+                            Ok(_) => {}
+                            Err(e) => tracing::error!("Frame error: {}", e),
+                        }
                     }
                 }
             }
