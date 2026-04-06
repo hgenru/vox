@@ -1522,6 +1522,202 @@ impl CaSimulation {
     }
 
     /// Current frame number.
+    /// Get a mutable reference to the PB-MPM zone manager, if available.
+    pub fn pbmpm_mut(&mut self) -> Option<&mut PbmpmZoneManager> {
+        self.pbmpm.as_mut()
+    }
+
+    /// Synchronize PB-MPM particle positions back into chunk voxels for rendering.
+    ///
+    /// For each active PB-MPM zone, downloads particle data, clears the zone's
+    /// AABB in affected chunks (setting voxels to air), then writes each particle
+    /// as a voxel at its current world position. This is a CPU-side POC approach
+    /// that enables PB-MPM debris to be visible through the existing CA renderer.
+    ///
+    /// Must be called AFTER `execute_one_shot` completes (not inside command buffer
+    /// recording), because it performs GPU readback.
+    pub fn sync_pbmpm_to_chunks(&mut self, ctx: &VulkanContext) -> anyhow::Result<()> {
+        let pbmpm = match self.pbmpm.as_ref() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
+        // Collect active zone info
+        let mut active_zones: Vec<(usize, [i32; 3], u32, u32)> = Vec::new();
+        for i in 0..4 {
+            let zone = pbmpm.zone(i);
+            if zone.state != crate::pbmpm_zones::ZoneState::Active {
+                continue;
+            }
+            if zone.particle_count == 0 {
+                continue;
+            }
+            active_zones.push((i, zone.world_origin, zone.grid_size, zone.particle_count));
+        }
+
+        if active_zones.is_empty() {
+            return Ok(());
+        }
+
+        for &(zone_idx, world_origin, grid_size, _particle_count) in &active_zones {
+            // Step 1: Clear zone AABB in chunk voxels (set to air)
+            self.clear_zone_in_chunks(ctx, world_origin, grid_size)?;
+
+            // Step 2: Download particles and write back to chunks
+            let particle_data = pbmpm.download_particles(ctx, zone_idx)?;
+            let floats_per_particle = 24;
+            let num_particles = particle_data.len() / floats_per_particle;
+
+            // Group particles by chunk coordinate
+            let mut chunk_particles: HashMap<[i32; 3], Vec<(usize, usize, usize, u16, u8)>> =
+                HashMap::new();
+
+            for p in 0..num_particles {
+                let base = p * floats_per_particle;
+                let px = particle_data[base];
+                let py = particle_data[base + 1];
+                let pz = particle_data[base + 2];
+
+                // Skip non-finite or out-of-bounds particles
+                if !px.is_finite() || !py.is_finite() || !pz.is_finite() {
+                    continue;
+                }
+
+                // World position = zone origin + particle position (zone-local coords)
+                let wx = world_origin[0] as f32 + px;
+                let wy = world_origin[1] as f32 + py;
+                let wz = world_origin[2] as f32 + pz;
+
+                // Chunk coordinate
+                let chunk_coord = [
+                    (wx / 32.0).floor() as i32,
+                    (wy / 32.0).floor() as i32,
+                    (wz / 32.0).floor() as i32,
+                ];
+
+                // Local position within chunk
+                let lx = ((wx - chunk_coord[0] as f32 * 32.0) as usize).min(31);
+                let ly = ((wy - chunk_coord[1] as f32 * 32.0) as usize).min(31);
+                let lz = ((wz - chunk_coord[2] as f32 * 32.0) as usize).min(31);
+
+                // Material ID from ids field (stored as f32::from_bits(mat_id))
+                let mat_bits = particle_data[base + 20]; // ids.x
+                let mat_id = f32::to_bits(mat_bits) as u16;
+
+                // Temperature from vel_temp.w
+                let temp = particle_data[base + 7].clamp(0.0, 255.0) as u8;
+
+                chunk_particles
+                    .entry(chunk_coord)
+                    .or_default()
+                    .push((lx, ly, lz, mat_id, temp));
+            }
+
+            // Write particles into chunk voxels
+            for (chunk_coord, particles) in &chunk_particles {
+                let slot_id = match self.loaded_chunks.get(chunk_coord) {
+                    Some(&s) => s,
+                    None => continue, // chunk not loaded, skip
+                };
+
+                let mut voxel_data = self.chunk_pool.download_chunk_voxels(ctx, slot_id)?;
+
+                for &(lx, ly, lz, mat_id, temp) in particles {
+                    let idx = lz * 32 * 32 + ly * 32 + lx;
+                    if idx < CA_CHUNK_VOXELS {
+                        voxel_data[idx] = Voxel::new(mat_id, temp, 0, 0, 0).0;
+                    }
+                }
+
+                self.chunk_pool.upload_chunk_voxels(
+                    ctx,
+                    vk::CommandBuffer::null(),
+                    slot_id,
+                    &voxel_data,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Clear voxels in the zone AABB (set to air) across all affected chunks.
+    ///
+    /// This removes old particle positions before writing new ones, preventing
+    /// ghost voxels from the previous frame.
+    fn clear_zone_in_chunks(
+        &self,
+        ctx: &VulkanContext,
+        world_origin: [i32; 3],
+        grid_size: u32,
+    ) -> anyhow::Result<()> {
+        // Determine which chunks are affected by the zone AABB
+        let min_chunk = [
+            (world_origin[0] as f32 / 32.0).floor() as i32,
+            (world_origin[1] as f32 / 32.0).floor() as i32,
+            (world_origin[2] as f32 / 32.0).floor() as i32,
+        ];
+        let max_world = [
+            world_origin[0] + grid_size as i32,
+            world_origin[1] + grid_size as i32,
+            world_origin[2] + grid_size as i32,
+        ];
+        let max_chunk = [
+            ((max_world[0] - 1) as f32 / 32.0).floor() as i32,
+            ((max_world[1] - 1) as f32 / 32.0).floor() as i32,
+            ((max_world[2] - 1) as f32 / 32.0).floor() as i32,
+        ];
+
+        for cx in min_chunk[0]..=max_chunk[0] {
+            for cy in min_chunk[1]..=max_chunk[1] {
+                for cz in min_chunk[2]..=max_chunk[2] {
+                    let coord = [cx, cy, cz];
+                    let slot_id = match self.loaded_chunks.get(&coord) {
+                        Some(&s) => s,
+                        None => continue,
+                    };
+
+                    let mut voxel_data =
+                        self.chunk_pool.download_chunk_voxels(ctx, slot_id)?;
+
+                    // Clear voxels that fall within the zone AABB
+                    let chunk_world = [cx * 32, cy * 32, cz * 32];
+                    for lz in 0..32i32 {
+                        for ly in 0..32i32 {
+                            for lx in 0..32i32 {
+                                let wx = chunk_world[0] + lx;
+                                let wy = chunk_world[1] + ly;
+                                let wz = chunk_world[2] + lz;
+
+                                if wx >= world_origin[0]
+                                    && wx < world_origin[0] + grid_size as i32
+                                    && wy >= world_origin[1]
+                                    && wy < world_origin[1] + grid_size as i32
+                                    && wz >= world_origin[2]
+                                    && wz < world_origin[2] + grid_size as i32
+                                {
+                                    let idx =
+                                        lz as usize * 32 * 32 + ly as usize * 32 + lx as usize;
+                                    voxel_data[idx] = 0; // air
+                                }
+                            }
+                        }
+                    }
+
+                    self.chunk_pool.upload_chunk_voxels(
+                        ctx,
+                        vk::CommandBuffer::null(),
+                        slot_id,
+                        &voxel_data,
+                    )?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Returns the current frame number.
     pub fn frame_number(&self) -> u32 {
         self.frame_number
     }
@@ -2617,6 +2813,129 @@ mod tests {
         .expect("Empty step failed");
 
         assert_eq!(sim.frame_number(), 1);
+        sim.destroy(&ctx);
+    }
+
+    #[test]
+    fn test_ca_reaction_water_lava() {
+        init_tracing();
+        let ctx = VulkanContext::new().expect("VulkanContext");
+        let mats = default_ca_materials();
+        let reactions = default_ca_reactions();
+        let mut sim =
+            CaSimulation::new(&ctx, &mats, &reactions, 64).expect("CaSimulation");
+
+        // Load a chunk with water at (5,5,5) and lava at (6,5,5) — adjacent in X
+        let mut data = vec![0u32; CA_CHUNK_VOXELS];
+        // Water = material 3, Lava = material 4
+        // Place them at even-aligned 2x2x2 block boundaries so they share a Margolus block.
+        // Block at (4,4,4): covers (4,4,4) to (5,5,5)
+        // Place water at (4,4,4) and lava at (5,4,4) — same Margolus block for even offset
+        let water_idx = 4 * 32 * 32 + 4 * 32 + 4; // (4,4,4)
+        let lava_idx = 4 * 32 * 32 + 4 * 32 + 5; // (5,4,4)
+        data[water_idx] = Voxel::new(3, 128, 0, 0, 0).0; // water, mid temp
+        data[lava_idx] = Voxel::new(4, 200, 0, 0, 0).0; // lava, hot
+
+        sim.load_chunk(&ctx, [0, 0, 0], &data, [-1; 6]).unwrap();
+
+        // Verify initial state
+        let pre = sim.download_chunk(&ctx, [0, 0, 0]).unwrap();
+        assert_eq!(Voxel(pre[water_idx]).material_id(), 3, "should be water");
+        assert_eq!(Voxel(pre[lava_idx]).material_id(), 4, "should be lava");
+
+        // Run 10 steps — reaction should occur within a few steps
+        for _ in 0..10 {
+            ctx.execute_one_shot(|cmd| {
+                sim.step(cmd, &ctx);
+            })
+            .unwrap();
+        }
+
+        let post = sim.download_chunk(&ctx, [0, 0, 0]).unwrap();
+        let mat_at_water = Voxel(post[water_idx]).material_id();
+        let mat_at_lava = Voxel(post[lava_idx]).material_id();
+        println!(
+            "After 10 steps: water_pos=mat{}, lava_pos=mat{}",
+            mat_at_water, mat_at_lava
+        );
+
+        // At least one of the two positions should have changed material
+        // (reaction: water(3)+lava(4) -> stone(1)+steam(5))
+        let changed = mat_at_water != 3 || mat_at_lava != 4;
+        assert!(
+            changed,
+            "Water+lava reaction should have occurred, but materials unchanged: ({}, {})",
+            mat_at_water, mat_at_lava
+        );
+
+        // Check that at least one product (stone=1 or steam=5) exists nearby
+        let has_stone = post.iter().any(|&v| Voxel(v).material_id() == 1);
+        let has_steam = post.iter().any(|&v| Voxel(v).material_id() == 5);
+        assert!(
+            has_stone || has_steam,
+            "Should find stone or steam after water+lava reaction"
+        );
+
+        sim.destroy(&ctx);
+    }
+
+    #[test]
+    fn test_sync_pbmpm_to_chunks() {
+        init_tracing();
+        let ctx = VulkanContext::new().expect("VulkanContext");
+        let mats = default_ca_materials();
+        let reactions = default_ca_reactions();
+        let mut sim =
+            CaSimulation::new(&ctx, &mats, &reactions, 64).expect("CaSimulation");
+
+        // Load a chunk with some stone voxels
+        let mut data = vec![0u32; CA_CHUNK_VOXELS];
+        // Fill bottom layer with stone
+        for z in 0..32u32 {
+            for x in 0..32u32 {
+                for y in 0..16u32 {
+                    let idx = (z * 32 * 32 + y * 32 + x) as usize;
+                    data[idx] = Voxel::new(1, 128, 0, 0, 0).0;
+                }
+            }
+        }
+        sim.load_chunk(&ctx, [0, 0, 0], &data, [-1; 6]).unwrap();
+
+        // Activate a physics zone at the center of the chunk
+        let trigger = crate::pbmpm_zones::ActivationTrigger {
+            center: [16.0, 16.0, 16.0],
+            radius: 8.0,
+            impulse: 10.0,
+        };
+        let zone_result = sim.activate_physics_zone(&ctx, trigger);
+        assert!(zone_result.is_ok(), "activate_physics_zone should succeed");
+        let zone_idx = zone_result.unwrap();
+        assert!(zone_idx.is_some(), "should get a zone index");
+
+        // Run one PB-MPM step
+        ctx.execute_one_shot(|cmd| {
+            sim.step(cmd, &ctx);
+        })
+        .unwrap();
+
+        // Sync PB-MPM particles back to chunks
+        let sync_result = sim.sync_pbmpm_to_chunks(&ctx);
+        assert!(sync_result.is_ok(), "sync should succeed: {:?}", sync_result.err());
+
+        // Download and verify: the chunk should have at least some non-air voxels
+        // written by particle write-back (the zone spawned particles from stone)
+        let post = sim.download_chunk(&ctx, [0, 0, 0]).unwrap();
+        let non_air_count = post.iter().filter(|&&v| !Voxel(v).is_air()).count();
+        println!("After sync: {} non-air voxels in chunk", non_air_count);
+
+        // We expect some non-air voxels (particles from the explosion debris)
+        // The exact count depends on how many particles survived one PB-MPM step
+        // and wrote back into chunk [0,0,0]
+        assert!(
+            non_air_count > 0,
+            "Should have non-air voxels after PB-MPM sync"
+        );
+
         sim.destroy(&ctx);
     }
 }

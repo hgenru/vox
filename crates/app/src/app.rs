@@ -711,6 +711,10 @@ impl ApplicationHandler for App {
                                 }) {
                                     tracing::error!("CA simulation/render error: {}", e);
                                 }
+                                // Sync PB-MPM particles back to chunk voxels for rendering
+                                if let Err(e) = ca_sim.sync_pbmpm_to_chunks(ctx) {
+                                    tracing::warn!("PB-MPM sync error: {}", e);
+                                }
                             } else {
                                 // No physics tick this frame, just render
                                 if let Err(e) = ctx.execute_one_shot(|cmd| {
