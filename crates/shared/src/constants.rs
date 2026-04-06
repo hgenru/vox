@@ -102,6 +102,38 @@ pub const ACTIVITY_VELOCITY_THRESHOLD_SQ: f32 = 0.01;
 /// At 60 Hz physics, 30 frames = 0.5 seconds of calm before sleeping.
 pub const SLEEP_THRESHOLD: u32 = 30;
 
+// === Simulation 2.0: CA Substrate ===
+
+/// Chunk size in voxels per axis for the CA substrate.
+pub const CA_CHUNK_SIZE: usize = 32;
+
+/// Total number of voxels per CA chunk (32^3).
+pub const CA_CHUNK_VOXELS: usize = CA_CHUNK_SIZE * CA_CHUNK_SIZE * CA_CHUNK_SIZE; // 32768
+
+/// Size of a CA chunk's voxel data in bytes (32768 * 4 = 128 KB).
+pub const CA_CHUNK_BYTES: usize = CA_CHUNK_VOXELS * 4; // 131072
+
+/// Number of u32s in the dirty bitmask for one CA chunk (32768 / 32 = 1024).
+pub const CA_CHUNK_DIRTY_BITMASK_U32S: usize = CA_CHUNK_VOXELS / 32; // 1024
+
+/// Size of a CA chunk's dirty bitmask in bytes (1024 * 4 = 4 KB).
+pub const CA_CHUNK_DIRTY_BITMASK_BYTES: usize = CA_CHUNK_DIRTY_BITMASK_U32S * 4; // 4096
+
+/// Total bytes per CA chunk slot (voxels + dirty bitmask = 132 KB).
+pub const CA_SLOT_BYTES: usize = CA_CHUNK_BYTES + CA_CHUNK_DIRTY_BITMASK_BYTES; // 135168
+
+/// Maximum number of loaded CA chunks.
+pub const CA_MAX_CHUNKS: usize = 2048;
+
+/// Maximum number of material types in the CA system.
+pub const CA_MAX_MATERIALS: usize = 1024;
+
+/// Maximum number of chemical reactions in the CA system.
+pub const CA_MAX_REACTIONS: usize = 256;
+
+/// Default ambient temperature for unloaded neighbor chunks (game units).
+pub const CA_AMBIENT_TEMP: u8 = 128;
+
 #[cfg(test)]
 mod tests {
     use super::*;
