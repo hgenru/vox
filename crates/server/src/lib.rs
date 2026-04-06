@@ -9,6 +9,7 @@
 //! All shaders are compiled to a single SPIR-V module at build time via
 //! `spirv-builder` in `build.rs`.
 
+pub mod ca_simulation;
 mod passes;
 pub mod push_constants;
 mod readback;
