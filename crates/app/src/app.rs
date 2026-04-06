@@ -13,6 +13,7 @@ use content::MaterialDatabase;
 use glam::Vec3;
 use gpu_core::VulkanContext;
 use server::{GpuSimulation, ToolbarPushConstants, TOOLBAR_MAX_MATERIALS};
+use server::ca_simulation::{CaSimulation, CA_RENDER_GRID_SIZE};
 use shared::{GRID_SIZE, PHASE_LIQUID, Particle, RENDER_HEIGHT, RENDER_WIDTH};
 use winit::{
     application::ApplicationHandler,
@@ -77,6 +78,10 @@ pub(crate) struct App {
     world: Option<WorldManager>,
     /// Current chunk coordinate the camera is in.
     current_chunk: ChunkCoord,
+    /// If true, use CaSimulation (sim2) instead of GpuSimulation.
+    use_ca_sim: bool,
+    /// CaSimulation instance (when `--sim2` is used).
+    ca_sim: Option<CaSimulation>,
 }
 
 impl App {
@@ -94,6 +99,7 @@ impl App {
         model_path: Option<&str>,
         model_pos: Option<(f32, f32, f32)>,
         use_world: bool,
+        use_ca_sim: bool,
     ) -> Self {
         // Try loading materials from RON file, fall back to hardcoded defaults
         let material_db = match content::load_material_database("assets/materials.ron") {
@@ -237,6 +243,8 @@ impl App {
             current_fps: 0.0,
             world: world_mgr,
             current_chunk: start_chunk,
+            use_ca_sim,
+            ca_sim: None,
         }
     }
 
@@ -385,25 +393,54 @@ impl ApplicationHandler for App {
             Ok(r) => r,
             Err(e) => { tracing::error!("Failed to create Renderer: {}", e); event_loop.exit(); return; }
         };
-        let mut sim = match if let Some(db) = &self.material_db {
-            let materials = db.material_params();
-            let (transitions, count) = db.phase_transition_rules();
-            GpuSimulation::new_with_materials(&ctx, &materials, &transitions, count)
+        if self.use_ca_sim {
+            // Create CaSimulation (sim2)
+            let ca_mats = server::ca_simulation::default_ca_materials();
+            let ca_reactions = server::ca_simulation::default_ca_reactions();
+            let mut ca_sim = match CaSimulation::new(&ctx, &ca_mats, &ca_reactions, 64) {
+                Ok(s) => s,
+                Err(e) => { tracing::error!("Failed to create CaSimulation: {}", e); event_loop.exit(); return; }
+            };
+
+            // Generate and load test scene
+            let scene = server::ca_simulation::generate_test_scene();
+            tracing::info!("Loading {} CA chunks for test scene", scene.len());
+            for (coord, voxel_data) in &scene {
+                if let Err(e) = ca_sim.load_chunk(&ctx, *coord, voxel_data, [-1; 6]) {
+                    tracing::error!("Failed to load chunk {:?}: {}", coord, e);
+                }
+            }
+            tracing::info!("CaSimulation initialized with {} chunks", ca_sim.loaded_count());
+
+            // Place camera to look at the center of the test scene
+            let gs = CA_RENDER_GRID_SIZE as f32;
+            self.player = PlayerController::new(Camera::look_at(
+                Vec3::new(gs * 0.75, gs * 0.4, gs * 0.75),
+                Vec3::new(gs * 0.5, gs * 0.3, gs * 0.5),
+            ));
+
+            self.ca_sim = Some(ca_sim);
         } else {
-            GpuSimulation::new(&ctx)
-        } {
-            Ok(s) => s,
-            Err(e) => { tracing::error!("Failed to create GpuSimulation: {}", e); event_loop.exit(); return; }
-        };
-        if let Err(e) = sim.init_particles(&ctx, &self.particles) {
-            tracing::error!("Failed to upload particles: {}", e); event_loop.exit(); return;
+            let mut sim = match if let Some(db) = &self.material_db {
+                let materials = db.material_params();
+                let (transitions, count) = db.phase_transition_rules();
+                GpuSimulation::new_with_materials(&ctx, &materials, &transitions, count)
+            } else {
+                GpuSimulation::new(&ctx)
+            } {
+                Ok(s) => s,
+                Err(e) => { tracing::error!("Failed to create GpuSimulation: {}", e); event_loop.exit(); return; }
+            };
+            if let Err(e) = sim.init_particles(&ctx, &self.particles) {
+                tracing::error!("Failed to upload particles: {}", e); event_loop.exit(); return;
+            }
+            tracing::info!("GpuSimulation initialized with {} particles", self.particles.len());
+            self.sim = Some(sim);
         }
-        tracing::info!("GpuSimulation initialized with {} particles", self.particles.len());
 
         self.window = Some(window);
         self.ctx = Some(ctx);
         self.renderer = Some(renderer);
-        self.sim = Some(sim);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
@@ -411,6 +448,7 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => {
                 if let Some(ctx) = self.ctx.as_ref() {
                     if let Some(sim) = self.sim.as_mut() { sim.destroy(ctx); }
+                    if let Some(ca_sim) = self.ca_sim.take() { ca_sim.destroy(ctx); }
                     if let Some(renderer) = self.renderer.as_mut() { renderer.destroy(ctx); }
                 }
                 event_loop.exit();
@@ -510,48 +548,62 @@ impl ApplicationHandler for App {
                 let has_explosion = explosion.is_some();
                 let need_render = camera_moved || !self.world_is_static || has_explosion;
 
-                if let (Some(renderer), Some(ctx), Some(sim)) = (self.renderer.as_mut(), self.ctx.as_ref(), self.sim.as_ref()) {
-                    if let Err(e) = ctx.execute_one_shot(|cmd| {
-                        for _ in 0..substeps { sim.step_physics_with_time(cmd, now); }
-                        if run_react {
-                            sim.step_react(cmd);
+                if let (Some(renderer), Some(ctx)) = (self.renderer.as_mut(), self.ctx.as_ref()) {
+                    // --- CA simulation path (--sim2) ---
+                    if let Some(ref mut ca_sim) = self.ca_sim {
+                        if let Err(e) = ctx.execute_one_shot(|cmd| {
+                            for _ in 0..substeps { ca_sim.step(cmd, ctx); }
+                            ca_sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye_arr, target_arr);
+                            ca_sim.finalize_render(cmd);
+                        }) {
+                            tracing::error!("CA simulation/render error: {}", e);
                         }
-                        if let Some(center) = explosion {
-                            sim.apply_explosion(cmd, center, EXPLOSION_RADIUS, EXPLOSION_STRENGTH);
+                        match renderer.draw_frame_with_buffer(ctx, ca_sim.render_output_buffer(), RENDER_WIDTH, RENDER_HEIGHT) {
+                            Ok(_) => {}
+                            Err(e) => tracing::error!("Frame error: {}", e),
                         }
+                    }
+                    // --- Standard MPM simulation path ---
+                    else if let Some(ref sim) = self.sim {
+                        if let Err(e) = ctx.execute_one_shot(|cmd| {
+                            for _ in 0..substeps { sim.step_physics_with_time(cmd, now); }
+                            if run_react {
+                                sim.step_react(cmd);
+                            }
+                            if let Some(center) = explosion {
+                                sim.apply_explosion(cmd, center, EXPLOSION_RADIUS, EXPLOSION_STRENGTH);
+                            }
+                            if need_render {
+                                sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye_arr, target_arr);
+                                sim.render_toolbar(cmd, &toolbar_pc);
+                                sim.finalize_render(cmd);
+                            }
+                        }) {
+                            tracing::error!("Simulation/render error: {}", e);
+                        }
+
+                        // Readback the any_active flag AFTER GPU work completes.
+                        if now.duration_since(self.last_oob_check).as_millis() >= 250 {
+                            if let Ok(any_active) = sim.readback_any_active(ctx) {
+                                self.world_is_static = !any_active;
+                            }
+                        }
+
                         if need_render {
-                            sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye_arr, target_arr);
-                            sim.render_toolbar(cmd, &toolbar_pc);
-                            sim.finalize_render(cmd);
-                        }
-                    }) {
-                        tracing::error!("Simulation/render error: {}", e);
-                    }
-
-                    // Readback the any_active flag AFTER GPU work completes.
-                    // This forces a GPU flush so we throttle it to 250ms.
-                    if now.duration_since(self.last_oob_check).as_millis() >= 250 {
-                        if let Ok(any_active) = sim.readback_any_active(ctx) {
-                            self.world_is_static = !any_active;
-                        }
-                    }
-
-                    if need_render {
-                        if self.frames_skipped > 0 {
-                            tracing::debug!("Render resumed after {} skipped frames", self.frames_skipped);
-                            self.frames_skipped = 0;
-                        }
-                        match renderer.draw_frame_with_buffer(ctx, sim.render_output_buffer(), RENDER_WIDTH, RENDER_HEIGHT) {
-                            Ok(_) => {}
-                            Err(e) => tracing::error!("Frame error: {}", e),
-                        }
-                    } else {
-                        self.frames_skipped += 1;
-                        // Still present the previous frame to the swapchain so
-                        // the window stays responsive.
-                        match renderer.draw_frame_with_buffer(ctx, sim.render_output_buffer(), RENDER_WIDTH, RENDER_HEIGHT) {
-                            Ok(_) => {}
-                            Err(e) => tracing::error!("Frame error: {}", e),
+                            if self.frames_skipped > 0 {
+                                tracing::debug!("Render resumed after {} skipped frames", self.frames_skipped);
+                                self.frames_skipped = 0;
+                            }
+                            match renderer.draw_frame_with_buffer(ctx, sim.render_output_buffer(), RENDER_WIDTH, RENDER_HEIGHT) {
+                                Ok(_) => {}
+                                Err(e) => tracing::error!("Frame error: {}", e),
+                            }
+                        } else {
+                            self.frames_skipped += 1;
+                            match renderer.draw_frame_with_buffer(ctx, sim.render_output_buffer(), RENDER_WIDTH, RENDER_HEIGHT) {
+                                Ok(_) => {}
+                                Err(e) => tracing::error!("Frame error: {}", e),
+                            }
                         }
                     }
                 }
@@ -648,20 +700,21 @@ impl ApplicationHandler for App {
                 let elapsed = self.fps_timer.elapsed().as_secs_f32();
                 if elapsed >= 1.0 {
                     self.current_fps = self.fps_frame_count as f32 / elapsed;
-                    let num_particles = self.sim.as_ref().map_or(0, |s| s.num_particles());
-                    tracing::info!(
-                        "FPS: {:.0} | Frame: {:.1}ms | Particles: {}",
-                        self.current_fps,
-                        frame_time_ms,
-                        num_particles,
-                    );
+                    let info_str = if let Some(ref ca) = self.ca_sim {
+                        format!(
+                            "FPS: {:.0} | Frame: {:.1}ms | CA chunks: {}",
+                            self.current_fps, frame_time_ms, ca.loaded_count(),
+                        )
+                    } else {
+                        let num_particles = self.sim.as_ref().map_or(0, |s| s.num_particles());
+                        format!(
+                            "FPS: {:.0} | Frame: {:.1}ms | Particles: {}",
+                            self.current_fps, frame_time_ms, num_particles,
+                        )
+                    };
+                    tracing::info!("{}", info_str);
                     if let Some(window) = &self.window {
-                        window.set_title(&format!(
-                            "VOX | {:.0} FPS | {:.1}ms | {} particles",
-                            self.current_fps,
-                            frame_time_ms,
-                            num_particles,
-                        ));
+                        window.set_title(&format!("VOX | {}", info_str));
                     }
                     self.fps_frame_count = 0;
                     self.fps_timer = Instant::now();

@@ -12,6 +12,7 @@
 pub mod ca_compact;
 pub mod ca_margolus;
 pub mod ca_thermal;
+pub mod ca_to_render;
 pub mod clear_grid;
 pub mod clear_grid_sparse;
 pub mod clear_hash_grid;
