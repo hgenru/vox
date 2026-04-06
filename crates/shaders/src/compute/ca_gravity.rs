@@ -130,10 +130,10 @@ fn process_column(
     x: u32,
     z: u32,
 ) {
-    // 4 passes to allow voxels to fall up to 4 cells per dispatch
+    // 1 pass per dispatch: 1 voxel/tick, 60 voxels/sec at 60Hz physics
     let mut pass: u32 = 0;
     loop {
-        if pass >= 4 {
+        if pass >= 1 {
             break;
         }
         let did_swap = sweep_column(chunk_pool, materials, slot_id, x, z);

@@ -692,15 +692,34 @@ impl ApplicationHandler for App {
                             }
                         }
 
-                        if let Err(e) = ctx.execute_one_shot(|cmd| {
-                            // CA needs many substeps: Margolus moves 1 voxel/step.
-                            // At 128³ scale, need ~30 steps/frame to see movement.
-                            let ca_substeps = substeps.max(2); // 2 steps × 4 passes = 8 voxels/frame
-                            for _ in 0..ca_substeps { ca_sim.step(cmd, ctx); }
-                            ca_sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye_arr, target_arr);
-                            ca_sim.finalize_render(cmd);
-                        }) {
-                            tracing::error!("CA simulation/render error: {}", e);
+                        // Fixed timestep: 60 physics ticks/sec regardless of FPS
+                        {
+                            static ACCUM: std::sync::Mutex<f64> = std::sync::Mutex::new(0.0);
+                            let mut accum = ACCUM.lock().unwrap();
+                            *accum += dt as f64;
+                            let tick_dt = 1.0 / 60.0; // 60 Hz physics
+                            let mut ticks = 0u32;
+                            while *accum >= tick_dt && ticks < 4 { // max 4 ticks/frame to prevent spiral
+                                *accum -= tick_dt;
+                                ticks += 1;
+                            }
+                            if ticks > 0 {
+                                if let Err(e) = ctx.execute_one_shot(|cmd| {
+                                    for _ in 0..ticks { ca_sim.step(cmd, ctx); }
+                                    ca_sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye_arr, target_arr);
+                                    ca_sim.finalize_render(cmd);
+                                }) {
+                                    tracing::error!("CA simulation/render error: {}", e);
+                                }
+                            } else {
+                                // No physics tick this frame, just render
+                                if let Err(e) = ctx.execute_one_shot(|cmd| {
+                                    ca_sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye_arr, target_arr);
+                                    ca_sim.finalize_render(cmd);
+                                }) {
+                                    tracing::error!("CA render error: {}", e);
+                                }
+                            }
                         }
 
                         match renderer.draw_frame_with_buffer(ctx, ca_sim.render_output_buffer(), RENDER_WIDTH, RENDER_HEIGHT) {
