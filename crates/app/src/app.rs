@@ -702,7 +702,7 @@ impl ApplicationHandler for App {
                             tracing::error!("CA simulation/render error: {}", e);
                         }
                         // Debug physics: readback floating water cube chunk every second
-                        // removed debug readback
+                        // debug readback removed
 
                         match renderer.draw_frame_with_buffer(ctx, ca_sim.render_output_buffer(), RENDER_WIDTH, RENDER_HEIGHT) {
                             Ok(_) => {}

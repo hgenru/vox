@@ -2083,6 +2083,109 @@ mod tests {
     }
 
     #[test]
+    fn test_ca_sand_falls_64_chunks() {
+        init_tracing();
+        let ctx = VulkanContext::new().expect("VulkanContext");
+        let mats = default_ca_materials();
+        let reactions = default_ca_reactions();
+        let mut sim = CaSimulation::new(&ctx, &mats, &reactions, 64).expect("CaSimulation");
+
+        // Load exactly 64 chunks (4x4x4) — same as app
+        for cx in 0..4i32 { for cy in 0..4i32 { for cz in 0..4i32 {
+            let data = vec![0u32; CA_CHUNK_VOXELS];
+            sim.load_chunk(&ctx, [cx, cy, cz], &data, [-1; 6]).unwrap();
+        }}}
+        assert_eq!(sim.loaded_count(), 64);
+
+        // Put sand in chunk (0,0,0) at y=10
+        let coord = [0i32, 0, 0];
+        let mut data = sim.download_chunk(&ctx, coord).unwrap();
+        for z in 10..20u32 { for x in 10..20u32 {
+            data[(z * 32 * 32 + 10 * 32 + x) as usize] = Voxel::new(2, 128, 0, 0, 0).0;
+        }}
+        sim.upload_chunk_voxels(&ctx, coord, &data).unwrap();
+
+        let pre = sim.download_chunk(&ctx, coord).unwrap();
+        let sand_pre: usize = pre.iter().filter(|&&v| Voxel(v).material_id() == 2).count();
+        println!("64-CHUNK BEFORE: sand={}", sand_pre);
+
+        for step_i in 0..3u32 {
+            ctx.execute_one_shot(|cmd| { sim.step(cmd, &ctx); }).unwrap();
+            let ch = sim.download_chunk(&ctx, coord).unwrap();
+            let sand: usize = ch.iter().filter(|&&v| Voxel(v).material_id() == 2).count();
+            let mut min_y = 32u32;
+            for y in 0..32u32 { for z in 0..32u32 { for x in 0..32u32 {
+                if Voxel(ch[(z*32*32+y*32+x) as usize]).material_id() == 2 && y < min_y { min_y = y; }
+            }}}
+            let dirty = sim.debug_readback_dirty_list(&ctx, 8).unwrap();
+            println!("64-CHUNK Step {}: sand={}, min_y={}, dirty_count={}, dispatch_x={}",
+                step_i, sand, min_y, dirty[0], dirty[1]);
+        }
+
+        // Also test BATCHED steps (10 in one cmd buffer, like app)
+        let mut data2 = sim.download_chunk(&ctx, coord).unwrap();
+        // Reset: put fresh sand at y=20
+        for i in 0..data2.len() { data2[i] = 0; } // clear
+        for z in 10..20u32 { for x in 10..20u32 {
+            data2[(z * 32 * 32 + 20 * 32 + x) as usize] = Voxel::new(2, 128, 0, 0, 0).0;
+        }}
+        sim.upload_chunk_voxels(&ctx, coord, &data2).unwrap();
+
+        ctx.execute_one_shot(|cmd| {
+            for _ in 0..10 { sim.step(cmd, &ctx); }
+        }).unwrap();
+
+        let post = sim.download_chunk(&ctx, coord).unwrap();
+        let sand: usize = post.iter().filter(|&&v| Voxel(v).material_id() == 2).count();
+        let mut min_y = 32u32;
+        for y in 0..32u32 { for z in 0..32u32 { for x in 0..32u32 {
+            if Voxel(post[(z*32*32+y*32+x) as usize]).material_id() == 2 && y < min_y { min_y = y; }
+        }}}
+        println!("BATCHED 10 steps in 1 cmd: sand={}, min_y={}", sand, min_y);
+
+        sim.destroy(&ctx);
+    }
+
+    #[test]
+    fn test_ca_terrain_scene_physics() {
+        init_tracing();
+        let ctx = VulkanContext::new().expect("VulkanContext");
+        let mats = default_ca_materials();
+        let reactions = default_ca_reactions();
+        let mut sim = CaSimulation::new(&ctx, &mats, &reactions, 64).expect("CaSimulation");
+
+        // Load the ACTUAL terrain scene (same as app)
+        let scene = generate_test_scene();
+        for (coord, data) in &scene {
+            sim.load_chunk(&ctx, *coord, data, [-1; 6]).unwrap();
+        }
+        assert_eq!(sim.loaded_count(), 64);
+
+        // Count sand in chunk (0,1,0) before physics
+        let coord = [0i32, 1, 0];
+        let pre = sim.download_chunk(&ctx, coord).unwrap();
+        let sand_pre: usize = pre.iter().filter(|&&v| Voxel(v).material_id() == 2).count();
+        // Check specific voxel at the bottom of floating sand: local y=18 (wy=50)
+        let v_at_50 = Voxel(pre[(20*32*32 + 18*32 + 25) as usize]);
+        let v_at_49 = Voxel(pre[(20*32*32 + 17*32 + 25) as usize]);
+        println!("TERRAIN PRE: sand={}, voxel(25,50,20)=mat{}, voxel(25,49,20)=mat{}",
+            sand_pre, v_at_50.material_id(), v_at_49.material_id());
+
+        // Run 5 steps individually
+        for step_i in 0..5u32 {
+            ctx.execute_one_shot(|cmd| { sim.step(cmd, &ctx); }).unwrap();
+            let ch = sim.download_chunk(&ctx, coord).unwrap();
+            let sand: usize = ch.iter().filter(|&&v| Voxel(v).material_id() == 2).count();
+            let v50 = Voxel(ch[(20*32*32 + 18*32 + 25) as usize]);
+            let v49 = Voxel(ch[(20*32*32 + 17*32 + 25) as usize]);
+            println!("TERRAIN Step {}: sand={}, (25,50,20)=mat{}, (25,49,20)=mat{}",
+                step_i, sand, v50.material_id(), v49.material_id());
+        }
+
+        sim.destroy(&ctx);
+    }
+
+    #[test]
     fn test_ca_physics_test_scene() {
         init_tracing();
         let ctx = VulkanContext::new().expect("VulkanContext");
