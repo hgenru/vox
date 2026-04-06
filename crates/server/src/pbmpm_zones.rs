@@ -27,7 +27,8 @@ const SHADER_BYTES: &[u8] = include_bytes!(env!("SHADERS_SPV_PATH"));
 const MAX_ZONES: usize = 4;
 
 /// PB-MPM iterations per frame (PB-MPM iterates the full loop for stability).
-const PBMPM_ITERATIONS: u32 = 2;
+/// 4 iterations provides better constraint convergence and more stable physics.
+const PBMPM_ITERATIONS: u32 = 4;
 
 /// Frames below velocity threshold before sleeping a zone.
 const SLEEP_FRAMES: u32 = 30;
@@ -378,15 +379,32 @@ impl PbmpmZoneManager {
                     let py = y as f32 + 0.5;
                     let pz = z as f32 + 0.5;
 
-                    // Velocity: radial impulse from trigger center
+                    // Velocity: radial impulse from trigger center, scaled by distance
                     let dx = px - (trigger.center[0] - zone.world_origin[0] as f32);
                     let dy = py - (trigger.center[1] - zone.world_origin[1] as f32);
                     let dz = pz - (trigger.center[2] - zone.world_origin[2] as f32);
                     let dist = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
-                    let impulse_scale = trigger.impulse / dist;
-                    let vx = dx * impulse_scale;
-                    let vy = dy * impulse_scale;
-                    let vz = dz * impulse_scale;
+
+                    // Inverse-square falloff: stronger near center, weaker far away
+                    // Normalize direction, then scale by impulse / (1 + dist^2)
+                    let inv_dist = 1.0 / dist;
+                    let dir_x = dx * inv_dist;
+                    let dir_y = dy * inv_dist;
+                    let dir_z = dz * inv_dist;
+                    let falloff = trigger.impulse / (1.0 + dist * dist * 0.1);
+
+                    // Hash-based per-particle speed variation (+-20%)
+                    let hash = ((x.wrapping_mul(73856093))
+                        ^ (y.wrapping_mul(19349663))
+                        ^ (z.wrapping_mul(83492791)))
+                        & 0xFF;
+                    let variation = 0.8 + 0.4 * (hash as f32 / 255.0);
+
+                    let speed = falloff * variation;
+                    let vx = dir_x * speed;
+                    // Upward bias: add 50% of impulse magnitude as vertical boost
+                    let vy = dir_y * speed + trigger.impulse * 0.5;
+                    let vz = dir_z * speed;
 
                     let mass = 1.0_f32;
                     let temp = v.temperature() as f32;
@@ -396,12 +414,12 @@ impl PbmpmZoneManager {
                     particles.extend_from_slice(&[px, py, pz, mass]);
                     // vel_temp
                     particles.extend_from_slice(&[vx, vy, vz, temp]);
-                    // F_col0: identity
-                    particles.extend_from_slice(&[1.0, 0.0, 0.0, 0.0]);
-                    // F_col1: identity
-                    particles.extend_from_slice(&[0.0, 1.0, 0.0, 0.0]);
-                    // F_col2: identity
-                    particles.extend_from_slice(&[0.0, 0.0, 1.0, 0.0]);
+                    // C_col0: zero (APIC affine momentum matrix, no initial rotation)
+                    particles.extend_from_slice(&[0.0, 0.0, 0.0, 0.0]);
+                    // C_col1: zero
+                    particles.extend_from_slice(&[0.0, 0.0, 0.0, 0.0]);
+                    // C_col2: zero
+                    particles.extend_from_slice(&[0.0, 0.0, 0.0, 0.0]);
                     // ids: material_id, phase, flags, padding (as u32 bits)
                     let mat_id = v.material_id() as u32;
                     let phase = 1u32; // treat as liquid for PB-MPM
@@ -836,12 +854,12 @@ mod tests {
                 p.extend_from_slice(&[x, y, z, 1.0]);
                 // vel_temp
                 p.extend_from_slice(&[0.0, 0.0, 0.0, 128.0]);
-                // F_col0 (identity)
-                p.extend_from_slice(&[1.0, 0.0, 0.0, 0.0]);
-                // F_col1 (identity)
-                p.extend_from_slice(&[0.0, 1.0, 0.0, 0.0]);
-                // F_col2 (identity)
-                p.extend_from_slice(&[0.0, 0.0, 1.0, 0.0]);
+                // C_col0 (APIC affine momentum, zero initially)
+                p.extend_from_slice(&[0.0, 0.0, 0.0, 0.0]);
+                // C_col1 (zero)
+                p.extend_from_slice(&[0.0, 0.0, 0.0, 0.0]);
+                // C_col2 (zero)
+                p.extend_from_slice(&[0.0, 0.0, 0.0, 0.0]);
                 // ids
                 p.extend_from_slice(&[
                     f32::from_bits(1), // material_id = 1
