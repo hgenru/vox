@@ -8,16 +8,20 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod chunk_gpu;
 pub mod config;
 pub mod constants;
 pub mod far_field;
 pub mod indirect;
 pub mod material;
+pub mod material_ca;
 pub mod particle;
 pub mod phase;
 pub mod physics;
 pub mod reaction;
+pub mod reaction_ca;
 pub mod svd;
+pub mod voxel;
 
 pub use config::*;
 pub use constants::*;
