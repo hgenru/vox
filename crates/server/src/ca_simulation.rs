@@ -1018,6 +1018,24 @@ impl CaSimulation {
         Ok(self.chunk_pool.download_chunk_voxels(ctx, slot_id)?)
     }
 
+    /// Re-upload modified voxel data for a loaded chunk.
+    ///
+    /// `voxel_data` must contain exactly `CA_CHUNK_VOXELS` u32 values.
+    pub fn upload_chunk_voxels(
+        &self,
+        ctx: &VulkanContext,
+        coord: [i32; 3],
+        voxel_data: &[u32],
+    ) -> anyhow::Result<()> {
+        let slot_id = *self
+            .loaded_chunks
+            .get(&coord)
+            .ok_or_else(|| anyhow::anyhow!("chunk not loaded at {:?}", coord))?;
+        self.chunk_pool
+            .upload_chunk_voxels(ctx, vk::CommandBuffer::null(), slot_id, voxel_data)?;
+        Ok(())
+    }
+
     /// Number of loaded chunks.
     pub fn loaded_count(&self) -> usize {
         self.loaded_chunks.len()
@@ -1197,46 +1215,132 @@ pub fn ca_materials_to_render_params(
 // Test scene generator
 // ---------------------------------------------------------------------------
 
-/// Generate a simple test scene: stone floor + sand + water pool + lava.
+/// Simple hash-based noise for terrain generation.
+fn noise2d(x: usize, z: usize) -> f32 {
+    let n = (x as u32).wrapping_mul(374761393)
+        .wrapping_add((z as u32).wrapping_mul(668265263));
+    let n = n ^ (n >> 13);
+    let n = n.wrapping_mul(n.wrapping_mul(n.wrapping_mul(60493)).wrapping_add(19990303));
+    let n = n ^ (n >> 16);
+    (n as f32) / (u32::MAX as f32)
+}
+
+/// Smoothed noise with interpolation for terrain.
+fn smooth_noise(x: f32, z: f32) -> f32 {
+    let ix = x.floor() as usize;
+    let iz = z.floor() as usize;
+    let fx = x - x.floor();
+    let fz = z - z.floor();
+
+    // Smoothstep
+    let fx = fx * fx * (3.0 - 2.0 * fx);
+    let fz = fz * fz * (3.0 - 2.0 * fz);
+
+    let n00 = noise2d(ix, iz);
+    let n10 = noise2d(ix + 1, iz);
+    let n01 = noise2d(ix, iz + 1);
+    let n11 = noise2d(ix + 1, iz + 1);
+
+    let nx0 = n00 + (n10 - n00) * fx;
+    let nx1 = n01 + (n11 - n01) * fx;
+    nx0 + (nx1 - nx0) * fz
+}
+
+/// Multi-octave terrain height at world (x, z).
+fn terrain_height(wx: usize, wz: usize) -> usize {
+    let x = wx as f32;
+    let z = wz as f32;
+
+    // Base terrain: rolling hills
+    let mut h = 0.0f32;
+    h += smooth_noise(x * 0.02, z * 0.02) * 40.0;   // large hills
+    h += smooth_noise(x * 0.05, z * 0.05) * 15.0;   // medium detail
+    h += smooth_noise(x * 0.1, z * 0.1) * 5.0;      // small bumps
+
+    // Add a volcano/mountain in the center
+    let cx = 64.0f32;
+    let cz = 64.0f32;
+    let dist_to_center = ((x - cx) * (x - cx) + (z - cz) * (z - cz)).sqrt();
+    if dist_to_center < 30.0 {
+        let volcano = (1.0 - dist_to_center / 30.0) * 50.0;
+        h += volcano;
+    }
+    // Volcano crater at the very top
+    if dist_to_center < 8.0 {
+        h -= (1.0 - dist_to_center / 8.0) * 15.0;
+    }
+
+    let base_height = 20;
+    (h as usize).saturating_add(base_height).min(120)
+}
+
+/// Generate a voxel at world position (wx, wy, wz) given terrain height.
+fn generate_voxel(wx: usize, wy: usize, wz: usize, height: usize) -> Voxel {
+    let water_level = 35;
+
+    let cx = 64.0f32;
+    let cz = 64.0f32;
+    let dist_to_center = (((wx as f32) - cx).powi(2) + ((wz as f32) - cz).powi(2)).sqrt();
+
+    if wy > height && wy > water_level {
+        return Voxel::air();
+    }
+
+    // Lava in volcano crater
+    if dist_to_center < 6.0 && wy > height.saturating_sub(3) && wy <= height {
+        return Voxel::new(4, 250, 0, 0, 0);
+    }
+
+    // Water fills below water level
+    if wy > height && wy <= water_level {
+        return Voxel::new(3, 128, 0, 10, 0);
+    }
+
+    // Surface layer
+    if wy == height {
+        if wy < water_level + 2 && wy >= water_level.saturating_sub(1) {
+            // Beach sand near water
+            return Voxel::new(2, 128, 0, 15, 0);
+        }
+        // Normal surface: stone with bonds
+        return Voxel::new(1, 128, 0b111111, 15, 0);
+    }
+
+    // Below surface
+    if wy < height {
+        return Voxel::new(1, 128, 0b111111, 15, 0);
+    }
+
+    Voxel::air()
+}
+
+/// Generate a terrain-based test scene filling the full 128x128x128 render grid.
 ///
-/// Returns chunks as `(coord, voxel_data)` pairs for a 4x2x4 grid
-/// (128x64x128 voxels).
+/// Features: rolling hills, a volcano with lava crater in the center,
+/// water filling low areas, sand beaches near the waterline.
+/// Returns chunks as `(coord, voxel_data)` pairs for a 4x4x4 grid
+/// (128x128x128 voxels).
 pub fn generate_test_scene() -> Vec<([i32; 3], Vec<u32>)> {
     let mut chunks = Vec::new();
 
+    // Generate 4x4x4 = 64 chunks covering 128x128x128 voxels
     for cx in 0..4i32 {
-        for cy in 0..2i32 {
+        for cy in 0..4i32 {
             for cz in 0..4i32 {
                 let mut data = vec![0u32; CA_CHUNK_VOXELS];
-                let base_y = cy as usize * 32;
 
                 for lz in 0..32usize {
-                    for ly in 0..32usize {
-                        for lx in 0..32usize {
-                            let wy = base_y + ly;
+                    for lx in 0..32usize {
+                        let wx = cx as usize * 32 + lx;
+                        let wz = cz as usize * 32 + lz;
+
+                        let height = terrain_height(wx, wz);
+
+                        for ly in 0..32usize {
+                            let wy = cy as usize * 32 + ly;
                             let idx = lz * 32 * 32 + ly * 32 + lx;
 
-                            let voxel = if wy < 4 {
-                                // Stone floor
-                                Voxel::new(1, 128, 0b111111, 15, 0)
-                            } else if wy < 8 && cx == 1 && cz == 1 {
-                                // Sand pile in center
-                                Voxel::new(2, 128, 0, 15, 0)
-                            } else if wy >= 4 && wy < 10 && cx == 2 && cz == 2 {
-                                // Water pool
-                                Voxel::new(3, 128, 0, 10, 0)
-                            } else if wy == 8
-                                && cx == 0
-                                && cz == 0
-                                && lx < 4
-                                && lz < 4
-                            {
-                                // Small lava source
-                                Voxel::new(4, 250, 0, 0, 0)
-                            } else {
-                                Voxel::air()
-                            };
-
+                            let voxel = generate_voxel(wx, wy, wz, height);
                             data[idx] = voxel.0;
                         }
                     }
@@ -1308,17 +1412,17 @@ mod tests {
     #[test]
     fn test_generate_test_scene() {
         let scene = generate_test_scene();
-        // 4x2x4 = 32 chunks
-        assert_eq!(scene.len(), 32);
+        // 4x4x4 = 64 chunks
+        assert_eq!(scene.len(), 64);
         // Each chunk has CA_CHUNK_VOXELS voxels
         for (_, data) in &scene {
             assert_eq!(data.len(), CA_CHUNK_VOXELS);
         }
-        // First chunk (0,0,0) should have stone floor at y<4
+        // First chunk (0,0,0) should have stone underground
         let (_, data) = &scene[0]; // (0,0,0)
         // Voxel at (0, 0, 0) -> index 0*32*32 + 0*32 + 0 = 0
         let v = Voxel(data[0]);
-        assert_eq!(v.material_id(), 1); // stone
+        assert_eq!(v.material_id(), 1); // stone (underground)
     }
 
     // --- GPU tests (require VulkanContext, run with --test-threads=1) ---

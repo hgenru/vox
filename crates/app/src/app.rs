@@ -13,8 +13,11 @@ use content::MaterialDatabase;
 use glam::Vec3;
 use gpu_core::VulkanContext;
 use server::{GpuSimulation, ToolbarPushConstants, TOOLBAR_MAX_MATERIALS};
-use server::ca_simulation::{CaSimulation, CA_RENDER_GRID_SIZE};
+use server::ca_simulation::CaSimulation;
+use server::pbmpm_zones::ActivationTrigger;
 use shared::{GRID_SIZE, PHASE_LIQUID, Particle, RENDER_HEIGHT, RENDER_WIDTH};
+use shared::constants::CA_CHUNK_SIZE;
+use shared::voxel::Voxel;
 use winit::{
     application::ApplicationHandler,
     event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent},
@@ -24,7 +27,7 @@ use winit::{
 };
 
 use crate::scene::{
-    MaterialSlot, create_island_particles, create_mountain_particles,
+    MaterialSlot, ca_material_palette, create_island_particles, create_mountain_particles,
     generate_heightmap, generate_mountain_heightmap, material_palette, spawn_cell,
 };
 
@@ -229,7 +232,7 @@ impl App {
             last_frame_time: Instant::now(),
             substeps,
             selected_material: 0,
-            palette: material_palette(),
+            palette: if use_ca_sim { ca_material_palette() } else { material_palette() },
             pending_explosion: None,
             material_db,
             last_react_time: Instant::now(),
@@ -360,6 +363,122 @@ impl App {
         }
     }
 
+    /// Spawn a cluster of CA voxels of the selected material in front of the camera.
+    fn ca_spawn_voxels(&mut self) {
+        let ca_mat_id = self.ca_palette_material_id();
+        let temp: u8 = if ca_mat_id == 4 { 250 } else { 128 };
+        let center = self.player.camera.eye() + self.player.camera.forward() * SPAWN_DISTANCE;
+
+        let (ctx, ca_sim) = match (self.ctx.as_ref(), self.ca_sim.as_mut()) {
+            (Some(c), Some(s)) => (c, s),
+            _ => return,
+        };
+        let wx = center.x as i32;
+        let wy = center.y as i32;
+        let wz = center.z as i32;
+        let cs = CA_CHUNK_SIZE as i32;
+
+        let chunk_coord = [wx.div_euclid(cs), wy.div_euclid(cs), wz.div_euclid(cs)];
+        let mut data = match ca_sim.download_chunk(ctx, chunk_coord) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::debug!("Cannot spawn CA voxels: {}", e);
+                return;
+            }
+        };
+
+        let lx = wx.rem_euclid(cs) as usize;
+        let ly = wy.rem_euclid(cs) as usize;
+        let lz = wz.rem_euclid(cs) as usize;
+
+        // Place a 3x3x3 cube of material
+        for dz in 0..3i32 {
+            for dy in 0..3i32 {
+                for dx in 0..3i32 {
+                    let px = (lx as i32 + dx).clamp(0, 31) as usize;
+                    let py = (ly as i32 + dy).clamp(0, 31) as usize;
+                    let pz = (lz as i32 + dz).clamp(0, 31) as usize;
+                    let idx = pz * 32 * 32 + py * 32 + px;
+                    data[idx] = Voxel::new(ca_mat_id, temp, 0, 15, 0).0;
+                }
+            }
+        }
+
+        if let Err(e) = ca_sim.upload_chunk_voxels(ctx, chunk_coord, &data) {
+            tracing::warn!("Failed to upload CA voxels: {}", e);
+        } else {
+            tracing::debug!("Spawned CA material {} at chunk {:?}", ca_mat_id, chunk_coord);
+        }
+    }
+
+    /// Remove CA voxels (set to air) in front of the camera.
+    fn ca_remove_voxels(&mut self) {
+        let (ctx, ca_sim) = match (self.ctx.as_ref(), self.ca_sim.as_mut()) {
+            (Some(c), Some(s)) => (c, s),
+            _ => return,
+        };
+        let center = self.player.camera.eye() + self.player.camera.forward() * SPAWN_DISTANCE;
+        let wx = center.x as i32;
+        let wy = center.y as i32;
+        let wz = center.z as i32;
+        let cs = CA_CHUNK_SIZE as i32;
+
+        let chunk_coord = [wx.div_euclid(cs), wy.div_euclid(cs), wz.div_euclid(cs)];
+        let mut data = match ca_sim.download_chunk(ctx, chunk_coord) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::debug!("Cannot remove CA voxels: {}", e);
+                return;
+            }
+        };
+
+        let lx = wx.rem_euclid(cs) as usize;
+        let ly = wy.rem_euclid(cs) as usize;
+        let lz = wz.rem_euclid(cs) as usize;
+
+        // Clear a 3x3x3 cube to air
+        for dz in 0..3i32 {
+            for dy in 0..3i32 {
+                for dx in 0..3i32 {
+                    let px = (lx as i32 + dx).clamp(0, 31) as usize;
+                    let py = (ly as i32 + dy).clamp(0, 31) as usize;
+                    let pz = (lz as i32 + dz).clamp(0, 31) as usize;
+                    let idx = pz * 32 * 32 + py * 32 + px;
+                    data[idx] = Voxel::air().0;
+                }
+            }
+        }
+
+        if let Err(e) = ca_sim.upload_chunk_voxels(ctx, chunk_coord, &data) {
+            tracing::warn!("Failed to upload CA voxels (remove): {}", e);
+        } else {
+            tracing::debug!("Removed CA voxels at chunk {:?}", chunk_coord);
+        }
+    }
+
+    /// Trigger a PB-MPM physics zone explosion in the CA simulation.
+    fn ca_trigger_explosion(&mut self) {
+        let center = self.player.camera.eye() + self.player.camera.forward() * SPAWN_DISTANCE;
+        self.pending_explosion = Some([center.x, center.y, center.z]);
+        tracing::info!("CA explosion at [{:.1}, {:.1}, {:.1}]", center.x, center.y, center.z);
+    }
+
+    /// Map selected_material index to a CA material ID.
+    ///
+    /// CA materials: 0=air, 1=stone, 2=sand, 3=water, 4=lava, 5=steam, 6=ice.
+    fn ca_palette_material_id(&self) -> u16 {
+        // Palette: 0=Stone(1), 1=Water(3), 2=Lava(4), 3=Sand(2), 4=Ice(6), 5=Wood(7)
+        match self.selected_material {
+            0 => 1,  // Stone
+            1 => 3,  // Water
+            2 => 4,  // Lava
+            3 => 2,  // Sand
+            4 => 6,  // Ice
+            5 => 7,  // Wood (if exists)
+            _ => 1,  // Default to stone
+        }
+    }
+
     /// Apply keyboard-driven movement to the player controller.
     fn update_movement(&mut self, dt: f32) {
         let keys: Vec<PhysicalKey> = self.pressed_keys.iter().copied().collect();
@@ -412,11 +531,11 @@ impl ApplicationHandler for App {
             }
             tracing::info!("CaSimulation initialized with {} chunks", ca_sim.loaded_count());
 
-            // Place camera to look at the center of the test scene
-            let gs = CA_RENDER_GRID_SIZE as f32;
+            // Place camera above and behind the terrain, looking at the center
+            // Terrain center is at (64, ~40, 64), volcano peak around y=90
             self.player = PlayerController::new(Camera::look_at(
-                Vec3::new(gs * 0.75, gs * 0.4, gs * 0.75),
-                Vec3::new(gs * 0.5, gs * 0.3, gs * 0.5),
+                Vec3::new(64.0, 80.0, -20.0),
+                Vec3::new(64.0, 30.0, 64.0),
             ));
 
             self.ca_sim = Some(ca_sim);
@@ -503,7 +622,16 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {
                 if !self.cursor_captured {
                     self.capture_cursor();
+                } else if self.ca_sim.is_some() {
+                    // CA simulation (--sim2) interactions
+                    match button {
+                        MouseButton::Left => self.ca_spawn_voxels(),
+                        MouseButton::Right => self.ca_remove_voxels(),
+                        MouseButton::Middle => self.ca_trigger_explosion(),
+                        _ => {}
+                    }
                 } else {
+                    // Standard MPM simulation interactions
                     match button {
                         MouseButton::Left => self.spawn_particles(),
                         MouseButton::Right => self.remove_particles(),
@@ -551,6 +679,18 @@ impl ApplicationHandler for App {
                 if let (Some(renderer), Some(ctx)) = (self.renderer.as_mut(), self.ctx.as_ref()) {
                     // --- CA simulation path (--sim2) ---
                     if let Some(ref mut ca_sim) = self.ca_sim {
+                        // Handle pending explosion via PB-MPM zone activation
+                        if let Some(explosion_pos) = explosion {
+                            let trigger = ActivationTrigger {
+                                center: explosion_pos,
+                                radius: EXPLOSION_RADIUS,
+                                impulse: EXPLOSION_STRENGTH,
+                            };
+                            if let Err(e) = ca_sim.activate_physics_zone(ctx, trigger) {
+                                tracing::warn!("Failed to activate physics zone: {}", e);
+                            }
+                        }
+
                         if let Err(e) = ctx.execute_one_shot(|cmd| {
                             for _ in 0..substeps { ca_sim.step(cmd, ctx); }
                             ca_sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye_arr, target_arr);
