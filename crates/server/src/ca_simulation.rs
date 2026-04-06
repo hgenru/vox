@@ -1080,9 +1080,11 @@ impl CaSimulation {
             }
         }
 
-        // Step 2: Run one CA step (support pass) to mark unsupported solids as rubble
+        // Step 2: Run multiple CA steps (support pass) to fully propagate unsupported detection
         ctx.execute_one_shot(|cmd| {
-            self.step(cmd, ctx);
+            for _ in 0..5 {
+                self.step(cmd, ctx);
+            }
         })?;
 
         // Step 3: Download affected chunks, find rubble (mat_id=10), collect positions
@@ -1168,7 +1170,7 @@ impl CaSimulation {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("PB-MPM zone manager not available"))?;
 
-        let zone_idx = match pbmpm.activate_zone(&trigger, 32) {
+        let zone_idx = match pbmpm.activate_zone(&trigger, 64) {
             Some(idx) => idx,
             None => return Ok(None),
         };
@@ -1738,8 +1740,8 @@ pub fn default_ca_materials() -> Vec<MaterialPropertiesCA> {
     // 4 = Lava
     mats[4].phase = 2;
     mats[4].density = 200;
-    mats[4].conductivity = 8;
-    mats[4].freeze_temp = 150;
+    mats[4].conductivity = 1; // slow cooling so lava stays visible (~200 ticks to freeze)
+    mats[4].freeze_temp = 50; // must cool a LOT before freezing (was 150)
     mats[4].freeze_into = 1;
 
     // 5 = Steam
@@ -1811,7 +1813,7 @@ pub fn ca_materials_to_render_params(
         (0.42, 0.40, 0.38),    // render 7 = Dark stone
         (0.55, 0.50, 0.45),    // render 8 = Light stone
         (0.45, 0.47, 0.42),    // render 9 = Mossy stone (green tint)
-        (0.48, 0.45, 0.40),    // render 10 = Rubble (falling stone, brownish gray)
+        (0.6, 0.45, 0.3),      // render 10 = Rubble (warm brown, distinct from stone)
     ];
 
     let mut result = Vec::with_capacity(ca_mats.len());
