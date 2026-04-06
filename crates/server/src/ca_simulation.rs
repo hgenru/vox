@@ -40,6 +40,12 @@ const MARGOLUS_WG_PER_CHUNK: u32 = 64;
 /// Workgroups per chunk for gravity pass: 32/8 = 4 per axis, 4*4 = 16.
 const GRAVITY_WG_PER_CHUNK: u32 = 16;
 
+/// Workgroups per chunk for spread pass (same layout as gravity).
+const SPREAD_WG_PER_CHUNK: u32 = 16;
+
+/// Workgroups per chunk for support pass (same layout as gravity).
+const SUPPORT_WG_PER_CHUNK: u32 = 16;
+
 // ---------------------------------------------------------------------------
 // Push constant structs (mirroring shader-side definitions)
 // ---------------------------------------------------------------------------
@@ -94,6 +100,26 @@ pub struct CaGravityPush {
     pub _pad: [u32; 3],
 }
 
+/// Push constants for the CA spread pass.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CaSpreadPush {
+    /// Current frame number.
+    pub frame_number: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad: [u32; 3],
+}
+
+/// Push constants for the CA support pass.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CaSupportPush {
+    /// Current frame number.
+    pub frame_number: u32,
+    /// Padding to 16-byte alignment.
+    pub _pad: [u32; 3],
+}
+
 /// Push constants for the CA-to-render conversion shader.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -141,6 +167,8 @@ pub struct CaSimulation {
     thermal_pass: ComputePass,
     margolus_pass: ComputePass,
     gravity_pass: ComputePass,
+    spread_pass: ComputePass,
+    support_pass: ComputePass,
 
     // Shader module (kept alive for pipeline lifetime)
     shader_module: vk::ShaderModule,
@@ -227,13 +255,14 @@ impl CaSimulation {
         // 5. Create descriptor pool
         // Total storage buffer bindings across all passes:
         // compact: 2, compact_finalize: 2, thermal: 4, margolus: 5,
-        // ca_to_render: 4, render: 7, compute_dirty_tiles: 2 = 26 total
+        // gravity: 4, spread: 4, support: 4,
+        // ca_to_render: 4, render: 7, compute_dirty_tiles: 2 = 38 total
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 36, // headroom for all passes
+            descriptor_count: 44, // headroom for all passes
         }];
         let descriptor_pool =
-            pipeline::create_descriptor_pool(ctx, &pool_sizes, 8, "ca-descriptor-pool")?;
+            pipeline::create_descriptor_pool(ctx, &pool_sizes, 10, "ca-descriptor-pool")?;
 
         // 6. Create compute passes
 
@@ -314,6 +343,38 @@ impl CaSimulation {
             mem::size_of::<CaGravityPush>() as u32,
             descriptor_pool,
             "ca-gravity",
+        )?;
+
+        // spread pass: binding 0 = voxel_buffer, 1 = metadata, 2 = dirty_list, 3 = materials
+        let spread_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::ca_spread::ca_spread",
+            &[
+                chunk_pool.voxel_buffer(),
+                chunk_pool.metadata_buffer(),
+                chunk_pool.dirty_list_buffer(),
+                &material_buffer,
+            ],
+            mem::size_of::<CaSpreadPush>() as u32,
+            descriptor_pool,
+            "ca-spread",
+        )?;
+
+        // support pass: binding 0 = voxel_buffer, 1 = metadata, 2 = dirty_list, 3 = materials
+        let support_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::ca_support::ca_support",
+            &[
+                chunk_pool.voxel_buffer(),
+                chunk_pool.metadata_buffer(),
+                chunk_pool.dirty_list_buffer(),
+                &material_buffer,
+            ],
+            mem::size_of::<CaSupportPush>() as u32,
+            descriptor_pool,
+            "ca-support",
         )?;
 
         // 7. Create render bridge buffers
@@ -479,6 +540,8 @@ impl CaSimulation {
             thermal_pass,
             margolus_pass,
             gravity_pass,
+            spread_pass,
+            support_pass,
             shader_module,
             descriptor_pool,
             pbmpm,
@@ -722,7 +785,76 @@ impl CaSimulation {
         );
         passes::barrier(cmd, &self.device);
 
-        // 8. Re-finalize for gravity (wg_per_chunk = 16)
+        // 8. Re-finalize for support (wg_per_chunk = 16)
+        let finalize_support_push = CaCompactPush {
+            total_chunks: total_loaded,
+            workgroups_per_chunk: SUPPORT_WG_PER_CHUNK,
+            _pad: [0; 2],
+        };
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.compact_finalize_pass,
+            1,
+            1,
+            1,
+            bytemuck::bytes_of(&finalize_support_push),
+        );
+
+        // Barrier: compute -> indirect + compute
+        let indirect_barrier_support = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+            .dst_access_mask(
+                vk::AccessFlags::INDIRECT_COMMAND_READ | vk::AccessFlags::SHADER_READ,
+            );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::DRAW_INDIRECT | vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[indirect_barrier_support],
+                &[],
+                &[],
+            );
+        }
+
+        // 9. Dispatch support pass (INDIRECT) — converts unsupported solids to rubble
+        let support_push = CaSupportPush {
+            frame_number: self.frame_number,
+            _pad: [0; 3],
+        };
+        unsafe {
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.support_pass.pipeline,
+            );
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.support_pass.pipeline_layout,
+                0,
+                &[self.support_pass.descriptor_set],
+                &[],
+            );
+            self.device.cmd_push_constants(
+                cmd,
+                self.support_pass.pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(&support_push),
+            );
+        }
+        pipeline::cmd_dispatch_indirect(
+            &self.device,
+            cmd,
+            self.chunk_pool.dirty_list_buffer(),
+            4,
+        );
+        passes::barrier(cmd, &self.device);
+
+        // 10. Re-finalize for gravity (wg_per_chunk = 16)
         let finalize_gravity_push = CaCompactPush {
             total_chunks: total_loaded,
             workgroups_per_chunk: GRAVITY_WG_PER_CHUNK,
@@ -756,7 +888,7 @@ impl CaSimulation {
             );
         }
 
-        // 9. Dispatch gravity pass (INDIRECT)
+        // 11. Dispatch gravity pass (INDIRECT)
         let gravity_push = CaGravityPush {
             frame_number: self.frame_number,
             _pad: [0; 3],
@@ -781,6 +913,75 @@ impl CaSimulation {
                 vk::ShaderStageFlags::COMPUTE,
                 0,
                 bytemuck::bytes_of(&gravity_push),
+            );
+        }
+        pipeline::cmd_dispatch_indirect(
+            &self.device,
+            cmd,
+            self.chunk_pool.dirty_list_buffer(),
+            4,
+        );
+        passes::barrier(cmd, &self.device);
+
+        // 12. Re-finalize for spread (wg_per_chunk = 16)
+        let finalize_spread_push = CaCompactPush {
+            total_chunks: total_loaded,
+            workgroups_per_chunk: SPREAD_WG_PER_CHUNK,
+            _pad: [0; 2],
+        };
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.compact_finalize_pass,
+            1,
+            1,
+            1,
+            bytemuck::bytes_of(&finalize_spread_push),
+        );
+
+        // Barrier: compute -> indirect + compute
+        let indirect_barrier_spread = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+            .dst_access_mask(
+                vk::AccessFlags::INDIRECT_COMMAND_READ | vk::AccessFlags::SHADER_READ,
+            );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::DRAW_INDIRECT | vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[indirect_barrier_spread],
+                &[],
+                &[],
+            );
+        }
+
+        // 13. Dispatch spread pass (INDIRECT) — horizontal liquid spreading
+        let spread_push = CaSpreadPush {
+            frame_number: self.frame_number,
+            _pad: [0; 3],
+        };
+        unsafe {
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.spread_pass.pipeline,
+            );
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.spread_pass.pipeline_layout,
+                0,
+                &[self.spread_pass.descriptor_set],
+                &[],
+            );
+            self.device.cmd_push_constants(
+                cmd,
+                self.spread_pass.pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(&spread_push),
             );
         }
         pipeline::cmd_dispatch_indirect(
@@ -1336,6 +1537,8 @@ impl CaSimulation {
             &self.thermal_pass,
             &self.margolus_pass,
             &self.gravity_pass,
+            &self.spread_pass,
+            &self.support_pass,
             &self.ca_to_render_pass,
             &self.render_pass,
             &self.compute_dirty_tiles_pass,
@@ -1426,6 +1629,11 @@ pub fn default_ca_materials() -> Vec<MaterialPropertiesCA> {
         mats[i] = mats[1]; // copy stone properties
     }
 
+    // 10 = Rubble (falling stone: powder-phase so gravity drops it)
+    mats[10].phase = 1; // powder (falls!)
+    mats[10].density = 200; // same as stone
+    mats[10].conductivity = 2;
+
     mats
 }
 
@@ -1471,6 +1679,7 @@ pub fn ca_materials_to_render_params(
         (0.42, 0.40, 0.38),    // render 7 = Dark stone
         (0.55, 0.50, 0.45),    // render 8 = Light stone
         (0.45, 0.47, 0.42),    // render 9 = Mossy stone (green tint)
+        (0.48, 0.45, 0.40),    // render 10 = Rubble (falling stone, brownish gray)
     ];
 
     let mut result = Vec::with_capacity(ca_mats.len());

@@ -52,6 +52,12 @@ pub const MARGOLUS_WG_PER_CHUNK: u32 = 64;
 /// Workgroups per chunk for gravity pass (32/8 = 4 per axis, 4*4 = 16).
 pub const GRAVITY_WG_PER_CHUNK: u32 = 16;
 
+/// Workgroups per chunk for spread pass (same layout as gravity: 4*4 = 16).
+pub const SPREAD_WG_PER_CHUNK: u32 = 16;
+
+/// Workgroups per chunk for support pass (same layout as gravity: 4*4 = 16).
+pub const SUPPORT_WG_PER_CHUNK: u32 = 16;
+
 // ---- Voxel pack/unpack (must match shared::voxel::Voxel bit layout) ----
 
 /// Extracts the material ID (bits 0-9) from a packed voxel.
