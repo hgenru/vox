@@ -42,8 +42,8 @@ const METADATA_SIZE_BYTES: u32 = 64;
 /// Size of a dirty list entry (one u32 slot ID).
 const DIRTY_LIST_ENTRY_BYTES: u32 = 4;
 
-/// Size of VkDispatchIndirectCommand (3 x u32 = 12 bytes).
-const DISPATCH_ARGS_BYTES: u32 = 12;
+/// Size of dirty list header: count(u32) + VkDispatchIndirectCommand(3 x u32) = 16 bytes.
+const DIRTY_LIST_HEADER_BYTES: u32 = 16;
 
 /// Fixed-size pool of chunk slots in a single GPU buffer.
 ///
@@ -79,7 +79,7 @@ impl ChunkPool {
         let voxel_buf_size = u64::from(slot_count) * u64::from(SLOT_TOTAL_BYTES);
         let metadata_buf_size = u64::from(slot_count) * u64::from(METADATA_SIZE_BYTES);
         let dirty_list_buf_size =
-            u64::from(slot_count) * u64::from(DIRTY_LIST_ENTRY_BYTES) + u64::from(DISPATCH_ARGS_BYTES);
+            u64::from(slot_count) * u64::from(DIRTY_LIST_ENTRY_BYTES) + u64::from(DIRTY_LIST_HEADER_BYTES);
 
         let voxel_buffer = create_device_local_buffer(
             ctx,
@@ -513,7 +513,7 @@ mod tests {
         );
         assert_eq!(
             pool.dirty_list_buffer().size,
-            16 * u64::from(DIRTY_LIST_ENTRY_BYTES) + u64::from(DISPATCH_ARGS_BYTES)
+            16 * u64::from(DIRTY_LIST_ENTRY_BYTES) + u64::from(DIRTY_LIST_HEADER_BYTES)
         );
 
         pool.destroy(&ctx);

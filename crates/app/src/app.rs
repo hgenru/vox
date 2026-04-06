@@ -694,13 +694,16 @@ impl ApplicationHandler for App {
                         if let Err(e) = ctx.execute_one_shot(|cmd| {
                             // CA needs many substeps: Margolus moves 1 voxel/step.
                             // At 128³ scale, need ~30 steps/frame to see movement.
-                            let ca_substeps = substeps.max(30);
+                            let ca_substeps = substeps.max(10);
                             for _ in 0..ca_substeps { ca_sim.step(cmd, ctx); }
                             ca_sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye_arr, target_arr);
                             ca_sim.finalize_render(cmd);
                         }) {
                             tracing::error!("CA simulation/render error: {}", e);
                         }
+                        // Debug physics: readback floating water cube chunk every second
+                        // removed debug readback
+
                         match renderer.draw_frame_with_buffer(ctx, ca_sim.render_output_buffer(), RENDER_WIDTH, RENDER_HEIGHT) {
                             Ok(_) => {}
                             Err(e) => tracing::error!("Frame error: {}", e),

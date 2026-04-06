@@ -2033,6 +2033,56 @@ mod tests {
     }
 
     #[test]
+    fn test_ca_sand_falls_multi_chunk() {
+        init_tracing();
+        let ctx = VulkanContext::new().expect("VulkanContext");
+        let mats = default_ca_materials();
+        let reactions = default_ca_reactions();
+        let mut sim = CaSimulation::new(&ctx, &mats, &reactions, 64).expect("CaSimulation");
+
+        // Load 8 empty chunks (2x2x2) to simulate multi-chunk env
+        for cx in 0..2i32 { for cy in 0..2i32 { for cz in 0..2i32 {
+            let data = vec![0u32; CA_CHUNK_VOXELS]; // all air
+            sim.load_chunk(&ctx, [cx, cy, cz], &data, [-1; 6]).unwrap();
+        }}}
+
+        // Put sand in chunk (0,0,0) at y=10
+        let coord = [0i32, 0, 0];
+        let mut data = sim.download_chunk(&ctx, coord).unwrap();
+        for z in 10..20u32 { for x in 10..20u32 {
+            let idx = (z * 32 * 32 + 10 * 32 + x) as usize;
+            data[idx] = Voxel::new(2, 128, 0, 0, 0).0; // sand at y=10
+        }}
+        sim.upload_chunk_voxels(&ctx, coord, &data).unwrap();
+
+        let pre = sim.download_chunk(&ctx, coord).unwrap();
+        let sand_pre: usize = pre.iter().filter(|&&v| Voxel(v).material_id() == 2).count();
+        println!("BEFORE: sand={}", sand_pre);
+
+        for step_i in 0..5u32 {
+            ctx.execute_one_shot(|cmd| { sim.step(cmd, &ctx); }).unwrap();
+            let ch = sim.download_chunk(&ctx, coord).unwrap();
+            let sand: usize = ch.iter().filter(|&&v| Voxel(v).material_id() == 2).count();
+            let mut min_y = 32u32;
+            for y in 0..32u32 { for z in 0..32u32 { for x in 0..32u32 {
+                if Voxel(ch[(z*32*32+y*32+x) as usize]).material_id() == 2 && y < min_y { min_y = y; }
+            }}}
+            println!("Step {}: sand={}, min_sand_y={}", step_i, sand, min_y);
+        }
+
+        let post = sim.download_chunk(&ctx, coord).unwrap();
+        let sand_post: usize = post.iter().filter(|&&v| Voxel(v).material_id() == 2).count();
+        let mut min_y = 32u32;
+        for y in 0..32u32 { for z in 0..32u32 { for x in 0..32u32 {
+            if Voxel(post[(z*32*32+y*32+x) as usize]).material_id() == 2 && y < min_y { min_y = y; }
+        }}}
+        println!("AFTER 5 steps: sand={}, min_y={}", sand_post, min_y);
+        assert!(min_y < 10, "Sand should have fallen below y=10, got min_y={}", min_y);
+
+        sim.destroy(&ctx);
+    }
+
+    #[test]
     fn test_ca_physics_test_scene() {
         init_tracing();
         let ctx = VulkanContext::new().expect("VulkanContext");
