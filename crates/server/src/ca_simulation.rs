@@ -25,6 +25,7 @@ use shared::{
 };
 
 use crate::passes::{self, ComputePass};
+use crate::pbmpm_zones::{ActivationTrigger, PbmpmZoneManager};
 
 /// Compiled SPIR-V shader module bytes, included at compile time.
 const SHADER_BYTES: &[u8] = include_bytes!(env!("SHADERS_SPV_PATH"));
@@ -97,6 +98,9 @@ pub struct CaSimulation {
 
     // Descriptor pool (owns all descriptor sets)
     descriptor_pool: vk::DescriptorPool,
+
+    // PB-MPM zone manager (optional, created alongside CA)
+    pbmpm: Option<PbmpmZoneManager>,
 
     // CPU state
     loaded_chunks: HashMap<[i32; 3], u32>,
@@ -233,6 +237,18 @@ impl CaSimulation {
             "ca-margolus",
         )?;
 
+        // Create PB-MPM zone manager (non-fatal if it fails)
+        let pbmpm = match PbmpmZoneManager::new(ctx) {
+            Ok(mgr) => {
+                tracing::info!("PB-MPM zone manager created successfully");
+                Some(mgr)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create PB-MPM zone manager: {}", e);
+                None
+            }
+        };
+
         Ok(Self {
             chunk_pool,
             material_buffer,
@@ -243,6 +259,7 @@ impl CaSimulation {
             margolus_pass,
             shader_module,
             descriptor_pool,
+            pbmpm,
             loaded_chunks: HashMap::new(),
             frame_number: 0,
             num_reactions: reactions.len() as u32,
@@ -471,7 +488,60 @@ impl CaSimulation {
         );
         passes::barrier(cmd, &self.device);
 
+        // After CA: dispatch PB-MPM for active zones
+        if let Some(ref pbmpm) = self.pbmpm {
+            pbmpm.step(cmd, _ctx, 0.016); // ~60fps
+        }
+        if let Some(ref mut pbmpm) = self.pbmpm {
+            pbmpm.check_sleep();
+        }
+
         self.frame_number += 1;
+    }
+
+    /// Activate a PB-MPM physics zone at the given trigger location.
+    ///
+    /// Spawns particles from the chunk at the trigger position and starts
+    /// PB-MPM simulation for the zone. Returns the zone index if successful.
+    pub fn activate_physics_zone(
+        &mut self,
+        ctx: &VulkanContext,
+        trigger: ActivationTrigger,
+    ) -> anyhow::Result<Option<usize>> {
+        let pbmpm = self
+            .pbmpm
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("PB-MPM zone manager not available"))?;
+
+        let zone_idx = match pbmpm.activate_zone(&trigger, 32) {
+            Some(idx) => idx,
+            None => return Ok(None),
+        };
+
+        // Get voxel data from the chunk at the trigger location
+        let chunk_coord = [
+            (trigger.center[0] / 32.0).floor() as i32,
+            (trigger.center[1] / 32.0).floor() as i32,
+            (trigger.center[2] / 32.0).floor() as i32,
+        ];
+
+        if let Some(&slot_id) = self.loaded_chunks.get(&chunk_coord) {
+            let voxel_data = self.chunk_pool.download_chunk_voxels(ctx, slot_id)?;
+            pbmpm.spawn_particles_from_voxels(
+                ctx,
+                zone_idx,
+                &voxel_data,
+                chunk_coord,
+                &trigger,
+            )?;
+        }
+
+        Ok(Some(zone_idx))
+    }
+
+    /// Get a reference to the PB-MPM zone manager, if available.
+    pub fn pbmpm(&self) -> Option<&PbmpmZoneManager> {
+        self.pbmpm.as_ref()
     }
 
     /// Load a chunk into the simulation.
@@ -580,6 +650,10 @@ impl CaSimulation {
 
         pipeline::destroy_descriptor_pool(ctx, self.descriptor_pool);
         pipeline::destroy_shader_module(ctx, self.shader_module);
+
+        if let Some(pbmpm) = self.pbmpm {
+            pbmpm.destroy(ctx);
+        }
 
         buffer::destroy_buffer(ctx, self.material_buffer);
         buffer::destroy_buffer(ctx, self.reaction_buffer);

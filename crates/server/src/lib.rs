@@ -11,6 +11,7 @@
 
 pub mod ca_simulation;
 mod passes;
+pub mod pbmpm_zones;
 pub mod push_constants;
 mod readback;
 pub mod simulation;
