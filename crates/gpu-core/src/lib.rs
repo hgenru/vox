@@ -6,6 +6,7 @@
 //! synchronization primitives, and debug utilities.
 
 pub mod buffer;
+pub mod chunk_pool;
 pub mod context;
 pub mod error;
 pub mod frame;
