@@ -14,5 +14,6 @@
 
 #![cfg_attr(target_arch = "spirv", no_std)]
 
+pub mod ca_types;
 pub mod compute;
 pub mod types;
