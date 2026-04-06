@@ -1,11 +1,14 @@
-//! Horizontal liquid spread compute shader for the CA substrate.
+//! Pressure-based liquid spread compute shader for the CA substrate.
 //!
-//! Runs AFTER gravity. For each column (x, z), scans bottom to top.
-//! If a liquid voxel is supported (solid/liquid/powder below), tries to
-//! spread into one adjacent horizontal air cell.
+//! Runs AFTER gravity. For each column (x, z), counts liquid height and
+//! compares with one horizontal neighbor. If this column is taller by >= 2,
+//! moves the top liquid voxel to the neighbor column's landing position.
 //!
-//! Uses frame-based direction hashing to randomize spread direction per tick.
-//! Only ONE spread per column per tick to prevent mass loss.
+//! This produces natural water equalization: liquid flows from high to low,
+//! settling into flat surfaces rather than hopping like sand.
+//!
+//! Anti-oscillation: only flow when height diff >= 2.
+//! Direction: one neighbor per tick, chosen by hash(x, z, frame) % 4.
 //!
 //! Workgroup layout: (8, 1, 8) = 64 threads per workgroup.
 //! Each thread processes one column (x, z) within a chunk.
@@ -46,8 +49,7 @@ fn write_voxel(chunk_pool: &mut [u32], slot_id: u32, x: u32, y: u32, z: u32, vox
 }
 
 /// Checks if a voxel is liquid (phase == 2).
-fn is_liquid(materials: &[u32], voxel: u32) -> bool {
-    let mat_id = ca_types::voxel_material_id(voxel);
+fn is_liquid_phase(materials: &[u32], mat_id: u32) -> bool {
     if mat_id == 0 {
         return false;
     }
@@ -55,200 +57,260 @@ fn is_liquid(materials: &[u32], voxel: u32) -> bool {
     phase == 2
 }
 
-/// Checks if a voxel is non-air (can support liquid above).
-fn is_support(voxel: u32) -> bool {
-    ca_types::voxel_material_id(voxel) != 0
-}
-
-/// Tries to spread a liquid voxel in the +X direction within the same chunk.
-/// Returns true if spread occurred.
-fn try_spread_plus_x(
-    chunk_pool: &mut [u32],
-    slot_id: u32,
-    x: u32,
-    y: u32,
-    z: u32,
-    voxel: u32,
-    metadata: &[u32],
-) -> bool {
-    if x + 1 < ca_types::CA_CHUNK_SIZE {
-        let neighbor = read_voxel(chunk_pool, slot_id, x + 1, y, z);
-        if ca_types::voxel_material_id(neighbor) == 0 {
-            write_voxel(chunk_pool, slot_id, x + 1, y, z, voxel);
-            write_voxel(chunk_pool, slot_id, x, y, z, 0);
-            return true;
-        }
-        return false;
-    }
-    // Cross-chunk: +X neighbor is direction 0
-    try_spread_cross_chunk(chunk_pool, metadata, slot_id, 0, 0, y, z, x, y, z, voxel)
-}
-
-/// Tries to spread a liquid voxel in the -X direction within the same chunk.
-/// Returns true if spread occurred.
-fn try_spread_minus_x(
-    chunk_pool: &mut [u32],
-    slot_id: u32,
-    x: u32,
-    y: u32,
-    z: u32,
-    voxel: u32,
-    metadata: &[u32],
-) -> bool {
-    if x > 0 {
-        let neighbor = read_voxel(chunk_pool, slot_id, x - 1, y, z);
-        if ca_types::voxel_material_id(neighbor) == 0 {
-            write_voxel(chunk_pool, slot_id, x - 1, y, z, voxel);
-            write_voxel(chunk_pool, slot_id, x, y, z, 0);
-            return true;
-        }
-        return false;
-    }
-    // Cross-chunk: -X neighbor is direction 1
-    try_spread_cross_chunk(chunk_pool, metadata, slot_id, 1, 31, y, z, x, y, z, voxel)
-}
-
-/// Tries to spread a liquid voxel in the +Z direction within the same chunk.
-/// Returns true if spread occurred.
-fn try_spread_plus_z(
-    chunk_pool: &mut [u32],
-    slot_id: u32,
-    x: u32,
-    y: u32,
-    z: u32,
-    voxel: u32,
-    metadata: &[u32],
-) -> bool {
-    if z + 1 < ca_types::CA_CHUNK_SIZE {
-        let neighbor = read_voxel(chunk_pool, slot_id, x, y, z + 1);
-        if ca_types::voxel_material_id(neighbor) == 0 {
-            write_voxel(chunk_pool, slot_id, x, y, z + 1, voxel);
-            write_voxel(chunk_pool, slot_id, x, y, z, 0);
-            return true;
-        }
-        return false;
-    }
-    // Cross-chunk: +Z neighbor is direction 4
-    try_spread_cross_chunk(chunk_pool, metadata, slot_id, 4, x, y, 0, x, y, z, voxel)
-}
-
-/// Tries to spread a liquid voxel in the -Z direction within the same chunk.
-/// Returns true if spread occurred.
-fn try_spread_minus_z(
-    chunk_pool: &mut [u32],
-    slot_id: u32,
-    x: u32,
-    y: u32,
-    z: u32,
-    voxel: u32,
-    metadata: &[u32],
-) -> bool {
-    if z > 0 {
-        let neighbor = read_voxel(chunk_pool, slot_id, x, y, z - 1);
-        if ca_types::voxel_material_id(neighbor) == 0 {
-            write_voxel(chunk_pool, slot_id, x, y, z - 1, voxel);
-            write_voxel(chunk_pool, slot_id, x, y, z, 0);
-            return true;
-        }
-        return false;
-    }
-    // Cross-chunk: -Z neighbor is direction 5
-    try_spread_cross_chunk(chunk_pool, metadata, slot_id, 5, x, y, 31, x, y, z, voxel)
-}
-
-/// Attempts a cross-chunk spread in the given direction.
-///
-/// `direction`: 0=+X, 1=-X, 4=+Z, 5=-Z
-/// `dst_x/y/z`: coordinates in the neighbor chunk to write liquid into
-/// `src_x/y/z`: coordinates in this chunk to clear (write air)
-fn try_spread_cross_chunk(
-    chunk_pool: &mut [u32],
-    metadata: &[u32],
-    slot_id: u32,
-    direction: u32,
-    dst_x: u32,
-    dst_y: u32,
-    dst_z: u32,
-    src_x: u32,
-    src_y: u32,
-    src_z: u32,
-    voxel: u32,
-) -> bool {
-    let neighbor_slot = ca_types::meta_neighbor_id(metadata, slot_id, direction);
-    if neighbor_slot == 0xFFFFFFFF {
-        return false;
-    }
-    let neighbor_voxel = read_voxel(chunk_pool, neighbor_slot, dst_x, dst_y, dst_z);
-    if ca_types::voxel_material_id(neighbor_voxel) == 0 {
-        write_voxel(chunk_pool, neighbor_slot, dst_x, dst_y, dst_z, voxel);
-        write_voxel(chunk_pool, slot_id, src_x, src_y, src_z, 0);
-        return true;
-    }
-    false
-}
-
-/// Checks if a voxel at (x, y, z) is at the liquid surface.
-///
-/// A liquid is "at the surface" if:
-/// - it is supported (solid/liquid/powder below), AND
-/// - the voxel directly above is NOT liquid (air, gas, or out-of-bounds).
-///
-/// This prevents underwater liquid from spreading horizontally, which causes
-/// the "boiling" oscillation artifact.
-fn is_surface_liquid(
+/// Count the height of consecutive liquid voxels at the TOP of a column.
+/// Scans down from y=31, skips air, then counts liquid from the top surface.
+fn count_liquid_height(
     chunk_pool: &[u32],
+    materials: &[u32],
+    slot_id: u32,
+    x: u32,
+    z: u32,
+) -> u32 {
+    let mut count = 0u32;
+    // Find top non-air voxel
+    let mut y = 31u32;
+    loop {
+        let v = read_voxel(chunk_pool, slot_id, x, y, z);
+        let mat = ca_types::voxel_material_id(v);
+        if mat != 0 {
+            break;
+        }
+        if y == 0 {
+            return 0;
+        }
+        y -= 1;
+    }
+    // Count consecutive liquid from top
+    loop {
+        let v = read_voxel(chunk_pool, slot_id, x, y, z);
+        let mat = ca_types::voxel_material_id(v);
+        if !is_liquid_phase(materials, mat) {
+            break;
+        }
+        count += 1;
+        if y == 0 {
+            break;
+        }
+        y -= 1;
+    }
+    count
+}
+
+/// Find the y-coordinate of the topmost liquid voxel in a column.
+/// Returns 0xFFFFFFFF if no liquid found.
+fn find_top_liquid(
+    chunk_pool: &[u32],
+    materials: &[u32],
+    slot_id: u32,
+    x: u32,
+    z: u32,
+) -> u32 {
+    let mut y = 31u32;
+    loop {
+        let v = read_voxel(chunk_pool, slot_id, x, y, z);
+        let mat = ca_types::voxel_material_id(v);
+        if is_liquid_phase(materials, mat) {
+            return y;
+        }
+        if y == 0 {
+            return 0xFFFFFFFF;
+        }
+        y -= 1;
+    }
+}
+
+/// Find the landing y-coordinate in a neighbor column.
+/// This is the first air voxel above solid/liquid ground.
+/// Returns 0xFFFFFFFF if no valid landing spot.
+fn find_landing_y(
+    chunk_pool: &[u32],
+    materials: &[u32],
+    slot_id: u32,
+    x: u32,
+    z: u32,
+) -> u32 {
+    // Scan bottom to top: find first air above support
+    let mut y = 0u32;
+    loop {
+        if y >= ca_types::CA_CHUNK_SIZE {
+            return 0xFFFFFFFF;
+        }
+        let v = read_voxel(chunk_pool, slot_id, x, y, z);
+        let mat = ca_types::voxel_material_id(v);
+        if mat == 0 {
+            // Air voxel found. Check if supported.
+            return check_landing_support(chunk_pool, slot_id, x, y, z);
+        }
+        y += 1;
+    }
+}
+
+/// Check if landing at (x, y, z) is supported (y==0 or non-air below).
+/// Returns y if supported, 0xFFFFFFFF otherwise.
+fn check_landing_support(
+    chunk_pool: &[u32],
+    slot_id: u32,
+    x: u32,
+    y: u32,
+    _z: u32,
+) -> u32 {
+    if y == 0 {
+        return y; // Ground level = supported
+    }
+    let below = read_voxel(chunk_pool, slot_id, x, y - 1, _z);
+    let below_mat = ca_types::voxel_material_id(below);
+    if below_mat != 0 {
+        return y; // Supported by non-air below
+    }
+    0xFFFFFFFF
+}
+
+/// Equalize liquid between this column and a neighbor column within the same chunk.
+fn equalize_same_chunk(
+    chunk_pool: &mut [u32],
+    materials: &[u32],
+    slot_id: u32,
+    x: u32,
+    z: u32,
+    nx: u32,
+    nz: u32,
+) {
+    let my_height = count_liquid_height(chunk_pool, materials, slot_id, x, z);
+    let neighbor_height = count_liquid_height(chunk_pool, materials, slot_id, nx, nz);
+
+    // Only flow if difference >= 2 (prevents oscillation)
+    if my_height <= neighbor_height + 1 {
+        return;
+    }
+
+    let top_y = find_top_liquid(chunk_pool, materials, slot_id, x, z);
+    if top_y == 0xFFFFFFFF {
+        return;
+    }
+
+    let landing_y = find_landing_y(chunk_pool, materials, slot_id, nx, nz);
+    if landing_y == 0xFFFFFFFF {
+        return;
+    }
+
+    // Don't move liquid upward (would look unnatural)
+    if landing_y > top_y + 1 {
+        return;
+    }
+
+    let voxel = read_voxel(chunk_pool, slot_id, x, top_y, z);
+    write_voxel(chunk_pool, slot_id, x, top_y, z, 0); // clear source
+    write_voxel(chunk_pool, slot_id, nx, landing_y, nz, voxel); // place at landing
+}
+
+/// Equalize liquid across a chunk boundary.
+fn equalize_cross_chunk(
+    chunk_pool: &mut [u32],
     materials: &[u32],
     metadata: &[u32],
     slot_id: u32,
     x: u32,
-    y: u32,
     z: u32,
-) -> bool {
-    // Must be supported
-    let supported = check_support(chunk_pool, metadata, slot_id, x, y, z);
-    if !supported {
-        return false;
+    direction: u32,
+    dst_x: u32,
+    dst_z: u32,
+) {
+    let neighbor_slot = ca_types::meta_neighbor_id(metadata, slot_id, direction);
+    if neighbor_slot == 0xFFFFFFFF {
+        return;
     }
 
-    // Check voxel above: if liquid, we're underwater -> don't spread
-    let above = read_voxel_or_neighbor_above(chunk_pool, metadata, slot_id, x, y, z);
-    let above_mat = ca_types::voxel_material_id(above);
-    if above_mat != 0 {
-        let above_phase = ca_types::mat_phase(materials, above_mat);
-        // phase 2 = liquid in our material table
-        if above_phase == 2 {
-            return false;
-        }
+    let my_height = count_liquid_height(chunk_pool, materials, slot_id, x, z);
+    let neighbor_height = count_liquid_height(chunk_pool, materials, neighbor_slot, dst_x, dst_z);
+
+    if my_height <= neighbor_height + 1 {
+        return;
     }
 
-    true
+    let top_y = find_top_liquid(chunk_pool, materials, slot_id, x, z);
+    if top_y == 0xFFFFFFFF {
+        return;
+    }
+
+    let landing_y = find_landing_y(chunk_pool, materials, neighbor_slot, dst_x, dst_z);
+    if landing_y == 0xFFFFFFFF {
+        return;
+    }
+
+    if landing_y > top_y + 1 {
+        return;
+    }
+
+    let voxel = read_voxel(chunk_pool, slot_id, x, top_y, z);
+    write_voxel(chunk_pool, slot_id, x, top_y, z, 0);
+    write_voxel(chunk_pool, neighbor_slot, dst_x, landing_y, dst_z, voxel);
 }
 
-/// Reads the voxel above (x, y+1, z), crossing chunk boundary if needed.
-fn read_voxel_or_neighbor_above(
-    chunk_pool: &[u32],
+/// Try equalization in +X direction.
+fn try_equalize_plus_x(
+    chunk_pool: &mut [u32],
+    materials: &[u32],
     metadata: &[u32],
     slot_id: u32,
     x: u32,
-    y: u32,
     z: u32,
-) -> u32 {
-    if y + 1 < ca_types::CA_CHUNK_SIZE {
-        return read_voxel(chunk_pool, slot_id, x, y + 1, z);
+) {
+    if x + 1 < ca_types::CA_CHUNK_SIZE {
+        equalize_same_chunk(chunk_pool, materials, slot_id, x, z, x + 1, z);
+        return;
     }
-    // Cross-chunk: +Y neighbor is direction 2
-    let above_slot = ca_types::meta_neighbor_id(metadata, slot_id, 2);
-    if above_slot == 0xFFFFFFFF {
-        return 0; // No chunk above = air
-    }
-    read_voxel(chunk_pool, above_slot, x, 0, z)
+    equalize_cross_chunk(chunk_pool, materials, metadata, slot_id, x, z, 0, 0, z);
 }
 
-/// Processes one column, spreading the first supported surface liquid horizontally.
-///
-/// Only surface liquid (supported from below, no liquid above) spreads.
-/// This prevents internal "boiling" oscillation where underwater voxels
-/// bounce back and forth.
+/// Try equalization in -X direction.
+fn try_equalize_minus_x(
+    chunk_pool: &mut [u32],
+    materials: &[u32],
+    metadata: &[u32],
+    slot_id: u32,
+    x: u32,
+    z: u32,
+) {
+    if x > 0 {
+        equalize_same_chunk(chunk_pool, materials, slot_id, x, z, x - 1, z);
+        return;
+    }
+    equalize_cross_chunk(chunk_pool, materials, metadata, slot_id, x, z, 1, 31, z);
+}
+
+/// Try equalization in +Z direction.
+fn try_equalize_plus_z(
+    chunk_pool: &mut [u32],
+    materials: &[u32],
+    metadata: &[u32],
+    slot_id: u32,
+    x: u32,
+    z: u32,
+) {
+    if z + 1 < ca_types::CA_CHUNK_SIZE {
+        equalize_same_chunk(chunk_pool, materials, slot_id, x, z, x, z + 1);
+        return;
+    }
+    equalize_cross_chunk(chunk_pool, materials, metadata, slot_id, x, z, 4, x, 0);
+}
+
+/// Try equalization in -Z direction.
+fn try_equalize_minus_z(
+    chunk_pool: &mut [u32],
+    materials: &[u32],
+    metadata: &[u32],
+    slot_id: u32,
+    x: u32,
+    z: u32,
+) {
+    if z > 0 {
+        equalize_same_chunk(chunk_pool, materials, slot_id, x, z, x, z - 1);
+        return;
+    }
+    equalize_cross_chunk(chunk_pool, materials, metadata, slot_id, x, z, 5, x, 31);
+}
+
+/// Processes one column: pick one neighbor direction, equalize liquid height.
 fn process_column(
     chunk_pool: &mut [u32],
     materials: &[u32],
@@ -259,72 +321,21 @@ fn process_column(
     frame: u32,
 ) {
     let dir = ca_types::hash_position(x, 0, z, frame) % 4;
-    let mut y: u32 = 0;
-    loop {
-        if y >= ca_types::CA_CHUNK_SIZE {
-            return;
-        }
-        let voxel = read_voxel(chunk_pool, slot_id, x, y, z);
-        let liquid = is_liquid(materials, voxel);
-
-        if liquid {
-            // Only spread surface liquid (supported below, no liquid above)
-            let surface = is_surface_liquid(chunk_pool, materials, metadata, slot_id, x, y, z);
-            if surface {
-                let did_spread = try_spread_dir(chunk_pool, metadata, slot_id, x, y, z, voxel, dir);
-                if did_spread {
-                    return; // One spread per column per tick
-                }
-            }
-        }
-        y += 1;
-    }
-}
-
-/// Checks if a voxel at (x, y, z) is supported (non-air below or y==0).
-fn check_support(
-    chunk_pool: &[u32],
-    metadata: &[u32],
-    slot_id: u32,
-    x: u32,
-    y: u32,
-    z: u32,
-) -> bool {
-    if y == 0 {
-        // Check cross-chunk: -Y neighbor (direction 3)
-        let below_slot = ca_types::meta_neighbor_id(metadata, slot_id, 3);
-        if below_slot == 0xFFFFFFFF {
-            return true; // Edge of world = supported
-        }
-        let below_voxel = read_voxel(chunk_pool, below_slot, x, 31, z);
-        return is_support(below_voxel);
-    }
-    let below = read_voxel(chunk_pool, slot_id, x, y - 1, z);
-    is_support(below)
-}
-
-/// Attempts spread in a given direction (0=+X, 1=-X, 2=+Z, 3=-Z).
-fn try_spread_dir(
-    chunk_pool: &mut [u32],
-    metadata: &[u32],
-    slot_id: u32,
-    x: u32,
-    y: u32,
-    z: u32,
-    voxel: u32,
-    dir: u32,
-) -> bool {
+    // Split into separate if-return blocks (trap #15: max 3 if/else branches)
     if dir == 0 {
-        return try_spread_plus_x(chunk_pool, slot_id, x, y, z, voxel, metadata);
+        try_equalize_plus_x(chunk_pool, materials, metadata, slot_id, x, z);
+        return;
     }
     if dir == 1 {
-        return try_spread_minus_x(chunk_pool, slot_id, x, y, z, voxel, metadata);
+        try_equalize_minus_x(chunk_pool, materials, metadata, slot_id, x, z);
+        return;
     }
     if dir == 2 {
-        return try_spread_plus_z(chunk_pool, slot_id, x, y, z, voxel, metadata);
+        try_equalize_plus_z(chunk_pool, materials, metadata, slot_id, x, z);
+        return;
     }
     // dir == 3
-    try_spread_minus_z(chunk_pool, slot_id, x, y, z, voxel, metadata)
+    try_equalize_minus_z(chunk_pool, materials, metadata, slot_id, x, z);
 }
 
 /// Main spread logic: maps thread to chunk + column, then processes.
@@ -369,7 +380,7 @@ fn spread_impl(
     process_column(chunk_pool, materials, metadata, slot_id, col_x, col_z, frame);
 }
 
-/// Compute shader entry point: horizontal liquid spread on dirty chunks.
+/// Compute shader entry point: pressure-based liquid spread on dirty chunks.
 ///
 /// Descriptor set 0:
 /// - binding 0: chunk_pool (voxel gigabuffer, read/write)
