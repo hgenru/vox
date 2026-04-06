@@ -216,6 +216,97 @@ pub fn set_particle_f_identity(particles: &mut [u32], idx: u32) {
     write_particle_f32(particles, idx, P_F2_X + 3, 0.0); // pad
 }
 
+// ---- APIC C matrix accessors ----
+//
+// The APIC affine momentum matrix C is stored in the F_col fields.
+// For PB-MPM POC we don't use elastic deformation gradient, so F_col0/1/2
+// are repurposed as C_col0/1/2.
+//
+// C is a 3x3 matrix stored column-major:
+//   C_col0 = (C00, C10, C20) at offsets P_F0_X, P_F0_Y, P_F0_Z
+//   C_col1 = (C01, C11, C21) at offsets P_F1_X, P_F1_Y, P_F1_Z
+//   C_col2 = (C02, C12, C22) at offsets P_F2_X, P_F2_Y, P_F2_Z
+
+/// Reads C matrix element at (row, col) from particle.
+///
+/// C is the APIC affine momentum matrix, stored in F_col fields.
+/// Row/col must be 0, 1, or 2.
+pub fn particle_c_element(particles: &[u32], idx: u32, row: u32, col: u32) -> f32 {
+    let col_offset = match col {
+        0 => P_F0_X,
+        1 => P_F1_X,
+        _ => P_F2_X,
+    };
+    read_particle_f32(particles, idx, col_offset + row)
+}
+
+/// Reads C matrix column 0: (C00, C10, C20).
+pub fn particle_c_col0(particles: &[u32], idx: u32) -> [f32; 3] {
+    [
+        read_particle_f32(particles, idx, P_F0_X),
+        read_particle_f32(particles, idx, P_F0_Y),
+        read_particle_f32(particles, idx, P_F0_Z),
+    ]
+}
+
+/// Reads C matrix column 1: (C01, C11, C21).
+pub fn particle_c_col1(particles: &[u32], idx: u32) -> [f32; 3] {
+    [
+        read_particle_f32(particles, idx, P_F1_X),
+        read_particle_f32(particles, idx, P_F1_Y),
+        read_particle_f32(particles, idx, P_F1_Z),
+    ]
+}
+
+/// Reads C matrix column 2: (C02, C12, C22).
+pub fn particle_c_col2(particles: &[u32], idx: u32) -> [f32; 3] {
+    [
+        read_particle_f32(particles, idx, P_F2_X),
+        read_particle_f32(particles, idx, P_F2_Y),
+        read_particle_f32(particles, idx, P_F2_Z),
+    ]
+}
+
+/// Sets the full C matrix (3x3, column-major) for a particle.
+///
+/// `c` is laid out as [c00, c10, c20, c01, c11, c21, c02, c12, c22].
+pub fn set_particle_c_matrix(particles: &mut [u32], idx: u32, c: &[f32; 9]) {
+    // Column 0
+    write_particle_f32(particles, idx, P_F0_X, c[0]);
+    write_particle_f32(particles, idx, P_F0_Y, c[1]);
+    write_particle_f32(particles, idx, P_F0_Z, c[2]);
+    // Column 1
+    write_particle_f32(particles, idx, P_F1_X, c[3]);
+    write_particle_f32(particles, idx, P_F1_Y, c[4]);
+    write_particle_f32(particles, idx, P_F1_Z, c[5]);
+    // Column 2
+    write_particle_f32(particles, idx, P_F2_X, c[6]);
+    write_particle_f32(particles, idx, P_F2_Y, c[7]);
+    write_particle_f32(particles, idx, P_F2_Z, c[8]);
+}
+
+/// Zeros the APIC C matrix for a particle.
+///
+/// Used on initialization when no affine momentum is present.
+pub fn set_particle_c_zero(particles: &mut [u32], idx: u32) {
+    set_particle_c_matrix(particles, idx, &[0.0; 9]);
+}
+
+/// Computes C * offset, where C is the particle's APIC affine matrix and
+/// offset is a 3D vector. Returns [result_x, result_y, result_z].
+///
+/// C is column-major: result = col0*ox + col1*oy + col2*oz.
+pub fn apply_c_matrix(particles: &[u32], idx: u32, ox: f32, oy: f32, oz: f32) -> [f32; 3] {
+    let c0 = particle_c_col0(particles, idx);
+    let c1 = particle_c_col1(particles, idx);
+    let c2 = particle_c_col2(particles, idx);
+    [
+        c0[0] * ox + c1[0] * oy + c2[0] * oz,
+        c0[1] * ox + c1[1] * oy + c2[1] * oz,
+        c0[2] * ox + c1[2] * oy + c2[2] * oz,
+    ]
+}
+
 // ---- Grid cell accessors ----
 
 /// Reads a f32 from the grid buffer at the given cell index and field offset.
