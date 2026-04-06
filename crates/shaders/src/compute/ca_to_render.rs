@@ -58,9 +58,41 @@ fn ca_material_id(voxel: u32) -> u32 {
     voxel & MATERIAL_ID_MASK
 }
 
+/// Remap CA material ID to render material ID.
+///
+/// The render shader has hardcoded checks for old material IDs:
+///   old MAT_LAVA=2 → emissive glow
+///   old MAT_WOOD=3 → emissive when burning
+/// CA IDs: 0=air, 1=stone, 2=sand, 3=water, 4=lava, 5=steam, 6=ice
+///
+/// We remap so the material_render_buffer (indexed by render_mat_id) has
+/// correct colors AND the hardcoded emissive checks match.
+///
+/// Remap: CA 4 (lava) → render 2 (MAT_LAVA), others keep their CA ID
+/// but shifted to avoid collision: CA 2 (sand) → render 4 (was ash slot)
+fn remap_material_id(ca_mat: u32) -> u32 {
+    if ca_mat == 4 { 2 }       // lava → old MAT_LAVA slot (emissive works)
+    else if ca_mat == 2 { 4 }  // sand → old MAT_ASH slot (no collision)
+    else { ca_mat }             // stone=1→1, water=3→3, steam=5→5, ice=6→6
+}
+
 /// Extract temperature from a CA voxel.
 fn ca_temperature(voxel: u32) -> u32 {
     (voxel >> TEMPERATURE_SHIFT) & TEMPERATURE_MASK
+}
+
+/// Remap CA phase to render phase.
+///
+/// CA:     0=solid, 1=powder, 2=liquid, 3=gas
+/// Render: 0=solid, 1=liquid, 2=gas
+fn remap_phase(ca_phase: u32) -> u32 {
+    if ca_phase <= 1 {
+        0 // solid + powder → render solid
+    } else if ca_phase == 2 {
+        1 // liquid → render liquid
+    } else {
+        2 // gas → render gas
+    }
 }
 
 /// Convert one CA voxel to the flat render buffer format and write it.
@@ -133,17 +165,33 @@ fn convert_and_write(
     // Look up phase from material table
     // MaterialPropertiesCA is 64 bytes = 16 u32s; phase is the first u32
     let mat_table_base = (mat_id * 16) as usize;
-    let phase = if mat_table_base < materials.len() {
+    let ca_phase = if mat_table_base < materials.len() {
         materials[mat_table_base]
     } else {
         0
     };
 
-    // Pack material: (0xFF << 24) | (material_id << 16) | (phase << 8) | 0xFF
-    let packed_material = (0xFF << 24) | ((mat_id & 0xFF) << 16) | ((phase & 0xFF) << 8) | 0xFF;
+    // Remap CA phase to render phase:
+    // CA:     0=solid, 1=powder, 2=liquid, 3=gas
+    // Render: 0=solid, 1=liquid, 2=gas
+    let render_phase = remap_phase(ca_phase);
 
-    // Temperature as f32 bits (scale from 0-255 game units to a reasonable range)
-    let temp_f32 = temp as f32 * 10.0; // Scale up for render shader
+    // Remap CA material ID to render material ID for hardcoded emissive checks
+    let render_mat = remap_material_id(mat_id);
+
+    // Pack material: (0xFF << 24) | (material_id << 16) | (phase << 8) | 0xFF
+    let packed_material = (0xFF << 24) | ((render_mat & 0xFF) << 16) | ((render_phase & 0xFF) << 8) | 0xFF;
+
+    // Temperature: only emit heat glow for actually hot materials (lava=4).
+    // Render shader's apply_emissive triggers on material_id==2 (old MAT_LAVA).
+    // We remap CA lava (mat_id=4) to render material_id=4, so we need the
+    // emissive check to match. For now: set temp=0 for non-hot materials
+    // to suppress false glow, and high temp only for lava.
+    let temp_f32 = if mat_id == 4 {
+        temp as f32 * 10.0 // Lava: hot, will glow
+    } else {
+        0.0 // Everything else: no thermal emission
+    };
     let temp_bits = temp_f32.to_bits();
 
     render_voxels[base] = packed_material;

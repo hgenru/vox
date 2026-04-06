@@ -922,7 +922,7 @@ impl CaSimulation {
         ];
 
         if let Some(&slot_id) = self.loaded_chunks.get(&chunk_coord) {
-            let voxel_data = self.chunk_pool.download_chunk_voxels(ctx, slot_id)?;
+            let mut voxel_data = self.chunk_pool.download_chunk_voxels(ctx, slot_id)?;
             pbmpm.spawn_particles_from_voxels(
                 ctx,
                 zone_idx,
@@ -930,6 +930,31 @@ impl CaSimulation {
                 chunk_coord,
                 &trigger,
             )?;
+
+            // Clear voxels in the explosion radius to create a visible crater
+            let r = trigger.radius as i32;
+            let cx_local = (trigger.center[0] - chunk_coord[0] as f32 * 32.0) as i32;
+            let cy_local = (trigger.center[1] - chunk_coord[1] as f32 * 32.0) as i32;
+            let cz_local = (trigger.center[2] - chunk_coord[2] as f32 * 32.0) as i32;
+            for dz in -r..=r {
+                for dy in -r..=r {
+                    for dx in -r..=r {
+                        if dx * dx + dy * dy + dz * dz > r * r {
+                            continue;
+                        }
+                        let lx = cx_local + dx;
+                        let ly = cy_local + dy;
+                        let lz = cz_local + dz;
+                        if lx >= 0 && lx < 32 && ly >= 0 && ly < 32 && lz >= 0 && lz < 32 {
+                            let idx = lz as usize * 32 * 32 + ly as usize * 32 + lx as usize;
+                            voxel_data[idx] = 0; // air
+                        }
+                    }
+                }
+            }
+            // Re-upload the modified chunk with the crater
+            self.chunk_pool
+                .upload_chunk_voxels(ctx, vk::CommandBuffer::null(), slot_id, &voxel_data)?;
         }
 
         Ok(Some(zone_idx))
@@ -1141,6 +1166,11 @@ pub fn default_ca_materials() -> Vec<MaterialPropertiesCA> {
     mats[6].melt_temp = 50;
     mats[6].melt_into = 3;
 
+    // 7-9 = Stone variants (same physics, different render color)
+    for i in 7..=9 {
+        mats[i] = mats[1]; // copy stone properties
+    }
+
     mats
 }
 
@@ -1171,15 +1201,21 @@ pub fn ca_materials_to_render_params(
 ) -> Vec<shared::material::MaterialParams> {
     use shared::material::MaterialParams;
 
-    // Pre-defined colors per material index
+    // Colors indexed by RENDER material ID (after remap in ca_to_render shader).
+    // Remap: CA 4 (lava) → render 2, CA 2 (sand) → render 4.
+    // So: render 0=air, 1=stone, 2=LAVA, 3=water, 4=SAND, 5=steam, 6=ice
+    // 7-9 = stone variants (different shades for visual texture)
     let colors: &[(f32, f32, f32)] = &[
-        (0.0, 0.0, 0.0),       // 0 = Air (transparent/black)
-        (0.5, 0.5, 0.5),       // 1 = Stone (gray)
-        (0.76, 0.70, 0.50),    // 2 = Sand (tan)
-        (0.2, 0.4, 0.8),       // 3 = Water (blue)
-        (1.0, 0.3, 0.1),       // 4 = Lava (orange-red)
-        (0.9, 0.9, 0.95),      // 5 = Steam (white-ish)
-        (0.7, 0.85, 1.0),      // 6 = Ice (light blue)
+        (0.0, 0.0, 0.0),       // render 0 = Air
+        (0.50, 0.48, 0.45),    // render 1 = Stone (warm gray)
+        (1.0, 0.3, 0.1),       // render 2 = Lava (orange-red)
+        (0.2, 0.4, 0.8),       // render 3 = Water (blue)
+        (0.76, 0.70, 0.50),    // render 4 = Sand (tan)
+        (0.9, 0.9, 0.95),      // render 5 = Steam
+        (0.7, 0.85, 1.0),      // render 6 = Ice
+        (0.42, 0.40, 0.38),    // render 7 = Dark stone
+        (0.55, 0.50, 0.45),    // render 8 = Light stone
+        (0.45, 0.47, 0.42),    // render 9 = Mossy stone (green tint)
     ];
 
     let mut result = Vec::with_capacity(ca_mats.len());
@@ -1190,8 +1226,8 @@ pub fn ca_materials_to_render_params(
             (0.6, 0.6, 0.6) // default gray for unknown materials
         };
 
-        // Determine emissive temperature (lava glows)
-        let emissive_temp = if i == 4 { 100.0 } else { 10000.0 }; // lava glows, others don't
+        // Determine emissive temperature. Render index 2 = lava (after remap).
+        let emissive_temp = if i == 2 { 100.0 } else { 10000.0 };
 
         // Opacity: air=0, everything else=1
         let opacity = if i == 0 { 0.0 } else { 1.0 };
@@ -1251,27 +1287,53 @@ fn terrain_height(wx: usize, wz: usize) -> usize {
     let x = wx as f32;
     let z = wz as f32;
 
-    // Base terrain: rolling hills
+    // Base terrain: valleys and hills with wide height variation
     let mut h = 0.0f32;
-    h += smooth_noise(x * 0.02, z * 0.02) * 40.0;   // large hills
-    h += smooth_noise(x * 0.05, z * 0.05) * 15.0;   // medium detail
-    h += smooth_noise(x * 0.1, z * 0.1) * 5.0;      // small bumps
+    h += smooth_noise(x * 0.015, z * 0.015) * 30.0;  // large rolling terrain
+    h += smooth_noise(x * 0.04, z * 0.04) * 12.0;    // medium hills
+    h += smooth_noise(x * 0.1, z * 0.1) * 4.0;       // small bumps
 
     // Add a volcano/mountain in the center
     let cx = 64.0f32;
     let cz = 64.0f32;
     let dist_to_center = ((x - cx) * (x - cx) + (z - cz) * (z - cz)).sqrt();
-    if dist_to_center < 30.0 {
-        let volcano = (1.0 - dist_to_center / 30.0) * 50.0;
+    if dist_to_center < 25.0 {
+        let volcano = (1.0 - dist_to_center / 25.0) * 45.0;
         h += volcano;
     }
     // Volcano crater at the very top
-    if dist_to_center < 8.0 {
-        h -= (1.0 - dist_to_center / 8.0) * 15.0;
+    if dist_to_center < 7.0 {
+        h -= (1.0 - dist_to_center / 7.0) * 12.0;
     }
 
-    let base_height = 20;
+    // Lower base height so water_level creates visible lakes
+    let base_height = 10;
     (h as usize).saturating_add(base_height).min(120)
+}
+
+/// Quick hash for surface roughness (deterministic, no allocation).
+fn surface_hash(x: usize, y: usize, z: usize) -> u32 {
+    let mut h = (x as u32).wrapping_mul(374761393)
+        ^ (y as u32).wrapping_mul(668265263)
+        ^ (z as u32).wrapping_mul(1440670441);
+    h ^= h >> 13;
+    h = h.wrapping_mul(1103515245).wrapping_add(12345);
+    h ^= h >> 16;
+    h
+}
+
+/// Pick a stone material variant (1, 7, 8, or 9) based on position.
+/// Creates visible patches of different stone shades across the terrain.
+fn pick_stone_variant(wx: usize, wy: usize, wz: usize) -> u16 {
+    let h = surface_hash(wx, wy, wz);
+    // Use large-scale noise for patches (not per-voxel)
+    let patch = surface_hash(wx / 4, wy / 4, wz / 4) % 4;
+    match patch {
+        0 => 1,  // normal stone
+        1 => 7,  // dark stone
+        2 => 8,  // light stone
+        _ => 9,  // mossy stone
+    }
 }
 
 /// Generate a voxel at world position (wx, wy, wz) given terrain height.
@@ -1282,7 +1344,16 @@ fn generate_voxel(wx: usize, wy: usize, wz: usize, height: usize) -> Voxel {
     let cz = 64.0f32;
     let dist_to_center = (((wx as f32) - cx).powi(2) + ((wz as f32) - cz).powi(2)).sqrt();
 
-    if wy > height && wy > water_level {
+    // Surface roughness: randomly remove 1-2 voxels at the surface to
+    // create crevices that AO can shade, giving stone visible texture.
+    let roughness = (surface_hash(wx, 0, wz) % 3) as usize; // 0, 1, or 2
+    let effective_height = if height > roughness {
+        height - roughness
+    } else {
+        height
+    };
+
+    if wy > effective_height && wy > water_level {
         return Voxel::air();
     }
 
@@ -1292,23 +1363,27 @@ fn generate_voxel(wx: usize, wy: usize, wz: usize, height: usize) -> Voxel {
     }
 
     // Water fills below water level
-    if wy > height && wy <= water_level {
+    if wy > effective_height && wy <= water_level {
         return Voxel::new(3, 128, 0, 10, 0);
     }
 
-    // Surface layer
-    if wy == height {
+    // Surface layer: top 3 voxels use varied materials for visual interest
+    let depth_from_surface = effective_height.saturating_sub(wy);
+
+    if wy <= effective_height && depth_from_surface == 0 {
+        // Top surface
         if wy < water_level + 2 && wy >= water_level.saturating_sub(1) {
-            // Beach sand near water
-            return Voxel::new(2, 128, 0, 15, 0);
+            return Voxel::new(2, 128, 0, 15, 0); // Sand near water
         }
-        // Normal surface: stone with bonds
-        return Voxel::new(1, 128, 0b111111, 15, 0);
+        // Pick stone variant based on position hash for visible texture
+        let stone_id = pick_stone_variant(wx, wy, wz);
+        return Voxel::new(stone_id, 128, 0b111111, 15, 0);
     }
 
-    // Below surface
-    if wy < height {
-        return Voxel::new(1, 128, 0b111111, 15, 0);
+    // Below surface: also use stone variants for exposed cliff faces
+    if wy < effective_height {
+        let stone_id = pick_stone_variant(wx, wy, wz);
+        return Voxel::new(stone_id, 128, 0b111111, 15, 0);
     }
 
     Voxel::air()

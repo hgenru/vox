@@ -26,11 +26,16 @@ pub(crate) fn textured_material_color(
     };
     let base = materials[safe_id as usize].color.truncate();
 
-    // Apply procedural noise for per-voxel variation: base_color * (0.85 + noise * 0.15)
-    let noise = value_noise(vx as f32 * 1.0, vy as f32 * 1.0, vz as f32 * 1.0);
-    let factor = 0.85 + noise * 0.15;
+    // Per-channel noise: each RGB channel gets a different noise sample.
+    // This creates visible hue variation, not just brightness scaling.
+    let n1 = value_noise(vx as f32, vy as f32, vz as f32);
+    let n2 = value_noise(vx as f32 + 137.0, vy as f32 + 59.0, vz as f32 + 211.0);
+    let n3 = value_noise(vx as f32 + 293.0, vy as f32 + 173.0, vz as f32 + 97.0);
+    let r = base.x * (0.7 + n1 * 0.3);
+    let g = base.y * (0.7 + n2 * 0.3);
+    let b = base.z * (0.7 + n3 * 0.3);
 
-    Vec3::new(base.x * factor, base.y * factor, base.z * factor)
+    Vec3::new(r, g, b)
 }
 
 /// Apply emissive glow for lava (material_id=2).
