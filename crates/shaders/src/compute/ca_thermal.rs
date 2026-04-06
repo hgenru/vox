@@ -51,6 +51,11 @@ fn read_neighbor_temp(
     if in_bounds {
         let addr = ca_types::voxel_addr(slot_id, lx as u32, ly as u32, lz as u32);
         let voxel = chunk_pool[addr as usize];
+        let neighbor_mat = ca_types::voxel_material_id(voxel);
+        // Air should be at ambient temperature for thermal calculations
+        if neighbor_mat == 0 {
+            return ca_types::CA_AMBIENT_TEMP;
+        }
         return ca_types::voxel_temperature(voxel);
     }
 
@@ -85,6 +90,11 @@ fn read_neighbor_temp_cross_chunk(
 
     let addr = ca_types::voxel_addr(neighbor_slot, wx as u32, wy as u32, wz as u32);
     let voxel = chunk_pool[addr as usize];
+    let neighbor_mat = ca_types::voxel_material_id(voxel);
+    // Air should be at ambient temperature for thermal calculations
+    if neighbor_mat == 0 {
+        return ca_types::CA_AMBIENT_TEMP;
+    }
     ca_types::voxel_temperature(voxel)
 }
 
