@@ -80,6 +80,49 @@ pub(crate) fn material_palette() -> Vec<MaterialSlot> {
     ]
 }
 
+/// Build the material palette for CA simulation (--sim2 mode).
+///
+/// Maps to CA material IDs: 1=stone, 2=sand, 3=water, 4=lava, 6=ice.
+pub(crate) fn ca_material_palette() -> Vec<MaterialSlot> {
+    vec![
+        MaterialSlot {
+            name: "Stone",
+            mat_id: 1,
+            phase: PHASE_SOLID,
+            temperature: 0.0,
+            color: glam::Vec4::new(0.5, 0.5, 0.5, 1.0),
+        },
+        MaterialSlot {
+            name: "Water",
+            mat_id: 3,
+            phase: PHASE_LIQUID,
+            temperature: 0.0,
+            color: glam::Vec4::new(0.2, 0.4, 0.9, 1.0),
+        },
+        MaterialSlot {
+            name: "Lava",
+            mat_id: 4,
+            phase: PHASE_LIQUID,
+            temperature: 2000.0,
+            color: glam::Vec4::new(1.0, 0.3, 0.0, 1.0),
+        },
+        MaterialSlot {
+            name: "Sand",
+            mat_id: 2,
+            phase: PHASE_SOLID,
+            temperature: 0.0,
+            color: glam::Vec4::new(0.76, 0.70, 0.50, 1.0),
+        },
+        MaterialSlot {
+            name: "Ice",
+            mat_id: 6,
+            phase: PHASE_SOLID,
+            temperature: -50.0,
+            color: glam::Vec4::new(0.7, 0.85, 0.95, 1.0),
+        },
+    ]
+}
+
 /// Compute terrain height at a given (x, z) world position.
 ///
 /// Uses multi-octave sine-based noise combined with island falloff to produce
