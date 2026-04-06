@@ -16,4 +16,5 @@
 
 pub mod ca_types;
 pub mod compute;
+pub mod pbmpm_types;
 pub mod types;
