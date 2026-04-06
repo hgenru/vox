@@ -187,7 +187,68 @@ fn try_spread_cross_chunk(
     false
 }
 
-/// Processes one column, spreading the first supported liquid horizontally.
+/// Checks if a voxel at (x, y, z) is at the liquid surface.
+///
+/// A liquid is "at the surface" if:
+/// - it is supported (solid/liquid/powder below), AND
+/// - the voxel directly above is NOT liquid (air, gas, or out-of-bounds).
+///
+/// This prevents underwater liquid from spreading horizontally, which causes
+/// the "boiling" oscillation artifact.
+fn is_surface_liquid(
+    chunk_pool: &[u32],
+    materials: &[u32],
+    metadata: &[u32],
+    slot_id: u32,
+    x: u32,
+    y: u32,
+    z: u32,
+) -> bool {
+    // Must be supported
+    let supported = check_support(chunk_pool, metadata, slot_id, x, y, z);
+    if !supported {
+        return false;
+    }
+
+    // Check voxel above: if liquid, we're underwater -> don't spread
+    let above = read_voxel_or_neighbor_above(chunk_pool, metadata, slot_id, x, y, z);
+    let above_mat = ca_types::voxel_material_id(above);
+    if above_mat != 0 {
+        let above_phase = ca_types::mat_phase(materials, above_mat);
+        // phase 2 = liquid in our material table
+        if above_phase == 2 {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Reads the voxel above (x, y+1, z), crossing chunk boundary if needed.
+fn read_voxel_or_neighbor_above(
+    chunk_pool: &[u32],
+    metadata: &[u32],
+    slot_id: u32,
+    x: u32,
+    y: u32,
+    z: u32,
+) -> u32 {
+    if y + 1 < ca_types::CA_CHUNK_SIZE {
+        return read_voxel(chunk_pool, slot_id, x, y + 1, z);
+    }
+    // Cross-chunk: +Y neighbor is direction 2
+    let above_slot = ca_types::meta_neighbor_id(metadata, slot_id, 2);
+    if above_slot == 0xFFFFFFFF {
+        return 0; // No chunk above = air
+    }
+    read_voxel(chunk_pool, above_slot, x, 0, z)
+}
+
+/// Processes one column, spreading the first supported surface liquid horizontally.
+///
+/// Only surface liquid (supported from below, no liquid above) spreads.
+/// This prevents internal "boiling" oscillation where underwater voxels
+/// bounce back and forth.
 fn process_column(
     chunk_pool: &mut [u32],
     materials: &[u32],
@@ -207,9 +268,9 @@ fn process_column(
         let liquid = is_liquid(materials, voxel);
 
         if liquid {
-            // Check if supported (non-air below or at y=0)
-            let supported = check_support(chunk_pool, metadata, slot_id, x, y, z);
-            if supported {
+            // Only spread surface liquid (supported below, no liquid above)
+            let surface = is_surface_liquid(chunk_pool, materials, metadata, slot_id, x, y, z);
+            if surface {
                 let did_spread = try_spread_dir(chunk_pool, metadata, slot_id, x, y, z, voxel, dir);
                 if did_spread {
                     return; // One spread per column per tick
