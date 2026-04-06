@@ -33,6 +33,8 @@ struct Args {
     model_pos: Option<(f32, f32, f32)>,
     /// If true, use WorldManager for chunk-streamed procedural terrain.
     world: bool,
+    /// If true, use CaSimulation (sim2) instead of GpuSimulation.
+    sim2: bool,
 }
 
 fn parse_args() -> Args {
@@ -64,6 +66,7 @@ fn parse_args() -> Args {
         .and_then(|i| args.get(i + 1).cloned());
     let big = args.contains(&"--big".to_string());
     let world = args.contains(&"--world".to_string());
+    let sim2 = args.contains(&"--sim2".to_string());
     let model_pos = args
         .iter()
         .position(|a| a == "--model-pos")
@@ -80,7 +83,7 @@ fn parse_args() -> Args {
                 None
             }
         });
-    Args { headless, frames, output, substeps, scene, big, model, model_pos, world }
+    Args { headless, frames, output, substeps, scene, big, model, model_pos, world, sim2 }
 }
 
 fn main() -> Result<()> {
@@ -94,7 +97,7 @@ fn main() -> Result<()> {
     if args.headless { return headless::run_headless(&args); }
 
     let event_loop = EventLoop::new()?;
-    let mut application = app::App::new(args.substeps, args.scene.as_deref(), args.big, args.model.as_deref(), args.model_pos, args.world);
+    let mut application = app::App::new(args.substeps, args.scene.as_deref(), args.big, args.model.as_deref(), args.model_pos, args.world, args.sim2);
     event_loop.run_app(&mut application)?;
     tracing::info!("VOX Engine shut down");
     Ok(())

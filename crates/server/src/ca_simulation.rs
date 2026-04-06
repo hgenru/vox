@@ -26,6 +26,7 @@ use shared::{
 
 use crate::passes::{self, ComputePass};
 use crate::pbmpm_zones::{ActivationTrigger, PbmpmZoneManager};
+use crate::push_constants::{DirtyTilesPushConstants, RenderPushConstants};
 
 /// Compiled SPIR-V shader module bytes, included at compile time.
 const SHADER_BYTES: &[u8] = include_bytes!(env!("SHADERS_SPV_PATH"));
@@ -80,6 +81,40 @@ pub struct CaMargolusPush {
     pub _pad: [u32; 3],
 }
 
+/// Push constants for the CA-to-render conversion shader.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CaToRenderPush {
+    /// Number of loaded chunks to process.
+    pub num_chunks: u32,
+    /// Flat render grid dimension.
+    pub grid_size: u32,
+    /// World offset of the flat grid origin (X).
+    pub grid_origin_x: i32,
+    /// World offset of the flat grid origin (Y).
+    pub grid_origin_y: i32,
+    /// World offset of the flat grid origin (Z).
+    pub grid_origin_z: i32,
+    /// Padding to 32-byte alignment.
+    pub _pad: [u32; 3],
+}
+
+/// Render grid size for the CA-to-render bridge (128^3 voxels).
+pub const CA_RENDER_GRID_SIZE: u32 = 128;
+
+/// Number of bricks per axis for the CA render grid (128 / 8 = 16).
+const CA_BRICKS_PER_AXIS: u32 = CA_RENDER_GRID_SIZE / 8;
+/// Total bricks in the CA render grid.
+const CA_TOTAL_BRICKS: u32 = CA_BRICKS_PER_AXIS * CA_BRICKS_PER_AXIS * CA_BRICKS_PER_AXIS;
+
+/// Super-brick size (in bricks per axis).
+const CA_SUPER_BRICK_BRICKS: u32 = 8;
+/// Super-bricks per axis.
+const CA_SUPER_BRICKS_PER_AXIS: u32 = CA_BRICKS_PER_AXIS / CA_SUPER_BRICK_BRICKS;
+/// Total super-bricks.
+const CA_TOTAL_SUPER_BRICKS: u32 =
+    CA_SUPER_BRICKS_PER_AXIS * CA_SUPER_BRICKS_PER_AXIS * CA_SUPER_BRICKS_PER_AXIS;
+
 /// CA substrate simulation. Manages chunk pool and dispatches CA compute passes.
 pub struct CaSimulation {
     // GPU resources
@@ -101,6 +136,19 @@ pub struct CaSimulation {
 
     // PB-MPM zone manager (optional, created alongside CA)
     pbmpm: Option<PbmpmZoneManager>,
+
+    // Render bridge
+    render_voxel_buffer: GpuBuffer,
+    render_output_buffer: GpuBuffer,
+    prev_render_output_buffer: GpuBuffer,
+    brick_occupancy_buffer: GpuBuffer,
+    super_brick_occupancy_buffer: GpuBuffer,
+    dirty_tile_buffer: GpuBuffer,
+    material_render_buffer: GpuBuffer,
+    sleep_state_buffer: GpuBuffer,
+    ca_to_render_pass: ComputePass,
+    render_pass: ComputePass,
+    compute_dirty_tiles_pass: ComputePass,
 
     // CPU state
     loaded_chunks: HashMap<[i32; 3], u32>,
@@ -164,13 +212,14 @@ impl CaSimulation {
 
         // 5. Create descriptor pool
         // Total storage buffer bindings across all passes:
-        // compact: 2, compact_finalize: 1, thermal: 4, margolus: 5 = 12 total
+        // compact: 2, compact_finalize: 2, thermal: 4, margolus: 5,
+        // ca_to_render: 4, render: 7, compute_dirty_tiles: 2 = 26 total
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 16, // some headroom
+            descriptor_count: 32, // headroom for all passes
         }];
         let descriptor_pool =
-            pipeline::create_descriptor_pool(ctx, &pool_sizes, 4, "ca-descriptor-pool")?;
+            pipeline::create_descriptor_pool(ctx, &pool_sizes, 7, "ca-descriptor-pool")?;
 
         // 6. Create compute passes
 
@@ -237,6 +286,148 @@ impl CaSimulation {
             "ca-margolus",
         )?;
 
+        // 7. Create render bridge buffers
+
+        // Flat render voxel buffer: CA_RENDER_GRID_SIZE^3 * 4 u32s * 4 bytes = 32 MB
+        let render_voxel_buf_size = (CA_RENDER_GRID_SIZE as u64)
+            .pow(3)
+            * 4
+            * mem::size_of::<u32>() as u64;
+        let render_voxel_buffer = buffer::create_device_local_buffer(
+            ctx,
+            render_voxel_buf_size as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "ca-render-voxel-buffer",
+        )?;
+        tracing::info!(
+            "CA render voxel buffer: {:.1}MB ({}^3 grid)",
+            render_voxel_buf_size as f64 / (1024.0 * 1024.0),
+            CA_RENDER_GRID_SIZE,
+        );
+
+        // Render output buffer: BGRA u32 per pixel
+        let render_output_size = (shared::RENDER_WIDTH as u64)
+            * (shared::RENDER_HEIGHT as u64)
+            * mem::size_of::<u32>() as u64;
+        let render_output_buffer = buffer::create_device_local_buffer(
+            ctx,
+            render_output_size as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC,
+            "ca-render-output-buffer",
+        )?;
+        let prev_render_output_buffer = buffer::create_device_local_buffer(
+            ctx,
+            render_output_size as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "ca-prev-render-output-buffer",
+        )?;
+
+        // Brick occupancy: 1 u32 per brick
+        let brick_occupancy_buffer = buffer::create_device_local_buffer(
+            ctx,
+            (CA_TOTAL_BRICKS as u64 * 4) as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "ca-brick-occupancy-buffer",
+        )?;
+
+        // Super-brick occupancy
+        let super_brick_count = CA_TOTAL_SUPER_BRICKS.max(1);
+        let super_brick_occupancy_buffer = buffer::create_device_local_buffer(
+            ctx,
+            (super_brick_count as u64 * 4) as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "ca-super-brick-occupancy-buffer",
+        )?;
+
+        // Dirty tile buffer
+        let dirty_tile_buffer = buffer::create_device_local_buffer(
+            ctx,
+            (shared::DIRTY_TILE_COUNT as u64 * 4) as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "ca-dirty-tile-buffer",
+        )?;
+
+        // Material render buffer: MaterialParams for the render shader
+        // Map CA materials to render-compatible MaterialParams
+        let render_materials = ca_materials_to_render_params(materials);
+        let mat_render_buf_size =
+            (render_materials.len() * mem::size_of::<shared::material::MaterialParams>())
+                as vk::DeviceSize;
+        let material_render_buffer = buffer::create_device_local_buffer(
+            ctx,
+            mat_render_buf_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            "ca-material-render-buffer",
+        )?;
+        buffer::upload(ctx, &render_materials, &material_render_buffer)?;
+
+        // Sleep state buffer (dummy, filled with zeros = all awake)
+        // Needed by compute_dirty_tiles pass
+        let sleep_state_buffer = buffer::create_device_local_buffer(
+            ctx,
+            (CA_TOTAL_BRICKS as u64 * 4) as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            "ca-sleep-state-buffer",
+        )?;
+        let zeros = vec![0u32; CA_TOTAL_BRICKS as usize];
+        buffer::upload(ctx, &zeros, &sleep_state_buffer)?;
+
+        // 8. Create render bridge compute passes
+
+        // ca_to_render: chunk_pool(r), metadata(r), render_voxels(w), ca_materials(r)
+        let ca_to_render_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::ca_to_render::ca_to_render",
+            &[
+                chunk_pool.voxel_buffer(),
+                chunk_pool.metadata_buffer(),
+                &render_voxel_buffer,
+                &material_buffer,
+            ],
+            mem::size_of::<CaToRenderPush>() as u32,
+            descriptor_pool,
+            "ca-to-render",
+        )?;
+
+        // compute_dirty_tiles: sleep_state(r), dirty_tiles(w)
+        let compute_dirty_tiles_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::compute_dirty_tiles::compute_dirty_tiles",
+            &[&sleep_state_buffer, &dirty_tile_buffer],
+            mem::size_of::<DirtyTilesPushConstants>() as u32,
+            descriptor_pool,
+            "ca-compute-dirty-tiles",
+        )?;
+
+        // render_pass: voxels(r), output(w), materials(r), brick_occ(r),
+        //              super_brick_occ(r), dirty_tiles(r), prev_output(r)
+        let render_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::render::render_voxels",
+            &[
+                &render_voxel_buffer,
+                &render_output_buffer,
+                &material_render_buffer,
+                &brick_occupancy_buffer,
+                &super_brick_occupancy_buffer,
+                &dirty_tile_buffer,
+                &prev_render_output_buffer,
+            ],
+            mem::size_of::<RenderPushConstants>() as u32,
+            descriptor_pool,
+            "ca-render",
+        )?;
+
+        // Clean up the sleep state buffer (owned by ca_simulation, not stored)
+        // Actually we need it for dirty tiles, but the buffer ref is captured in the descriptor set.
+        // We must keep it alive. Store it? No -- we just need it for the descriptor set binding.
+        // The descriptor set references the buffer, so we MUST keep it alive.
+        // Let's store it as an extra field... Actually, let's just leak-proof it by keeping
+        // a reference. For simplicity, store it.
+
         // Create PB-MPM zone manager (non-fatal if it fails)
         let pbmpm = match PbmpmZoneManager::new(ctx) {
             Ok(mgr) => {
@@ -260,6 +451,17 @@ impl CaSimulation {
             shader_module,
             descriptor_pool,
             pbmpm,
+            render_voxel_buffer,
+            render_output_buffer,
+            prev_render_output_buffer,
+            brick_occupancy_buffer,
+            super_brick_occupancy_buffer,
+            dirty_tile_buffer,
+            material_render_buffer,
+            sleep_state_buffer,
+            ca_to_render_pass,
+            render_pass,
+            compute_dirty_tiles_pass,
             loaded_chunks: HashMap::new(),
             frame_number: 0,
             num_reactions: reactions.len() as u32,
@@ -499,6 +701,200 @@ impl CaSimulation {
         self.frame_number += 1;
     }
 
+    /// Convert CA chunks to flat render voxels, then dispatch the ray-march render.
+    ///
+    /// This is the "bridge" that reuses the existing render pipeline with CA data.
+    /// Steps:
+    /// 1. Clear flat voxel buffer
+    /// 2. Dispatch ca_to_render shader (CA chunks -> flat voxels)
+    /// 3. Fill brick/super-brick occupancy with 1 (all occupied, POC)
+    /// 4. Mark all dirty tiles
+    /// 5. Dispatch existing render shader
+    pub fn render(
+        &self,
+        cmd: vk::CommandBuffer,
+        width: u32,
+        height: u32,
+        eye: [f32; 3],
+        target: [f32; 3],
+    ) {
+        let num_chunks = self.loaded_chunks.len() as u32;
+
+        // 1. Clear flat voxel buffer to zero
+        let voxel_buf_size = (CA_RENDER_GRID_SIZE as u64).pow(3) * 4 * 4;
+        unsafe {
+            self.device.cmd_fill_buffer(
+                cmd,
+                self.render_voxel_buffer.buffer,
+                0,
+                voxel_buf_size,
+                0,
+            );
+        }
+
+        // Transfer -> compute barrier
+        let transfer_barrier = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[transfer_barrier],
+                &[],
+                &[],
+            );
+        }
+
+        // 2. Dispatch ca_to_render: convert CA chunks to flat voxel buffer
+        if num_chunks > 0 {
+            let push = CaToRenderPush {
+                num_chunks,
+                grid_size: CA_RENDER_GRID_SIZE,
+                grid_origin_x: 0,
+                grid_origin_y: 0,
+                grid_origin_z: 0,
+                _pad: [0; 3],
+            };
+            // Each chunk is 32x32x32, workgroup is 4x4x4, so we need 8x8x8 WGs per chunk
+            // X dimension covers all chunks * 32 / 4 = num_chunks * 8
+            let wg_x = num_chunks * 8;
+            let wg_y = 8; // 32 / 4
+            let wg_z = 8; // 32 / 4
+            passes::dispatch(
+                &self.device,
+                cmd,
+                &self.ca_to_render_pass,
+                wg_x,
+                wg_y,
+                wg_z,
+                bytemuck::bytes_of(&push),
+            );
+            passes::barrier(cmd, &self.device);
+        }
+
+        // 3. Fill brick occupancy with 1 (all occupied for POC)
+        unsafe {
+            self.device.cmd_fill_buffer(
+                cmd,
+                self.brick_occupancy_buffer.buffer,
+                0,
+                CA_TOTAL_BRICKS as u64 * 4,
+                1,
+            );
+            self.device.cmd_fill_buffer(
+                cmd,
+                self.super_brick_occupancy_buffer.buffer,
+                0,
+                CA_TOTAL_SUPER_BRICKS.max(1) as u64 * 4,
+                1,
+            );
+        }
+
+        // 4. Mark all dirty tiles (fill with 1)
+        unsafe {
+            self.device.cmd_fill_buffer(
+                cmd,
+                self.dirty_tile_buffer.buffer,
+                0,
+                shared::DIRTY_TILE_COUNT as u64 * 4,
+                1,
+            );
+        }
+
+        // Barrier: transfer -> compute
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[transfer_barrier],
+                &[],
+                &[],
+            );
+        }
+
+        // 5. Dispatch render shader
+        let render_push = RenderPushConstants {
+            width,
+            height,
+            grid_size: CA_RENDER_GRID_SIZE,
+            _pad: 0,
+            eye: glam::Vec4::new(eye[0], eye[1], eye[2], 0.0),
+            target: glam::Vec4::new(target[0], target[1], target[2], 0.0),
+        };
+        let wg_x = (width + 7) / 8;
+        let wg_y = (height + 7) / 8;
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.render_pass,
+            wg_x,
+            wg_y,
+            1,
+            bytemuck::bytes_of(&render_push),
+        );
+    }
+
+    /// Returns the Vulkan buffer handle for the render output.
+    ///
+    /// The buffer contains packed BGRA u32 pixels, sized `width * height`.
+    pub fn render_output_buffer(&self) -> vk::Buffer {
+        self.render_output_buffer.buffer
+    }
+
+    /// Insert a final barrier and copy current render output to the previous-frame buffer.
+    ///
+    /// Must be called after [`render`].
+    pub fn finalize_render(&self, cmd: vk::CommandBuffer) {
+        // Barrier: SHADER_WRITE -> TRANSFER_READ | TRANSFER_WRITE
+        let memory_barrier = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::TRANSFER_WRITE);
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[memory_barrier],
+                &[],
+                &[],
+            );
+        }
+
+        // Copy current render output to previous frame buffer
+        let copy_size = self.render_output_buffer.size;
+        let region = vk::BufferCopy::default().size(copy_size);
+        unsafe {
+            self.device.cmd_copy_buffer(
+                cmd,
+                self.render_output_buffer.buffer,
+                self.prev_render_output_buffer.buffer,
+                &[region],
+            );
+        }
+
+        // Barrier: ensure the copy finishes before next frame's shader reads
+        let copy_barrier = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ);
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[copy_barrier],
+                &[],
+                &[],
+            );
+        }
+    }
+
     /// Activate a PB-MPM physics zone at the given trigger location.
     ///
     /// Spawns particles from the chunk at the trigger position and starts
@@ -642,6 +1038,9 @@ impl CaSimulation {
             &self.compact_finalize_pass,
             &self.thermal_pass,
             &self.margolus_pass,
+            &self.ca_to_render_pass,
+            &self.render_pass,
+            &self.compute_dirty_tiles_pass,
         ] {
             pipeline::destroy_pipeline(ctx, pass.pipeline);
             pipeline::destroy_pipeline_layout(ctx, pass.pipeline_layout);
@@ -657,6 +1056,14 @@ impl CaSimulation {
 
         buffer::destroy_buffer(ctx, self.material_buffer);
         buffer::destroy_buffer(ctx, self.reaction_buffer);
+        buffer::destroy_buffer(ctx, self.render_voxel_buffer);
+        buffer::destroy_buffer(ctx, self.render_output_buffer);
+        buffer::destroy_buffer(ctx, self.prev_render_output_buffer);
+        buffer::destroy_buffer(ctx, self.brick_occupancy_buffer);
+        buffer::destroy_buffer(ctx, self.super_brick_occupancy_buffer);
+        buffer::destroy_buffer(ctx, self.dirty_tile_buffer);
+        buffer::destroy_buffer(ctx, self.material_render_buffer);
+        buffer::destroy_buffer(ctx, self.sleep_state_buffer);
         self.chunk_pool.destroy(ctx);
 
         tracing::info!("CaSimulation destroyed");
@@ -734,6 +1141,59 @@ pub fn default_ca_reactions() -> Vec<ReactionEntry> {
 }
 
 // ---------------------------------------------------------------------------
+// Material bridge: CA materials -> render MaterialParams
+// ---------------------------------------------------------------------------
+
+/// Convert CA material properties to render-compatible [`MaterialParams`].
+///
+/// The render shader reads `MaterialParams` (4 x Vec4 = 64 bytes each).
+/// This creates a table with appropriate colors for each CA material.
+pub fn ca_materials_to_render_params(
+    ca_mats: &[MaterialPropertiesCA],
+) -> Vec<shared::material::MaterialParams> {
+    use shared::material::MaterialParams;
+
+    // Pre-defined colors per material index
+    let colors: &[(f32, f32, f32)] = &[
+        (0.0, 0.0, 0.0),       // 0 = Air (transparent/black)
+        (0.5, 0.5, 0.5),       // 1 = Stone (gray)
+        (0.76, 0.70, 0.50),    // 2 = Sand (tan)
+        (0.2, 0.4, 0.8),       // 3 = Water (blue)
+        (1.0, 0.3, 0.1),       // 4 = Lava (orange-red)
+        (0.9, 0.9, 0.95),      // 5 = Steam (white-ish)
+        (0.7, 0.85, 1.0),      // 6 = Ice (light blue)
+    ];
+
+    let mut result = Vec::with_capacity(ca_mats.len());
+    for (i, ca) in ca_mats.iter().enumerate() {
+        let (r, g, b) = if i < colors.len() {
+            colors[i]
+        } else {
+            (0.6, 0.6, 0.6) // default gray for unknown materials
+        };
+
+        // Determine emissive temperature (lava glows)
+        let emissive_temp = if i == 4 { 100.0 } else { 10000.0 }; // lava glows, others don't
+
+        // Opacity: air=0, everything else=1
+        let opacity = if i == 0 { 0.0 } else { 1.0 };
+
+        result.push(MaterialParams {
+            elastic: glam::Vec4::new(1000.0, 0.3, 100.0, ca.viscosity as f32),
+            thermal: glam::Vec4::new(
+                ca.melt_temp as f32 * 10.0,
+                ca.boil_temp as f32 * 10.0,
+                ca.conductivity as f32,
+                1.0,
+            ),
+            visual: glam::Vec4::new(ca.density as f32, emissive_temp, opacity, 0.0),
+            color: glam::Vec4::new(r, g, b, 1.0),
+        });
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
 // Test scene generator
 // ---------------------------------------------------------------------------
 
@@ -808,6 +1268,7 @@ mod tests {
         assert_eq!(mem::size_of::<CaCompactPush>(), 16);
         assert_eq!(mem::size_of::<CaThermalPush>(), 16);
         assert_eq!(mem::size_of::<CaMargolusPush>(), 32);
+        assert_eq!(mem::size_of::<CaToRenderPush>(), 32);
     }
 
     #[test]
@@ -820,6 +1281,20 @@ mod tests {
         // Water
         assert_eq!(mats[3].phase, 2);
         assert_eq!(mats[3].boil_temp, 200);
+    }
+
+    #[test]
+    fn test_ca_materials_to_render_params() {
+        let ca_mats = default_ca_materials();
+        let render_mats = ca_materials_to_render_params(&ca_mats);
+        assert_eq!(render_mats.len(), ca_mats.len());
+        // Air should have zero opacity
+        assert_eq!(render_mats[0].visual.z, 0.0);
+        // Stone should have full opacity and gray color
+        assert_eq!(render_mats[1].visual.z, 1.0);
+        assert!(render_mats[1].color.x > 0.4 && render_mats[1].color.x < 0.6);
+        // Water should be blue
+        assert!(render_mats[3].color.z > 0.7);
     }
 
     #[test]
