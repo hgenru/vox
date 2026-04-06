@@ -280,9 +280,131 @@ fn apply_reaction_outputs(voxel: u32, new_mat: u32, heat_delta: i32) -> u32 {
     ca_types::voxel_set_temperature(v, clamped)
 }
 
+// ---- Horizontal spreading helpers ----
+
+/// Checks if a voxel is a fluid (liquid or gas) that can spread laterally.
+fn is_spreadable(materials: &[u32], mat_id: u32) -> bool {
+    if mat_id == 0 {
+        return false;
+    }
+    let phase = ca_types::mat_phase(materials, mat_id);
+    // liquid=2, gas=3 can spread; powder=1 can also spread (sand slides)
+    phase >= 1
+}
+
+/// Tries to swap two horizontal neighbors: spreads fluid into air.
+///
+/// Returns (new_a, new_b). Swaps if `a` is spreadable and `b` is air,
+/// or if `a` is heavier fluid and `b` is lighter fluid.
+fn try_horizontal_swap(materials: &[u32], a: u32, b: u32) -> (u32, u32) {
+    let mat_a = ca_types::voxel_material_id(a);
+    let mat_b = ca_types::voxel_material_id(b);
+
+    // Spread into air
+    if mat_b == 0 && is_spreadable(materials, mat_a) {
+        // Only liquids and gases spread laterally (not powders)
+        let phase_a = ca_types::mat_phase(materials, mat_a);
+        if phase_a >= 2 {
+            return (b, a);
+        }
+    }
+    if mat_a == 0 && is_spreadable(materials, mat_b) {
+        let phase_b = ca_types::mat_phase(materials, mat_b);
+        if phase_b >= 2 {
+            return (b, a);
+        }
+    }
+
+    (a, b)
+}
+
+/// Applies horizontal spreading in the bottom layer of the 2x2x2 block.
+///
+/// Separated to keep branch count low per function (trap #15).
+/// Uses a deterministic RNG to choose spread direction, preventing bias.
+fn apply_horizontal_spread_bottom(
+    materials: &[u32],
+    v000: &mut u32,
+    v100: &mut u32,
+    v001: &mut u32,
+    v101: &mut u32,
+    rng: u32,
+) {
+    // Alternate between X-axis and Z-axis spreading based on rng
+    if (rng & 1) == 0 {
+        // X-axis first, then Z-axis
+        let (a, b) = try_horizontal_swap(materials, *v000, *v100);
+        *v000 = a;
+        *v100 = b;
+        let (a, b) = try_horizontal_swap(materials, *v001, *v101);
+        *v001 = a;
+        *v101 = b;
+        // Z-axis
+        let (a, b) = try_horizontal_swap(materials, *v000, *v001);
+        *v000 = a;
+        *v001 = b;
+        let (a, b) = try_horizontal_swap(materials, *v100, *v101);
+        *v100 = a;
+        *v101 = b;
+    } else {
+        // Z-axis first, then X-axis
+        let (a, b) = try_horizontal_swap(materials, *v000, *v001);
+        *v000 = a;
+        *v001 = b;
+        let (a, b) = try_horizontal_swap(materials, *v100, *v101);
+        *v100 = a;
+        *v101 = b;
+        // X-axis
+        let (a, b) = try_horizontal_swap(materials, *v000, *v100);
+        *v000 = a;
+        *v100 = b;
+        let (a, b) = try_horizontal_swap(materials, *v001, *v101);
+        *v001 = a;
+        *v101 = b;
+    }
+}
+
+/// Applies horizontal spreading in the top layer of the 2x2x2 block.
+fn apply_horizontal_spread_top(
+    materials: &[u32],
+    v010: &mut u32,
+    v110: &mut u32,
+    v011: &mut u32,
+    v111: &mut u32,
+    rng: u32,
+) {
+    if (rng & 2) == 0 {
+        let (a, b) = try_horizontal_swap(materials, *v010, *v110);
+        *v010 = a;
+        *v110 = b;
+        let (a, b) = try_horizontal_swap(materials, *v011, *v111);
+        *v011 = a;
+        *v111 = b;
+        let (a, b) = try_horizontal_swap(materials, *v010, *v011);
+        *v010 = a;
+        *v011 = b;
+        let (a, b) = try_horizontal_swap(materials, *v110, *v111);
+        *v110 = a;
+        *v111 = b;
+    } else {
+        let (a, b) = try_horizontal_swap(materials, *v010, *v011);
+        *v010 = a;
+        *v011 = b;
+        let (a, b) = try_horizontal_swap(materials, *v110, *v111);
+        *v110 = a;
+        *v111 = b;
+        let (a, b) = try_horizontal_swap(materials, *v010, *v110);
+        *v010 = a;
+        *v110 = b;
+        let (a, b) = try_horizontal_swap(materials, *v011, *v111);
+        *v011 = a;
+        *v111 = b;
+    }
+}
+
 // ---- Main block processing ----
 
-/// Processes one 2x2x2 Margolus block: applies gravity and reactions.
+/// Processes one 2x2x2 Margolus block: applies gravity, spreading, and reactions.
 ///
 /// This is the main orchestration function called from the entry point.
 fn margolus_main(
@@ -341,7 +463,20 @@ fn margolus_main(
     v111 = new_top;
     v101 = new_bot;
 
-    // --- Step 3: Apply chemical reactions on edges ---
+    // --- Step 3: Horizontal spreading (liquids/gases flow sideways) ---
+    let rng = ca_types::hash_position(bx, by, bz, frame);
+    apply_horizontal_spread_bottom(
+        materials,
+        &mut v000, &mut v100, &mut v001, &mut v101,
+        rng,
+    );
+    apply_horizontal_spread_top(
+        materials,
+        &mut v010, &mut v110, &mut v011, &mut v111,
+        rng,
+    );
+
+    // --- Step 4: Apply chemical reactions on edges ---
     apply_block_reactions(
         &mut v000, &mut v100, &mut v010, &mut v110,
         &mut v001, &mut v101, &mut v011, &mut v111,

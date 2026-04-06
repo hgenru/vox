@@ -101,9 +101,10 @@ fn compute_thermal_delta(
         + neighbor_temps[3] + neighbor_temps[4] + neighbor_temps[5];
     let avg_temp = sum / 6;
 
-    // Delta = conductivity * (avg - my) >> 8  (fixed-point: conductivity/256)
+    // Delta = conductivity * (avg - my) >> 4  (fixed-point: conductivity/16)
+    // Using >> 4 instead of >> 8 so small conductivities (1-8) produce visible changes.
     let diff = avg_temp as i32 - my_temp as i32;
-    (conductivity as i32 * diff) >> 8
+    (conductivity as i32 * diff) >> 4
 }
 
 /// Checks for melting phase transition and returns a new voxel if triggered.
