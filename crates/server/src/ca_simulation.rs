@@ -1061,6 +1061,78 @@ impl CaSimulation {
         Ok(())
     }
 
+    /// Debug: readback the first N u32 values from the dirty list buffer.
+    ///
+    /// Useful for verifying that compact/finalize wrote the expected dirty count
+    /// and indirect dispatch args. Returns up to `count` u32 values.
+    pub fn debug_readback_dirty_list(
+        &self,
+        ctx: &VulkanContext,
+        count: usize,
+    ) -> anyhow::Result<Vec<u32>> {
+        let byte_size = (count * 4) as vk::DeviceSize;
+        let staging =
+            buffer::create_readback_staging_buffer(ctx, byte_size, "dirty-list-readback")?;
+
+        ctx.execute_one_shot(|cmd| {
+            let region = vk::BufferCopy::default().size(byte_size);
+            unsafe {
+                ctx.device.cmd_copy_buffer(
+                    cmd,
+                    self.chunk_pool.dirty_list_buffer().buffer,
+                    staging.buffer,
+                    &[region],
+                );
+            }
+        })?;
+
+        let result = {
+            let mapped = staging
+                .mapped_slice()
+                .ok_or_else(|| anyhow::anyhow!("failed to map dirty list staging buffer"))?;
+            let typed: &[u32] = bytemuck::cast_slice(&mapped[..byte_size as usize]);
+            typed.to_vec()
+        };
+        buffer::destroy_buffer(ctx, staging);
+        Ok(result)
+    }
+
+    /// Debug: readback metadata for a slot (returns 16 u32 values = 64 bytes).
+    pub fn debug_readback_metadata(
+        &self,
+        ctx: &VulkanContext,
+        slot_id: u32,
+    ) -> anyhow::Result<Vec<u32>> {
+        let byte_size = 64u64; // ChunkGpuMeta is 64 bytes
+        let staging =
+            buffer::create_readback_staging_buffer(ctx, byte_size, "metadata-readback")?;
+        let src_offset = u64::from(slot_id) * 64;
+
+        ctx.execute_one_shot(|cmd| {
+            let region = vk::BufferCopy::default()
+                .src_offset(src_offset)
+                .size(byte_size);
+            unsafe {
+                ctx.device.cmd_copy_buffer(
+                    cmd,
+                    self.chunk_pool.metadata_buffer().buffer,
+                    staging.buffer,
+                    &[region],
+                );
+            }
+        })?;
+
+        let result = {
+            let mapped = staging
+                .mapped_slice()
+                .ok_or_else(|| anyhow::anyhow!("failed to map metadata staging buffer"))?;
+            let typed: &[u32] = bytemuck::cast_slice(&mapped[..byte_size as usize]);
+            typed.to_vec()
+        };
+        buffer::destroy_buffer(ctx, staging);
+        Ok(result)
+    }
+
     /// Number of loaded chunks.
     pub fn loaded_count(&self) -> usize {
         self.loaded_chunks.len()
@@ -1325,7 +1397,7 @@ fn surface_hash(x: usize, y: usize, z: usize) -> u32 {
 /// Pick a stone material variant (1, 7, 8, or 9) based on position.
 /// Creates visible patches of different stone shades across the terrain.
 fn pick_stone_variant(wx: usize, wy: usize, wz: usize) -> u16 {
-    let h = surface_hash(wx, wy, wz);
+    let _h = surface_hash(wx, wy, wz);
     // Use large-scale noise for patches (not per-voxel)
     let patch = surface_hash(wx / 4, wy / 4, wz / 4) % 4;
     match patch {
@@ -1497,7 +1569,12 @@ mod tests {
         let (_, data) = &scene[0]; // (0,0,0)
         // Voxel at (0, 0, 0) -> index 0*32*32 + 0*32 + 0 = 0
         let v = Voxel(data[0]);
-        assert_eq!(v.material_id(), 1); // stone (underground)
+        // Stone variants: 1=stone, 7=dark stone, 8=light stone, 9=mossy stone
+        assert!(
+            matches!(v.material_id(), 1 | 7 | 8 | 9),
+            "underground voxel should be a stone variant, got {}",
+            v.material_id()
+        );
     }
 
     // --- GPU tests (require VulkanContext, run with --test-threads=1) ---
@@ -1587,6 +1664,309 @@ mod tests {
             .expect("should have data");
         assert_eq!(downloaded, data);
         assert_eq!(sim.loaded_count(), 0);
+
+        sim.destroy(&ctx);
+    }
+
+    #[test]
+    fn test_ca_metadata_dirty_flag() {
+        init_tracing();
+        let ctx = VulkanContext::new().expect("VulkanContext");
+        let mats = default_ca_materials();
+        let reactions = default_ca_reactions();
+        let mut sim =
+            CaSimulation::new(&ctx, &mats, &reactions, 64).expect("CaSimulation");
+
+        // Load a chunk with some non-air voxels (triggers dirty flag)
+        let mut data = vec![0u32; CA_CHUNK_VOXELS];
+        data[0] = Voxel::new(1, 128, 0, 0, 0).0; // stone
+        sim.load_chunk(&ctx, [0, 0, 0], &data, [-1; 6]).expect("load");
+
+        // Readback metadata for slot 0: flags at offset 11 should have bit 0 set
+        let meta = sim.debug_readback_metadata(&ctx, 0).expect("readback meta");
+        println!("Metadata for slot 0: {:?}", meta);
+        println!("  world_pos: [{}, {}, {}, {}]", meta[0], meta[1], meta[2], meta[3]);
+        println!("  neighbor_ids: [{}, {}, {}, {}, {}, {}]", meta[4], meta[5], meta[6], meta[7], meta[8], meta[9]);
+        println!("  activity: {}", meta[10]);
+        println!("  flags: {} (dirty={})", meta[11], meta[11] & 1);
+        assert_eq!(meta[11] & 1, 1, "dirty flag should be set after load_chunk");
+
+        sim.destroy(&ctx);
+    }
+
+    #[test]
+    fn test_ca_compact_finds_dirty_chunks() {
+        init_tracing();
+        let ctx = VulkanContext::new().expect("VulkanContext");
+        let mats = default_ca_materials();
+        let reactions = default_ca_reactions();
+        let mut sim =
+            CaSimulation::new(&ctx, &mats, &reactions, 64).expect("CaSimulation");
+
+        // Load a chunk (should be dirty)
+        let mut data = vec![0u32; CA_CHUNK_VOXELS];
+        data[0] = Voxel::new(1, 128, 0, 0, 0).0;
+        sim.load_chunk(&ctx, [0, 0, 0], &data, [-1; 6]).expect("load");
+
+        // Run just the compact pass (step does compact + thermal + margolus)
+        // We run a full step to exercise the whole pipeline, then readback dirty list
+        ctx.execute_one_shot(|cmd| {
+            sim.step(cmd, &ctx);
+        })
+        .expect("step");
+
+        // Readback dirty list: [dirty_count, dispatch_x, dispatch_y, dispatch_z, slot_id_0, ...]
+        let dirty = sim.debug_readback_dirty_list(&ctx, 8).expect("readback dirty");
+        println!("Dirty list after step: {:?}", dirty);
+        println!("  dirty_count: {}", dirty[0]);
+        println!("  dispatch_x: {}", dirty[1]);
+        println!("  dispatch_y: {}", dirty[2]);
+        println!("  dispatch_z: {}", dirty[3]);
+        if dirty[0] > 0 {
+            println!("  first dirty slot_id: {}", dirty[4]);
+        }
+
+        assert!(
+            dirty[0] > 0,
+            "compact pass should find at least 1 dirty chunk"
+        );
+        assert_eq!(dirty[4], 0, "first dirty slot should be slot 0");
+
+        sim.destroy(&ctx);
+    }
+
+    #[test]
+    fn test_ca_physics_water_falls() {
+        init_tracing();
+        let ctx = VulkanContext::new().expect("VulkanContext");
+        let mats = default_ca_materials();
+        let reactions = default_ca_reactions();
+        let mut sim =
+            CaSimulation::new(&ctx, &mats, &reactions, 64).expect("CaSimulation");
+
+        // Create chunk: stone floor at y=0..3, water at y=5, air at y=4
+        let mut data = vec![0u32; CA_CHUNK_VOXELS];
+
+        // Stone floor (y=0..3)
+        for z in 0..32u32 {
+            for x in 0..32u32 {
+                for y in 0..4u32 {
+                    let idx = (z * 32 * 32 + y * 32 + x) as usize;
+                    data[idx] = Voxel::new(1, 128, 0, 0, 0).0; // stone
+                }
+            }
+        }
+
+        // Water at y=5 (center of chunk)
+        for z in 10..20u32 {
+            for x in 10..20u32 {
+                let idx = (z * 32 * 32 + 5 * 32 + x) as usize;
+                data[idx] = Voxel::new(3, 128, 0, 0, 0).0; // water
+            }
+        }
+
+        sim.load_chunk(&ctx, [0, 0, 0], &data, [-1; 6]).expect("load");
+
+        // Helper to count water at a given y-level in the 10..20 xz region
+        fn count_water_at_y(data: &[u32], y: u32) -> usize {
+            let mut count = 0;
+            for z in 10..20u32 {
+                for x in 10..20u32 {
+                    let idx = (z * 32 * 32 + y * 32 + x) as usize;
+                    if Voxel(data[idx]).material_id() == 3 {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        }
+
+        // Count water at y=4 and y=5 before step
+        let pre = sim.download_chunk(&ctx, [0, 0, 0]).expect("download pre");
+        let pre_y5 = count_water_at_y(&pre, 5);
+        let pre_y4 = count_water_at_y(&pre, 4);
+        println!("BEFORE step: water at y=5: {}, water at y=4: {}", pre_y5, pre_y4);
+
+        // Run physics step
+        ctx.execute_one_shot(|cmd| {
+            sim.step(cmd, &ctx);
+        })
+        .expect("step");
+
+        // Download and check
+        let result = sim.download_chunk(&ctx, [0, 0, 0]).expect("download post");
+        let post_y5 = count_water_at_y(&result, 5);
+        let post_y4 = count_water_at_y(&result, 4);
+        println!("AFTER step: water at y=5: {}, water at y=4: {}", post_y5, post_y4);
+
+        // Also check dirty list to verify compact pass worked
+        let dirty = sim.debug_readback_dirty_list(&ctx, 8).expect("dirty list");
+        println!("Dirty list: count={}, dispatch_x={}, slot={}", dirty[0], dirty[1], dirty[4]);
+
+        assert!(
+            post_y4 > 0,
+            "Water should have fallen from y=5 to y=4 after one step. \
+             Before: y5={} y4={}, After: y5={} y4={}",
+            pre_y5, pre_y4, post_y5, post_y4,
+        );
+
+        sim.destroy(&ctx);
+    }
+
+    #[test]
+    fn test_ca_physics_multi_step() {
+        init_tracing();
+        let ctx = VulkanContext::new().expect("VulkanContext");
+        let mats = default_ca_materials();
+        let reactions = default_ca_reactions();
+        let mut sim =
+            CaSimulation::new(&ctx, &mats, &reactions, 64).expect("CaSimulation");
+
+        // Create chunk: stone at y=0..3, air at y=4..6, water at y=10
+        let mut data = vec![0u32; CA_CHUNK_VOXELS];
+        for z in 0..32u32 {
+            for x in 0..32u32 {
+                for y in 0..4u32 {
+                    let idx = (z * 32 * 32 + y * 32 + x) as usize;
+                    data[idx] = Voxel::new(1, 128, 0, 0, 0).0;
+                }
+            }
+        }
+        // Water at y=10
+        for z in 10..20u32 {
+            for x in 10..20u32 {
+                let idx = (z * 32 * 32 + 10 * 32 + x) as usize;
+                data[idx] = Voxel::new(3, 128, 0, 0, 0).0;
+            }
+        }
+
+        sim.load_chunk(&ctx, [0, 0, 0], &data, [-1; 6]).expect("load");
+
+        // Run 5 steps
+        for step_i in 0..5u32 {
+            ctx.execute_one_shot(|cmd| {
+                sim.step(cmd, &ctx);
+            })
+            .expect("step");
+
+            let result = sim.download_chunk(&ctx, [0, 0, 0]).expect("download");
+            let dirty = sim.debug_readback_dirty_list(&ctx, 8).expect("dirty");
+
+            // Count total water voxels in the whole chunk (water spreads horizontally)
+            let mut total_water = 0u32;
+            let mut min_water_y = 32u32;
+            for y in 0..32u32 {
+                for z in 0..32u32 {
+                    for x in 0..32u32 {
+                        let idx = (z * 32 * 32 + y * 32 + x) as usize;
+                        if Voxel(result[idx]).material_id() == 3 {
+                            total_water += 1;
+                            if y < min_water_y {
+                                min_water_y = y;
+                            }
+                        }
+                    }
+                }
+            }
+            println!(
+                "Step {}: min_water_y={}, total_water={}, dirty_count={}",
+                step_i, min_water_y, total_water, dirty[0]
+            );
+        }
+
+        // After 5 steps, water should have fallen AND spread
+        let result = sim.download_chunk(&ctx, [0, 0, 0]).expect("download final");
+        let mut water_at_y4 = 0;
+        for z in 0..32u32 {
+            for x in 0..32u32 {
+                let idx = (z * 32 * 32 + 4 * 32 + x) as usize;
+                if Voxel(result[idx]).material_id() == 3 {
+                    water_at_y4 += 1;
+                }
+            }
+        }
+        println!("Water at y=4 (entire xz plane) after 5 steps: {}", water_at_y4);
+        assert!(
+            water_at_y4 > 0,
+            "Water should reach y=4 (stone top) after falling from y=10"
+        );
+
+        sim.destroy(&ctx);
+    }
+
+    #[test]
+    fn test_ca_physics_test_scene() {
+        init_tracing();
+        let ctx = VulkanContext::new().expect("VulkanContext");
+        let mats = default_ca_materials();
+        let reactions = default_ca_reactions();
+        let mut sim =
+            CaSimulation::new(&ctx, &mats, &reactions, 64).expect("CaSimulation");
+
+        // Load the actual test scene (same as used by --sim2 flag)
+        let scene = generate_test_scene();
+        for (coord, voxel_data) in &scene {
+            sim.load_chunk(&ctx, *coord, voxel_data, [-1; 6]).expect("load");
+        }
+        println!("Loaded {} chunks", sim.loaded_count());
+
+        // Snapshot: count all voxels by material across all chunks
+        let coords: Vec<[i32; 3]> = scene.iter().map(|(c, _)| *c).collect();
+
+        let count_materials = |sim: &CaSimulation| -> [usize; 10] {
+            let mut counts = [0usize; 10];
+            for coord in &coords {
+                let data = sim.download_chunk(&ctx, *coord).unwrap();
+                for &v in &data {
+                    let mat = Voxel(v).material_id() as usize;
+                    if mat < 10 {
+                        counts[mat] += 1;
+                    }
+                }
+            }
+            counts
+        };
+
+        let before = count_materials(&sim);
+        println!(
+            "BEFORE: air={}, stone={}, sand={}, water={}, lava={}, steam={}, ice={}",
+            before[0], before[1], before[2], before[3], before[4], before[5], before[6]
+        );
+
+        // Run 10 steps
+        for _ in 0..10 {
+            ctx.execute_one_shot(|cmd| {
+                sim.step(cmd, &ctx);
+            })
+            .expect("step");
+        }
+
+        let after = count_materials(&sim);
+        println!(
+            "AFTER:  air={}, stone={}, sand={}, water={}, lava={}, steam={}, ice={}",
+            after[0], after[1], after[2], after[3], after[4], after[5], after[6]
+        );
+
+        // Check if ANYTHING changed
+        let any_changed = (0..10).any(|i| before[i] != after[i]);
+        let total_changed_voxels: usize = {
+            let mut changed = 0usize;
+            for i in 0..10 {
+                if before[i] != after[i] {
+                    changed += (before[i] as i64 - after[i] as i64).unsigned_abs() as usize;
+                }
+            }
+            changed
+        };
+
+        println!("Any material counts changed: {}", any_changed);
+        println!("Total material count delta: {}", total_changed_voxels);
+
+        // The scene must NOT be static: thermal diffusion should cause lava→stone transitions
+        assert!(
+            any_changed,
+            "Test scene should not be static: thermal diffusion + spreading should cause changes"
+        );
 
         sim.destroy(&ctx);
     }
