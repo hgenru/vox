@@ -37,6 +37,9 @@ const THERMAL_WG_PER_CHUNK: u32 = 512;
 /// Workgroups per chunk for Margolus pass: 4x4x4 = 64.
 const MARGOLUS_WG_PER_CHUNK: u32 = 64;
 
+/// Workgroups per chunk for gravity pass: 32/8 = 4 per axis, 4*4 = 16.
+const GRAVITY_WG_PER_CHUNK: u32 = 16;
+
 // ---------------------------------------------------------------------------
 // Push constant structs (mirroring shader-side definitions)
 // ---------------------------------------------------------------------------
@@ -78,6 +81,16 @@ pub struct CaMargolusPush {
     /// Number of active reactions.
     pub num_reactions: u32,
     /// Padding to 32-byte alignment.
+    pub _pad: [u32; 3],
+}
+
+/// Push constants for the CA gravity pass.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CaGravityPush {
+    /// Current frame number.
+    pub frame_number: u32,
+    /// Padding to 16-byte alignment.
     pub _pad: [u32; 3],
 }
 
@@ -127,6 +140,7 @@ pub struct CaSimulation {
     compact_finalize_pass: ComputePass,
     thermal_pass: ComputePass,
     margolus_pass: ComputePass,
+    gravity_pass: ComputePass,
 
     // Shader module (kept alive for pipeline lifetime)
     shader_module: vk::ShaderModule,
@@ -216,10 +230,10 @@ impl CaSimulation {
         // ca_to_render: 4, render: 7, compute_dirty_tiles: 2 = 26 total
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 32, // headroom for all passes
+            descriptor_count: 36, // headroom for all passes
         }];
         let descriptor_pool =
-            pipeline::create_descriptor_pool(ctx, &pool_sizes, 7, "ca-descriptor-pool")?;
+            pipeline::create_descriptor_pool(ctx, &pool_sizes, 8, "ca-descriptor-pool")?;
 
         // 6. Create compute passes
 
@@ -284,6 +298,22 @@ impl CaSimulation {
             mem::size_of::<CaMargolusPush>() as u32,
             descriptor_pool,
             "ca-margolus",
+        )?;
+
+        // gravity pass: binding 0 = voxel_buffer, 1 = metadata, 2 = dirty_list, 3 = materials
+        let gravity_pass = passes::create_pass(
+            ctx,
+            shader_module,
+            c"compute::ca_gravity::ca_gravity",
+            &[
+                chunk_pool.voxel_buffer(),
+                chunk_pool.metadata_buffer(),
+                chunk_pool.dirty_list_buffer(),
+                &material_buffer,
+            ],
+            mem::size_of::<CaGravityPush>() as u32,
+            descriptor_pool,
+            "ca-gravity",
         )?;
 
         // 7. Create render bridge buffers
@@ -448,6 +478,7 @@ impl CaSimulation {
             compact_finalize_pass,
             thermal_pass,
             margolus_pass,
+            gravity_pass,
             shader_module,
             descriptor_pool,
             pbmpm,
@@ -472,7 +503,8 @@ impl CaSimulation {
     /// Record one CA simulation step into the given command buffer.
     ///
     /// Dispatches: compact -> finalize(thermal) -> thermal(indirect) ->
-    /// finalize(margolus) -> margolus_even(indirect) -> margolus_odd(indirect).
+    /// finalize(margolus) -> margolus_even(indirect) -> margolus_odd(indirect) ->
+    /// finalize(gravity) -> gravity(indirect).
     pub fn step(&mut self, cmd: vk::CommandBuffer, _ctx: &VulkanContext) {
         let total_loaded = self.loaded_chunks.len() as u32;
         if total_loaded == 0 {
@@ -680,6 +712,75 @@ impl CaSimulation {
                 vk::ShaderStageFlags::COMPUTE,
                 0,
                 bytemuck::bytes_of(&margolus_odd_push),
+            );
+        }
+        pipeline::cmd_dispatch_indirect(
+            &self.device,
+            cmd,
+            self.chunk_pool.dirty_list_buffer(),
+            4,
+        );
+        passes::barrier(cmd, &self.device);
+
+        // 8. Re-finalize for gravity (wg_per_chunk = 16)
+        let finalize_gravity_push = CaCompactPush {
+            total_chunks: total_loaded,
+            workgroups_per_chunk: GRAVITY_WG_PER_CHUNK,
+            _pad: [0; 2],
+        };
+        passes::dispatch(
+            &self.device,
+            cmd,
+            &self.compact_finalize_pass,
+            1,
+            1,
+            1,
+            bytemuck::bytes_of(&finalize_gravity_push),
+        );
+
+        // Barrier: compute -> indirect + compute
+        let indirect_barrier_gravity = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+            .dst_access_mask(
+                vk::AccessFlags::INDIRECT_COMMAND_READ | vk::AccessFlags::SHADER_READ,
+            );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::DRAW_INDIRECT | vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[indirect_barrier_gravity],
+                &[],
+                &[],
+            );
+        }
+
+        // 9. Dispatch gravity pass (INDIRECT)
+        let gravity_push = CaGravityPush {
+            frame_number: self.frame_number,
+            _pad: [0; 3],
+        };
+        unsafe {
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.gravity_pass.pipeline,
+            );
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.gravity_pass.pipeline_layout,
+                0,
+                &[self.gravity_pass.descriptor_set],
+                &[],
+            );
+            self.device.cmd_push_constants(
+                cmd,
+                self.gravity_pass.pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(&gravity_push),
             );
         }
         pipeline::cmd_dispatch_indirect(
@@ -1206,6 +1307,7 @@ impl CaSimulation {
             &self.compact_finalize_pass,
             &self.thermal_pass,
             &self.margolus_pass,
+            &self.gravity_pass,
             &self.ca_to_render_pass,
             &self.render_pass,
             &self.compute_dirty_tiles_pass,

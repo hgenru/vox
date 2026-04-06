@@ -10,6 +10,7 @@
 //! Both views alias the same GPU buffer. Each `GridCell` = 12 contiguous f32s.
 
 pub mod ca_compact;
+pub mod ca_gravity;
 pub mod ca_margolus;
 pub mod ca_thermal;
 pub mod ca_to_render;
