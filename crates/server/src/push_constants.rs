@@ -351,6 +351,34 @@ pub struct FarFieldPushConstants {
     pub sim_origin: glam::Vec4,
 }
 
+/// Push constants for the chunk-aware CA render shader.
+///
+/// Must match `CaRenderPush` in `shaders/src/compute/ca_render.rs`.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, bytemuck::Zeroable)]
+pub struct CaRenderPushConstants {
+    /// Render target width in pixels.
+    pub width: u32,
+    /// Render target height in pixels.
+    pub height: u32,
+    /// Total world size in voxels (X axis = chunks_x * 32).
+    pub world_size_x: u32,
+    /// Total world size in voxels (Y axis = chunks_y * 32).
+    pub world_size_y: u32,
+    /// Total world size in voxels (Z axis = chunks_z * 32).
+    pub world_size_z: u32,
+    /// Number of chunks along X axis.
+    pub chunks_x: u32,
+    /// Number of chunks along Y axis.
+    pub chunks_y: u32,
+    /// Number of chunks along Z axis.
+    pub chunks_z: u32,
+    /// Camera eye position (xyz) + padding (w).
+    pub eye: glam::Vec4,
+    /// Camera target position (xyz) + padding (w).
+    pub target: glam::Vec4,
+}
+
 /// Maximum number of material slots in the toolbar.
 pub const TOOLBAR_MAX_MATERIALS: usize = 8;
 

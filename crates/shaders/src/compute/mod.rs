@@ -12,6 +12,7 @@
 pub mod ca_compact;
 pub mod ca_gravity;
 pub mod ca_margolus;
+pub mod ca_render;
 pub mod ca_spread;
 pub mod ca_support;
 pub mod ca_thermal;
