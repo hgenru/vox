@@ -418,6 +418,7 @@ fn margolus_main(
     bz: u32,
     frame: u32,
     num_reactions: u32,
+    is_even_pass: bool,
 ) {
     // Read 8 voxels of the 2x2x2 block (separate variables, not array — trap #21)
     let mut v000 = read_voxel(chunk_pool, slot_id, bx, by, bz);
@@ -428,6 +429,8 @@ fn margolus_main(
     let mut v101 = read_voxel(chunk_pool, slot_id, bx + 1, by, bz + 1);
     let mut v011 = read_voxel(chunk_pool, slot_id, bx, by + 1, bz + 1);
     let mut v111 = read_voxel(chunk_pool, slot_id, bx + 1, by + 1, bz + 1);
+
+    let _ = is_even_pass; // both passes apply gravity (needed for coverage)
 
     // --- Step 1: Apply gravity (falling sand) ---
     // Process 4 vertical column pairs: y=1 (top) vs y=0 (bottom)
@@ -647,9 +650,10 @@ fn margolus_entry(
     // Suppress unused metadata warning (reserved for cross-chunk Margolus in future)
     let _ = metadata[0];
 
+    let is_even_pass = offset_y == 0;
     margolus_main(
         chunk_pool, materials, reactions,
         slot_id, block_x, block_y, block_z,
-        frame_number, num_reactions,
+        frame_number, num_reactions, is_even_pass,
     );
 }
