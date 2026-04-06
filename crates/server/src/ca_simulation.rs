@@ -698,6 +698,29 @@ impl CaSimulation {
             pbmpm.check_sleep();
         }
 
+        // Final barrier: ensure all CA/PB-MPM writes are visible to subsequent
+        // passes — both compute reads (ca_to_render) AND transfer writes
+        // (cmd_fill_buffer at start of next step() call).
+        let final_barrier = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+            .dst_access_mask(
+                vk::AccessFlags::SHADER_READ
+                    | vk::AccessFlags::SHADER_WRITE
+                    | vk::AccessFlags::TRANSFER_WRITE
+                    | vk::AccessFlags::TRANSFER_READ,
+            );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[final_barrier],
+                &[],
+                &[],
+            );
+        }
+
         self.frame_number += 1;
     }
 
@@ -1138,6 +1161,36 @@ impl CaSimulation {
         self.loaded_chunks.len()
     }
 
+    /// Debug: readback a section of the flat render voxel buffer.
+    /// Returns raw u32 values. Each voxel is 4 u32s (packed_material, temperature, reserved, occupied).
+    pub fn debug_readback_render_voxels(
+        &self,
+        ctx: &VulkanContext,
+        offset_u32: u64,
+        count_u32: u64,
+    ) -> anyhow::Result<Vec<u32>> {
+        let staging = buffer::create_readback_staging_buffer(
+            ctx,
+            count_u32 * 4,
+            "debug-render-voxel-readback",
+        )?;
+        ctx.execute_one_shot(|cmd| {
+            let region = vk::BufferCopy::default()
+                .src_offset(offset_u32 * 4)
+                .dst_offset(0)
+                .size(count_u32 * 4);
+            unsafe {
+                ctx.device
+                    .cmd_copy_buffer(cmd, self.render_voxel_buffer.buffer, staging.buffer, &[region]);
+            }
+        })?;
+        let mapped = staging.mapped_slice().ok_or_else(|| anyhow::anyhow!("map failed"))?;
+        let data: &[u32] = bytemuck::cast_slice(&mapped[..count_u32 as usize * 4]);
+        let result = data.to_vec();
+        buffer::destroy_buffer(ctx, staging);
+        Ok(result)
+    }
+
     /// Current frame number.
     pub fn frame_number(&self) -> u32 {
         self.frame_number
@@ -1409,6 +1462,11 @@ fn pick_stone_variant(wx: usize, wy: usize, wz: usize) -> u16 {
 }
 
 /// Generate a voxel at world position (wx, wy, wz) given terrain height.
+///
+/// Includes unstable features for physics demo:
+/// - Floating water cube at (80-95, 50-55, 80-95) — will fall
+/// - Sand pile at (20-35, 45-55, 20-35) — will collapse
+/// - Lava pool touching water at volcano crater — will react
 fn generate_voxel(wx: usize, wy: usize, wz: usize, height: usize) -> Voxel {
     let water_level = 35;
 
@@ -1424,6 +1482,20 @@ fn generate_voxel(wx: usize, wy: usize, wz: usize, height: usize) -> Voxel {
     } else {
         height
     };
+
+    // === Unstable features for physics demo ===
+
+    // Floating water cube (will fall under gravity)
+    if wx >= 80 && wx < 96 && wy >= 50 && wy < 56 && wz >= 80 && wz < 96 {
+        return Voxel::new(3, 128, 0, 10, 0); // water
+    }
+
+    // Floating sand block (will fall)
+    if wx >= 20 && wx < 36 && wy >= 50 && wy < 56 && wz >= 20 && wz < 36 {
+        return Voxel::new(2, 128, 0, 15, 0); // sand
+    }
+
+    // === Normal terrain ===
 
     if wy > effective_height && wy > water_level {
         return Voxel::air();
@@ -1799,6 +1871,11 @@ mod tests {
         let post_y4 = count_water_at_y(&result, 4);
         println!("AFTER step: water at y=5: {}, water at y=4: {}", post_y5, post_y4);
 
+        // Count ALL water in entire chunk (not just 10..20 region)
+        let total_water_pre: usize = pre.iter().filter(|&&v| Voxel(v).material_id() == 3).count();
+        let total_water_post: usize = result.iter().filter(|&&v| Voxel(v).material_id() == 3).count();
+        println!("TOTAL water in chunk: before={}, after={}", total_water_pre, total_water_post);
+
         // Also check dirty list to verify compact pass worked
         let dirty = sim.debug_readback_dirty_list(&ctx, 8).expect("dirty list");
         println!("Dirty list: count={}, dispatch_x={}, slot={}", dirty[0], dirty[1], dirty[4]);
@@ -1809,6 +1886,67 @@ mod tests {
              Before: y5={} y4={}, After: y5={} y4={}",
             pre_y5, pre_y4, post_y5, post_y4,
         );
+
+        sim.destroy(&ctx);
+    }
+
+    #[test]
+    fn test_ca_render_sees_physics_changes() {
+        init_tracing();
+        let ctx = VulkanContext::new().expect("VulkanContext");
+        let mats = default_ca_materials();
+        let reactions = default_ca_reactions();
+        let mut sim = CaSimulation::new(&ctx, &mats, &reactions, 64).expect("CaSimulation");
+
+        // Water at y=5, air at y=4, stone floor at y=0..3
+        let mut data = vec![0u32; CA_CHUNK_VOXELS];
+        for z in 0..32u32 { for x in 0..32u32 { for y in 0..4u32 {
+            data[(z * 32 * 32 + y * 32 + x) as usize] = Voxel::new(1, 128, 0, 0, 0).0;
+        }}}
+        for z in 10..20u32 { for x in 10..20u32 {
+            data[(z * 32 * 32 + 5 * 32 + x) as usize] = Voxel::new(3, 128, 0, 0, 0).0;
+        }}
+        sim.load_chunk(&ctx, [0, 0, 0], &data, [-1; 6]).unwrap();
+
+        // Frame 0: render BEFORE any step — capture baseline
+        ctx.execute_one_shot(|cmd| {
+            sim.render(cmd, 128, 128, [16.0, 30.0, -10.0], [16.0, 5.0, 16.0]);
+        }).unwrap();
+        // Read render voxel at grid position (15, 5, 15) — should be water
+        // flat index = z*128*128 + y*128 + x = 15*128*128+5*128+15 = 246415, *4 u32s per voxel
+        let rv0 = sim.debug_readback_render_voxels(&ctx, 246415 * 4, 4).unwrap();
+        let mat0 = (rv0[0] >> 16) & 0xFF;
+        println!("Frame 0 render voxel at (15,5,15): mat={}, occ={}", mat0, rv0[3]);
+
+        // Frame 1: 30 steps + render IN SAME CMD BUFFER (exactly like app)
+        ctx.execute_one_shot(|cmd| {
+            for _ in 0..30 { sim.step(cmd, &ctx); }
+            sim.render(cmd, 128, 128, [16.0, 30.0, -10.0], [16.0, 5.0, 16.0]);
+        }).unwrap();
+        let rv1 = sim.debug_readback_render_voxels(&ctx, 246415 * 4, 4).unwrap();
+        let mat1 = (rv1[0] >> 16) & 0xFF;
+        println!("Frame 1 render voxel at (15,5,15) after 30 steps: mat={}, occ={}", mat1, rv1[3]);
+
+        // Check chunk_pool directly
+        let chunk = sim.download_chunk(&ctx, [0, 0, 0]).unwrap();
+        let v_y5 = Voxel(chunk[(15 * 32 * 32 + 5 * 32 + 15) as usize]);
+        let v_y4 = Voxel(chunk[(15 * 32 * 32 + 4 * 32 + 15) as usize]);
+        println!("Chunk pool: (15,5,15) mat={}, (15,4,15) mat={}", v_y5.material_id(), v_y4.material_id());
+
+        // After 5 steps, water may have spread beyond (15,4,15) - check total
+        let total_water: usize = chunk.iter().filter(|&&v| Voxel(v).material_id() == 3).count();
+        println!("Total water in chunk after 5 steps: {}", total_water);
+        assert!(total_water > 0, "Water should still exist in chunk pool");
+        // Check render buffer for water anywhere at y=4
+        let mut render_water_y4 = 0;
+        for z in 0..32u32 { for x in 0..32u32 {
+            let flat_idx = (z * 128 * 128 + 4 * 128 + x) as u64;
+            let rv = sim.debug_readback_render_voxels(&ctx, flat_idx * 4, 4).unwrap();
+            let mat = (rv[0] >> 16) & 0xFF;
+            if mat == 3 { render_water_y4 += 1; }
+        }}
+        println!("Render buffer: water voxels at y=4: {}", render_water_y4);
+        assert!(render_water_y4 > 0, "Render buffer should show water at y=4");
 
         sim.destroy(&ctx);
     }

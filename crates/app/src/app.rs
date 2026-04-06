@@ -692,7 +692,10 @@ impl ApplicationHandler for App {
                         }
 
                         if let Err(e) = ctx.execute_one_shot(|cmd| {
-                            for _ in 0..substeps { ca_sim.step(cmd, ctx); }
+                            // CA needs many substeps: Margolus moves 1 voxel/step.
+                            // At 128³ scale, need ~30 steps/frame to see movement.
+                            let ca_substeps = substeps.max(30);
+                            for _ in 0..ca_substeps { ca_sim.step(cmd, ctx); }
                             ca_sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye_arr, target_arr);
                             ca_sim.finalize_render(cmd);
                         }) {

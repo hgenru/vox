@@ -300,18 +300,19 @@ fn try_horizontal_swap(materials: &[u32], a: u32, b: u32) -> (u32, u32) {
     let mat_a = ca_types::voxel_material_id(a);
     let mat_b = ca_types::voxel_material_id(b);
 
-    // Spread into air
+    // Spread into air: fluid moves into adjacent air cell
+    // Only one direction: a is fluid, b is air → a moves into b
     if mat_b == 0 && is_spreadable(materials, mat_a) {
-        // Only liquids and gases spread laterally (not powders)
         let phase_a = ca_types::mat_phase(materials, mat_a);
         if phase_a >= 2 {
-            return (b, a);
+            return (b, a); // swap: fluid goes to b, air goes to a
         }
     }
+    // Reverse: b is fluid, a is air → b moves into a
     if mat_a == 0 && is_spreadable(materials, mat_b) {
         let phase_b = ca_types::mat_phase(materials, mat_b);
         if phase_b >= 2 {
-            return (b, a);
+            return (b, a); // swap: fluid goes to a, air goes to b
         }
     }
 
@@ -463,18 +464,12 @@ fn margolus_main(
     v111 = new_top;
     v101 = new_bot;
 
-    // --- Step 3: Horizontal spreading (liquids/gases flow sideways) ---
-    let rng = ca_types::hash_position(bx, by, bz, frame);
-    apply_horizontal_spread_bottom(
-        materials,
-        &mut v000, &mut v100, &mut v001, &mut v101,
-        rng,
-    );
-    apply_horizontal_spread_top(
-        materials,
-        &mut v010, &mut v110, &mut v011, &mut v111,
-        rng,
-    );
+    // --- Step 3: Horizontal spreading (disabled: causes water loss bug) ---
+    // TODO: fix conservation issue in horizontal spread before re-enabling
+    // let rng = ca_types::hash_position(bx, by, bz, frame);
+    // apply_horizontal_spread_bottom(materials, &mut v000, &mut v100, &mut v001, &mut v101, rng);
+    // apply_horizontal_spread_top(materials, &mut v010, &mut v110, &mut v011, &mut v111, rng);
+    let _ = ca_types::hash_position(bx, by, bz, frame); // suppress unused warning
 
     // --- Step 4: Apply chemical reactions on edges ---
     apply_block_reactions(
