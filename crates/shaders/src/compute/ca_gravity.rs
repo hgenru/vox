@@ -85,10 +85,47 @@ fn sweep_column(
     }
 }
 
+/// Try to move voxel at y=0 of current chunk into y=31 of chunk below.
+///
+/// Reads neighbor_ids from metadata: -Y neighbor is at index 3 (offset +4+3=7 in meta u32s).
+fn try_cross_chunk_fall(
+    chunk_pool: &mut [u32],
+    materials: &[u32],
+    metadata: &[u32],
+    slot_id: u32,
+    x: u32,
+    z: u32,
+) {
+    let here = read_voxel(chunk_pool, slot_id, x, 0, z);
+    if !can_fall(materials, here) {
+        return;
+    }
+
+    // Read -Y neighbor slot from metadata
+    // ChunkGpuMeta: [world_pos(4)] [neighbor_ids(6): +X,-X,+Y,-Y,+Z,-Z] [activity] [flags] [pad(4)]
+    // -Y neighbor is at offset 4+3 = 7
+    let meta_base = slot_id * ca_types::META_SIZE_U32;
+    let below_slot_raw = metadata[(meta_base + 7) as usize];
+    // -1 (0xFFFFFFFF) means not loaded
+    if below_slot_raw == 0xFFFFFFFF {
+        return;
+    }
+    let below_slot = below_slot_raw;
+
+    let below_voxel = read_voxel(chunk_pool, below_slot, x, 31, z);
+    let below_mat = ca_types::voxel_material_id(below_voxel);
+    if below_mat == 0 {
+        // Air below in neighbor chunk: drop!
+        write_voxel(chunk_pool, below_slot, x, 31, z, here);
+        write_voxel(chunk_pool, slot_id, x, 0, z, 0); // air
+    }
+}
+
 /// Processes one column with multiple passes for faster cascading.
 fn process_column(
     chunk_pool: &mut [u32],
     materials: &[u32],
+    metadata: &[u32],
     slot_id: u32,
     x: u32,
     z: u32,
@@ -97,14 +134,17 @@ fn process_column(
     let mut pass: u32 = 0;
     loop {
         if pass >= 4 {
-            return;
+            break;
         }
         let did_swap = sweep_column(chunk_pool, materials, slot_id, x, z);
         if !did_swap {
-            return;
+            break;
         }
         pass += 1;
     }
+
+    // Cross-chunk: if voxel at y=0 can fall, move to y=31 of chunk below
+    try_cross_chunk_fall(chunk_pool, materials, metadata, slot_id, x, z);
 }
 
 /// Main gravity logic: maps thread to chunk + column, then processes.
@@ -112,6 +152,7 @@ fn gravity_impl(
     wg_id: UVec3,
     local_id: UVec3,
     chunk_pool: &mut [u32],
+    metadata: &[u32],
     dirty_list: &[u32],
     materials: &[u32],
 ) {
@@ -144,7 +185,7 @@ fn gravity_impl(
         return;
     }
 
-    process_column(chunk_pool, materials, slot_id, col_x, col_z);
+    process_column(chunk_pool, materials, metadata, slot_id, col_x, col_z);
 }
 
 /// Compute shader entry point: column-scan gravity on dirty chunks.
@@ -161,11 +202,11 @@ pub fn ca_gravity(
     #[spirv(local_invocation_id)] local_id: UVec3,
     #[spirv(workgroup_id)] wg_id: UVec3,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] chunk_pool: &mut [u32],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] _metadata: &[u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] metadata: &[u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] dirty_list: &[u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] materials: &[u32],
     #[spirv(push_constant)] _push: &CaGravityPush,
 ) {
     // Entry point must call a helper function (trap #4a)
-    gravity_impl(wg_id, local_id, chunk_pool, dirty_list, materials);
+    gravity_impl(wg_id, local_id, chunk_pool, metadata, dirty_list, materials);
 }

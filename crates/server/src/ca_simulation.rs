@@ -1154,6 +1154,34 @@ impl CaSimulation {
         Ok(data)
     }
 
+    /// Update neighbor metadata for all loaded chunks.
+    /// Must be called AFTER all chunks are loaded so neighbor slots are known.
+    pub fn update_neighbor_metadata(&self, ctx: &VulkanContext) {
+        let dirs: [[i32; 3]; 6] = [
+            [1,0,0], [-1,0,0], [0,1,0], [0,-1,0], [0,0,1], [0,0,-1],
+        ];
+        for (&coord, &slot_id) in &self.loaded_chunks {
+            let mut neighbors = [-1i32; 6];
+            for (i, dir) in dirs.iter().enumerate() {
+                let nc = [coord[0]+dir[0], coord[1]+dir[1], coord[2]+dir[2]];
+                if let Some(&ns) = self.loaded_chunks.get(&nc) {
+                    neighbors[i] = ns as i32;
+                }
+            }
+            let meta = ChunkGpuMeta {
+                world_pos: glam::IVec4::new(coord[0], coord[1], coord[2], slot_id as i32),
+                neighbor_ids: neighbors,
+                activity: 1,
+                flags: 1,
+                _pad: [0; 4],
+            };
+            let _ = self.chunk_pool.upload_metadata(
+                ctx, vk::CommandBuffer::null(), slot_id, bytemuck::bytes_of(&meta),
+            );
+        }
+        tracing::info!("Updated neighbor metadata for {} chunks", self.loaded_chunks.len());
+    }
+
     /// Download voxel data for a loaded chunk (for testing/verification).
     pub fn download_chunk(
         &self,
@@ -1587,14 +1615,14 @@ fn generate_voxel(wx: usize, wy: usize, wz: usize, height: usize) -> Voxel {
 
     // === Unstable features for physics demo ===
 
-    // Floating water cube (will fall under gravity)
-    if wx >= 80 && wx < 96 && wy >= 50 && wy < 56 && wz >= 80 && wz < 96 {
-        return Voxel::new(3, 128, 0, 10, 0); // water
+    // Floating sand — center-left, very high (y=100+, guaranteed above terrain)
+    if wx >= 55 && wx < 63 && wy >= 100 && wy < 108 && wz >= 15 && wz < 23 {
+        return Voxel::new(2, 128, 0, 15, 0); // sand
     }
 
-    // Floating sand block (will fall)
-    if wx >= 20 && wx < 36 && wy >= 50 && wy < 56 && wz >= 20 && wz < 36 {
-        return Voxel::new(2, 128, 0, 15, 0); // sand
+    // Floating water — center-right, very high
+    if wx >= 67 && wx < 75 && wy >= 100 && wy < 108 && wz >= 15 && wz < 23 {
+        return Voxel::new(3, 128, 0, 10, 0); // water
     }
 
     // === Normal terrain ===

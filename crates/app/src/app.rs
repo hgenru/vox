@@ -529,13 +529,14 @@ impl ApplicationHandler for App {
                     tracing::error!("Failed to load chunk {:?}: {}", coord, e);
                 }
             }
+            ca_sim.update_neighbor_metadata(&ctx);
             tracing::info!("CaSimulation initialized with {} chunks", ca_sim.loaded_count());
 
             // Place camera above and behind the terrain, looking at the center
             // Terrain center is at (64, ~40, 64), volcano peak around y=90
             self.player = PlayerController::new(Camera::look_at(
-                Vec3::new(64.0, 80.0, -20.0),
-                Vec3::new(64.0, 30.0, 64.0),
+                Vec3::new(64.0, 110.0, 0.0),
+                Vec3::new(64.0, 95.0, 20.0),
             ));
 
             self.ca_sim = Some(ca_sim);
@@ -694,7 +695,7 @@ impl ApplicationHandler for App {
                         if let Err(e) = ctx.execute_one_shot(|cmd| {
                             // CA needs many substeps: Margolus moves 1 voxel/step.
                             // At 128³ scale, need ~30 steps/frame to see movement.
-                            let ca_substeps = substeps.max(10);
+                            let ca_substeps = substeps.max(2); // 2 steps × 4 passes = 8 voxels/frame
                             for _ in 0..ca_substeps { ca_sim.step(cmd, ctx); }
                             ca_sim.render(cmd, RENDER_WIDTH, RENDER_HEIGHT, eye_arr, target_arr);
                             ca_sim.finalize_render(cmd);
