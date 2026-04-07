@@ -179,6 +179,8 @@ pub struct CaSimulation {
     loaded_chunks: HashMap<[i32; 3], u32>,
     frame_number: u32,
     num_reactions: u32,
+    /// Maximum number of entries in the chunk table buffer.
+    chunk_table_max_entries: u32,
 
     // Cached device handle for recording commands
     device: ash::Device,
@@ -386,17 +388,16 @@ impl CaSimulation {
         buffer::upload(ctx, &render_materials, &material_render_buffer)?;
 
         // Chunk table buffer: 3D lookup from chunk coord -> slot_id
-        // Start with a default 4x4x4 table (resized in build_chunk_table)
-        let default_chunks_per_axis = 4u32;
-        let chunk_table_entries = default_chunks_per_axis.pow(3) as usize;
+        // Pre-allocate at full capacity (same as pool slots) to avoid reallocation.
+        let chunk_table_max_entries = chunk_slots;
         let chunk_table_buffer = buffer::create_device_local_buffer(
             ctx,
-            (chunk_table_entries * 4) as vk::DeviceSize,
+            (chunk_table_max_entries as u64) * 4,
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             "ca-chunk-table-buffer",
         )?;
         // Initialize with 0xFFFFFFFF (not loaded)
-        let empty_table = vec![0xFFFFFFFFu32; chunk_table_entries];
+        let empty_table = vec![0xFFFFFFFFu32; chunk_table_max_entries as usize];
         buffer::upload(ctx, &empty_table, &chunk_table_buffer)?;
 
         // 8. Create chunk-aware render pass
@@ -447,12 +448,13 @@ impl CaSimulation {
             material_render_buffer,
             chunk_table_buffer,
             ca_render_pass,
-            chunks_x: default_chunks_per_axis,
-            chunks_y: default_chunks_per_axis,
-            chunks_z: default_chunks_per_axis,
+            chunks_x: 0,
+            chunks_y: 0,
+            chunks_z: 0,
             loaded_chunks: HashMap::new(),
             frame_number: 0,
             num_reactions: reactions.len() as u32,
+            chunk_table_max_entries,
             device: ctx.device.clone(),
         })
     }
@@ -1283,24 +1285,14 @@ impl CaSimulation {
             table[idx] = slot_id;
         }
 
-        // Recreate chunk table buffer if size changed
-        let needed_bytes = (table_size * 4) as vk::DeviceSize;
-        if needed_bytes > self.chunk_table_buffer.size {
-            // Need a larger buffer — destroy old one, create new one
-            // Note: we can't easily resize here because the descriptor set
-            // still references the old buffer. For now, we allocated enough
-            // initially (4^3 = 64 entries). If world is larger, log a warning.
-            tracing::warn!(
-                "Chunk table needs {} entries but buffer only has {} — some chunks may not render",
-                table_size,
-                self.chunk_table_buffer.size / 4,
-            );
-            // Upload what fits
-            let max_entries = (self.chunk_table_buffer.size / 4) as usize;
-            if table_size > max_entries {
-                table.truncate(max_entries);
-            }
-        }
+        // Assert table fits in pre-allocated buffer (sized at chunk_table_max_entries).
+        assert!(
+            table_size <= self.chunk_table_max_entries as usize,
+            "Chunk table needs {} entries but buffer was pre-allocated for {} — \
+             increase chunk_pool_slots or reduce world size",
+            table_size,
+            self.chunk_table_max_entries,
+        );
 
         if let Err(e) = buffer::upload(ctx, &table, &self.chunk_table_buffer) {
             tracing::error!("Failed to upload chunk table: {}", e);
@@ -1620,6 +1612,78 @@ impl CaSimulation {
     /// Returns the current frame number.
     pub fn frame_number(&self) -> u32 {
         self.frame_number
+    }
+
+    /// Carve a horizontal beam across the world for stress testing.
+    ///
+    /// Removes voxels in a line from `(start_x, y, z)` to `(end_x, y, z)` with
+    /// the given `radius`. Returns the total number of voxels removed.
+    pub fn laser_beam(
+        &mut self,
+        ctx: &VulkanContext,
+        start_x: i32,
+        end_x: i32,
+        y: i32,
+        z: i32,
+        radius: i32,
+    ) -> anyhow::Result<u32> {
+        let mut total_removed = 0u32;
+        let cs = 32i32;
+        let cx_min = (start_x - radius).div_euclid(cs);
+        let cx_max = (end_x + radius).div_euclid(cs);
+        let cy_min = (y - radius).div_euclid(cs);
+        let cy_max = (y + radius).div_euclid(cs);
+        let cz_min = (z - radius).div_euclid(cs);
+        let cz_max = (z + radius).div_euclid(cs);
+
+        for cx in cx_min..=cx_max {
+            for cy in cy_min..=cy_max {
+                for cz in cz_min..=cz_max {
+                    let coord = [cx, cy, cz];
+                    let slot_id = match self.loaded_chunks.get(&coord) {
+                        Some(&s) => s,
+                        None => continue,
+                    };
+                    let mut data = self.chunk_pool.download_chunk_voxels(ctx, slot_id)?;
+                    let chunk_origin = [cx * 32, cy * 32, cz * 32];
+                    let mut modified = false;
+
+                    for lz in 0..32i32 {
+                        for ly in 0..32i32 {
+                            for lx in 0..32i32 {
+                                let wx = chunk_origin[0] + lx;
+                                let wy = chunk_origin[1] + ly;
+                                let wz = chunk_origin[2] + lz;
+
+                                if wx < start_x || wx > end_x { continue; }
+                                let dy = wy - y;
+                                let dz = wz - z;
+                                if dy * dy + dz * dz > radius * radius { continue; }
+
+                                let idx = lz as usize * 32 * 32 + ly as usize * 32 + lx as usize;
+                                if data[idx] != 0 {
+                                    data[idx] = 0;
+                                    total_removed += 1;
+                                    modified = true;
+                                }
+                            }
+                        }
+                    }
+
+                    if modified {
+                        self.chunk_pool.upload_chunk_voxels(
+                            ctx, vk::CommandBuffer::null(), slot_id, &data,
+                        )?;
+                    }
+                }
+            }
+        }
+
+        tracing::info!(
+            "Laser beam removed {} voxels across x={}..{}",
+            total_removed, start_x, end_x,
+        );
+        Ok(total_removed)
     }
 
     /// Free all GPU resources.
@@ -1964,12 +2028,21 @@ fn generate_voxel(wx: usize, wy: usize, wz: usize, height: usize) -> Voxel {
 /// Returns chunks as `(coord, voxel_data)` pairs for a 4x4x4 grid
 /// (128x128x128 voxels).
 pub fn generate_test_scene() -> Vec<([i32; 3], Vec<u32>)> {
-    let mut chunks = Vec::new();
+    generate_test_scene_sized(4, 4, 4)
+}
 
-    // Generate 4x4x4 = 64 chunks covering 128x128x128 voxels
-    for cx in 0..4i32 {
-        for cy in 0..4i32 {
-            for cz in 0..4i32 {
+/// Generate a terrain scene of arbitrary size.
+///
+/// `cx_count`, `cy_count`, `cz_count` specify the number of 32-voxel chunks
+/// along each axis. The terrain noise tiles naturally, so any size works.
+/// Returns chunks as `(coord, voxel_data)` pairs.
+pub fn generate_test_scene_sized(cx_count: i32, cy_count: i32, cz_count: i32) -> Vec<([i32; 3], Vec<u32>)> {
+    let total = (cx_count as u64) * (cy_count as u64) * (cz_count as u64);
+    let mut chunks = Vec::with_capacity(total as usize);
+
+    for cx in 0..cx_count {
+        for cy in 0..cy_count {
+            for cz in 0..cz_count {
                 let mut data = vec![0u32; CA_CHUNK_VOXELS];
 
                 for lz in 0..32usize {
@@ -1992,6 +2065,12 @@ pub fn generate_test_scene() -> Vec<([i32; 3], Vec<u32>)> {
                 chunks.push(([cx, cy, cz], data));
             }
         }
+    }
+
+    if total > 100 {
+        tracing::info!("Generated {} chunks ({}x{}x{} = {}x{}x{} voxels)",
+            chunks.len(), cx_count, cy_count, cz_count,
+            cx_count * 32, cy_count * 32, cz_count * 32);
     }
 
     chunks

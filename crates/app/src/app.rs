@@ -12,6 +12,7 @@ use client::{Camera, PlayerController, Renderer, renderer::required_instance_ext
 use content::MaterialDatabase;
 use glam::Vec3;
 use gpu_core::VulkanContext;
+use gpu_core::vram_budget::{self, VramBudget};
 use server::{GpuSimulation, ToolbarPushConstants, TOOLBAR_MAX_MATERIALS};
 use server::ca_simulation::CaSimulation;
 use server::pbmpm_zones::ActivationTrigger;
@@ -85,6 +86,8 @@ pub(crate) struct App {
     use_ca_sim: bool,
     /// CaSimulation instance (when `--sim2` is used).
     ca_sim: Option<CaSimulation>,
+    /// If true, fire a laser beam stress test after scene load.
+    laser: bool,
 }
 
 impl App {
@@ -103,6 +106,7 @@ impl App {
         model_pos: Option<(f32, f32, f32)>,
         use_world: bool,
         use_ca_sim: bool,
+        laser: bool,
     ) -> Self {
         // Try loading materials from RON file, fall back to hardcoded defaults
         let material_db = match content::load_material_database("assets/materials.ron") {
@@ -248,6 +252,7 @@ impl App {
             current_chunk: start_chunk,
             use_ca_sim,
             ca_sim: None,
+            laser,
         }
     }
 
@@ -514,31 +519,78 @@ impl ApplicationHandler for App {
             Err(e) => { tracing::error!("Failed to create Renderer: {}", e); event_loop.exit(); return; }
         };
         if self.use_ca_sim {
-            // Create CaSimulation (sim2)
+            // Query VRAM budget for chunk pool sizing
+            let vram_mb = vram_budget::query_vram_mb(&ctx.memory_properties);
+            let budget = VramBudget::from_available_vram(vram_mb);
+            tracing::info!(
+                "VRAM: {} MB, chunk_pool_slots={}, chunk_table_max_entries={}",
+                vram_mb, budget.chunk_pool_slots, budget.chunk_table_max_entries,
+            );
+
+            // Create CaSimulation (sim2) with VRAM-budget-derived slot count
             let ca_mats = server::ca_simulation::default_ca_materials();
             let ca_reactions = server::ca_simulation::default_ca_reactions();
-            let mut ca_sim = match CaSimulation::new(&ctx, &ca_mats, &ca_reactions, 64) {
+            let mut ca_sim = match CaSimulation::new(&ctx, &ca_mats, &ca_reactions, budget.chunk_pool_slots) {
                 Ok(s) => s,
                 Err(e) => { tracing::error!("Failed to create CaSimulation: {}", e); event_loop.exit(); return; }
             };
 
-            // Generate and load test scene
-            let scene = server::ca_simulation::generate_test_scene();
-            tracing::info!("Loading {} CA chunks for test scene", scene.len());
-            for (coord, voxel_data) in &scene {
+            // Determine scene size based on budget
+            let (scene_cx, scene_cy, scene_cz) = if budget.chunk_pool_slots >= 4096 {
+                (32i32, 4, 32)  // 1024x128x1024 voxels
+            } else if budget.chunk_pool_slots >= 2048 {
+                (16i32, 4, 16)  // 512x128x512 voxels
+            } else if budget.chunk_pool_slots >= 1024 {
+                (8i32, 4, 8)    // 256x128x256 voxels
+            } else {
+                (4i32, 4, 4)    // 128x128x128 voxels
+            };
+
+            let scene = server::ca_simulation::generate_test_scene_sized(scene_cx, scene_cy, scene_cz);
+            tracing::info!("Loading {} CA chunks for test scene ({}x{}x{} chunks = {}x{}x{} voxels)",
+                scene.len(), scene_cx, scene_cy, scene_cz,
+                scene_cx * 32, scene_cy * 32, scene_cz * 32);
+            for (i, (coord, voxel_data)) in scene.iter().enumerate() {
                 if let Err(e) = ca_sim.load_chunk(&ctx, *coord, voxel_data, [-1; 6]) {
                     tracing::error!("Failed to load chunk {:?}: {}", coord, e);
+                }
+                if i % 500 == 0 && i > 0 {
+                    tracing::info!("Loading chunks: {}/{}", i, scene.len());
                 }
             }
             ca_sim.update_neighbor_metadata(&ctx);
             tracing::info!("CaSimulation initialized with {} chunks", ca_sim.loaded_count());
 
-            // Place camera above and behind the terrain, looking at the center
-            // Terrain center is at (64, ~40, 64), volcano peak around y=90
-            self.player = PlayerController::new(Camera::look_at(
-                Vec3::new(64.0, 110.0, 0.0),
-                Vec3::new(64.0, 95.0, 20.0),
-            ));
+            // Place camera based on world size
+            let world_cx = (scene_cx * 32 / 2) as f32;
+            let world_cz = (scene_cz * 32 / 2) as f32;
+            if scene_cx > 4 {
+                // Large world: camera at center, high up, looking down
+                self.player = PlayerController::new(Camera::look_at(
+                    Vec3::new(world_cx, 160.0, world_cz - 200.0),
+                    Vec3::new(world_cx, 40.0, world_cz),
+                ));
+            } else {
+                // Small world: original camera placement
+                self.player = PlayerController::new(Camera::look_at(
+                    Vec3::new(64.0, 110.0, 0.0),
+                    Vec3::new(64.0, 95.0, 20.0),
+                ));
+            }
+
+            // Laser beam stress test (--laser flag)
+            if self.laser {
+                let world_width = scene_cx * 32;
+                let beam_end = world_width / 3;
+                let beam_y = 50;
+                let beam_z = scene_cz * 32 / 2;
+                match ca_sim.laser_beam(&ctx, 0, beam_end, beam_y, beam_z, 5) {
+                    Ok(removed) => tracing::info!(
+                        "Laser beam stress test: carved {} voxels across x=0..{}", removed, beam_end
+                    ),
+                    Err(e) => tracing::error!("Laser beam failed: {}", e),
+                }
+            }
 
             self.ca_sim = Some(ca_sim);
         } else {
