@@ -25,6 +25,8 @@ pub struct VramBudget {
     pub render_height: u32,
     /// Number of chunk pool slots for the gigabuffer allocator.
     pub chunk_pool_slots: u32,
+    /// Maximum entries in the chunk table (3D lookup from coord to slot).
+    pub chunk_table_max_entries: u32,
 }
 
 impl VramBudget {
@@ -36,7 +38,7 @@ impl VramBudget {
     /// - 12 GB: 1M particles,   2M grid slots,   1280x720
     /// - 24 GB: 2M particles,   4M grid slots,   1920x1080
     pub fn from_available_vram(vram_mb: u32) -> Self {
-        let (max_particles, hash_grid_capacity, render_width, render_height, chunk_pool_slots) =
+        let (max_particles, hash_grid_capacity, render_width, render_height, chunk_pool_slots, chunk_table_max_entries) =
             budget_for_tier(vram_mb);
 
         Self {
@@ -46,6 +48,7 @@ impl VramBudget {
             render_width,
             render_height,
             chunk_pool_slots,
+            chunk_table_max_entries,
         }
     }
 }
@@ -54,11 +57,11 @@ impl VramBudget {
 ///
 /// Separated from [`VramBudget::from_available_vram`] to keep branch count
 /// manageable (trap #15) and satisfy trap #4a for testability.
-fn budget_for_tier(vram_mb: u32) -> (u32, u32, u32, u32, u32) {
+fn budget_for_tier(vram_mb: u32) -> (u32, u32, u32, u32, u32, u32) {
     if vram_mb >= 20_000 {
         // 24 GB+ tier (RTX 4090, A6000, etc.)
-        // 2048 chunk slots ~= 264 MB gigabuffer
-        return (2_000_000, 4_194_304, 1920, 1080, 2048);
+        // 4096 chunk slots ~= 528 MB gigabuffer
+        return (2_000_000, 4_194_304, 1920, 1080, 4096, 4096);
     }
     budget_for_lower_tier(vram_mb)
 }
@@ -66,19 +69,19 @@ fn budget_for_tier(vram_mb: u32) -> (u32, u32, u32, u32, u32) {
 /// Select budget for VRAM below 20 GB.
 ///
 /// Split helper to avoid >3 if/else branches per function (trap #15).
-fn budget_for_lower_tier(vram_mb: u32) -> (u32, u32, u32, u32, u32) {
+fn budget_for_lower_tier(vram_mb: u32) -> (u32, u32, u32, u32, u32, u32) {
     if vram_mb >= 10_000 {
         // 12 GB tier (RTX 4070 Ti, etc.)
-        // 1536 chunk slots ~= 198 MB gigabuffer
-        (1_000_000, 2_097_152, 1280, 720, 1536)
+        // 2048 chunk slots ~= 264 MB gigabuffer
+        (1_000_000, 2_097_152, 1280, 720, 2048, 2048)
     } else if vram_mb >= 7_000 {
         // 8 GB tier (RTX 4060, etc.)
         // 1024 chunk slots ~= 132 MB gigabuffer
-        (500_000, 1_048_576, 1280, 720, 1024)
+        (500_000, 1_048_576, 1280, 720, 1024, 1024)
     } else {
         // 6 GB or less
         // 512 chunk slots ~= 66 MB gigabuffer
-        (200_000, 524_288, 960, 540, 512)
+        (200_000, 524_288, 960, 540, 512, 512)
     }
 }
 
@@ -114,6 +117,7 @@ mod tests {
         assert_eq!(budget.render_width, 960);
         assert_eq!(budget.render_height, 540);
         assert_eq!(budget.chunk_pool_slots, 512);
+        assert_eq!(budget.chunk_table_max_entries, 512);
     }
 
     #[test]
@@ -124,6 +128,7 @@ mod tests {
         assert_eq!(budget.render_width, 1280);
         assert_eq!(budget.render_height, 720);
         assert_eq!(budget.chunk_pool_slots, 1024);
+        assert_eq!(budget.chunk_table_max_entries, 1024);
     }
 
     #[test]
@@ -133,7 +138,8 @@ mod tests {
         assert_eq!(budget.hash_grid_capacity, 2_097_152);
         assert_eq!(budget.render_width, 1280);
         assert_eq!(budget.render_height, 720);
-        assert_eq!(budget.chunk_pool_slots, 1536);
+        assert_eq!(budget.chunk_pool_slots, 2048);
+        assert_eq!(budget.chunk_table_max_entries, 2048);
     }
 
     #[test]
@@ -143,7 +149,8 @@ mod tests {
         assert_eq!(budget.hash_grid_capacity, 4_194_304);
         assert_eq!(budget.render_width, 1920);
         assert_eq!(budget.render_height, 1080);
-        assert_eq!(budget.chunk_pool_slots, 2048);
+        assert_eq!(budget.chunk_pool_slots, 4096);
+        assert_eq!(budget.chunk_table_max_entries, 4096);
     }
 
     #[test]
@@ -152,6 +159,7 @@ mod tests {
         assert_eq!(budget.max_particles, 200_000);
         assert_eq!(budget.render_width, 960);
         assert_eq!(budget.chunk_pool_slots, 512);
+        assert_eq!(budget.chunk_table_max_entries, 512);
     }
 
     #[test]

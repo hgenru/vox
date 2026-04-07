@@ -68,6 +68,15 @@ fn ca_temperature(voxel: u32) -> u32 {
     (voxel >> TEMPERATURE_SHIFT) & TEMPERATURE_MASK
 }
 
+/// Compute max DDA steps with a cap for large worlds.
+///
+/// For worlds wider than 256 voxels, caps at 512 steps to avoid
+/// excessive per-pixel iteration cost.
+fn compute_max_steps(max_dim: u32, multiplier: u32) -> u32 {
+    let raw = max_dim * multiplier;
+    if raw > 512 { 512 } else { raw }
+}
+
 /// Remap CA material ID to render material ID.
 ///
 /// CA IDs: 0=air, 1=stone, 2=sand, 3=water, 4=lava, 5=steam, 6=ice
@@ -284,9 +293,9 @@ fn march_shadow_chunked(
     let mut t_max_y = if dir.y.abs() > 1e-8 { (next_y - start.y) / dir.y } else { 1e20 };
     let mut t_max_z = if dir.z.abs() > 1e-8 { (next_z - start.z) / dir.z } else { 1e20 };
 
-    // Use a reasonable max step count based on max world dimension
+    // Use a reasonable max step count based on max world dimension (capped for large worlds)
     let max_dim = world_size_x.max(world_size_y).max(world_size_z);
-    let max_steps = max_dim * 2;
+    let max_steps = compute_max_steps(max_dim, 2);
     let mut i: u32 = 0;
 
     // Skip start voxel
@@ -651,7 +660,7 @@ fn render_pixel_chunked(
     let mut t_max_z = if ray_dir.z.abs() > 1e-8 { (next_z - entry.z) / ray_dir.z } else { 1e20 };
 
     let max_dim = push.world_size_x.max(push.world_size_y).max(push.world_size_z);
-    let max_steps = max_dim * 3;
+    let max_steps = compute_max_steps(max_dim, 3);
     let mut last_axis: u32 = 0;
     let mut i: u32 = 0;
     let mut hit = false;

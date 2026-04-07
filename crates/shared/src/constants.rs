@@ -123,7 +123,7 @@ pub const CA_CHUNK_DIRTY_BITMASK_BYTES: usize = CA_CHUNK_DIRTY_BITMASK_U32S * 4;
 pub const CA_SLOT_BYTES: usize = CA_CHUNK_BYTES + CA_CHUNK_DIRTY_BITMASK_BYTES; // 135168
 
 /// Maximum number of loaded CA chunks.
-pub const CA_MAX_CHUNKS: usize = 2048;
+pub const CA_MAX_CHUNKS: usize = 4096;
 
 /// Maximum number of material types in the CA system.
 pub const CA_MAX_MATERIALS: usize = 1024;
