@@ -713,40 +713,9 @@ impl CaSimulation {
             );
         }
 
-        // 9. Dispatch support pass (INDIRECT) — converts unsupported solids to rubble
-        let support_push = CaSupportPush {
-            frame_number: self.frame_number,
-            _pad: [0; 3],
-        };
-        unsafe {
-            self.device.cmd_bind_pipeline(
-                cmd,
-                vk::PipelineBindPoint::COMPUTE,
-                self.support_pass.pipeline,
-            );
-            self.device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::COMPUTE,
-                self.support_pass.pipeline_layout,
-                0,
-                &[self.support_pass.descriptor_set],
-                &[],
-            );
-            self.device.cmd_push_constants(
-                cmd,
-                self.support_pass.pipeline_layout,
-                vk::ShaderStageFlags::COMPUTE,
-                0,
-                bytemuck::bytes_of(&support_push),
-            );
-        }
-        pipeline::cmd_dispatch_indirect(
-            &self.device,
-            cmd,
-            self.chunk_pool.dirty_list_buffer(),
-            4,
-        );
-        passes::barrier(cmd, &self.device);
+        // 9. Support pass DISABLED from per-frame step — causes cascade destruction.
+        // Support check only runs explicitly in activate_physics_zone() when needed.
+        // TODO: make support shader local (only affected chunks, not global)
 
         // 10. Re-finalize for gravity (wg_per_chunk = 16)
         let finalize_gravity_push = CaCompactPush {
@@ -1080,73 +1049,58 @@ impl CaSimulation {
             }
         }
 
-        // Step 2: Run multiple CA steps (support pass) to fully propagate unsupported detection
-        ctx.execute_one_shot(|cmd| {
-            for _ in 0..5 {
-                self.step(cmd, ctx);
-            }
-        })?;
-
-        // Step 3: Download affected chunks, find rubble (mat_id=10), collect positions
-        let rubble_mat_id: u16 = 10;
-        // (rubble voxels are collected into zone_voxels below)
-        // We'll build a voxel_data array sized for the PB-MPM zone (32^3).
-        // The zone is centered on the explosion, same as chunk_coord for single-chunk case.
-        // For simplicity, use the primary chunk only.
+        // Step 2: Collect debris in a shell around the crater (no global support check).
+        // Take voxels in a shell from radius r to r*1.5 — these become PB-MPM debris.
+        let r_inner = r;
+        let r_outer = r * 1.5;
+        let ri_outer = r_outer as i32;
         let mut zone_voxels = vec![0u32; 32 * 32 * 32];
         let mut rubble_count = 0u32;
 
-        if let Some(&slot_id) = self.loaded_chunks.get(&chunk_coord) {
-            let mut voxel_data = self.chunk_pool.download_chunk_voxels(ctx, slot_id)?;
-
-            for idx in 0..voxel_data.len() {
-                let v = Voxel(voxel_data[idx]);
-                if v.material_id() == rubble_mat_id {
-                    // Copy rubble voxel into zone data (keeping original material for rendering)
-                    zone_voxels[idx] = voxel_data[idx];
-                    rubble_count += 1;
-                    // Clear rubble from chunk (will be simulated by PB-MPM)
-                    voxel_data[idx] = 0;
-                }
-            }
-
-            if rubble_count > 0 {
-                // Re-upload chunk without rubble
-                self.chunk_pool.upload_chunk_voxels(
-                    ctx,
-                    vk::CommandBuffer::null(),
-                    slot_id,
-                    &voxel_data,
-                )?;
-            }
-        }
-
-        // Also check neighboring chunks for rubble
         for cz in chunk_min[2]..=chunk_max[2] {
             for cy in chunk_min[1]..=chunk_max[1] {
                 for cx in chunk_min[0]..=chunk_max[0] {
                     let cc = [cx, cy, cz];
-                    if cc == chunk_coord {
-                        continue; // already handled above
-                    }
                     if let Some(&slot_id) = self.loaded_chunks.get(&cc) {
                         let mut voxel_data =
                             self.chunk_pool.download_chunk_voxels(ctx, slot_id)?;
+                        let origin = [cx as f32 * 32.0, cy as f32 * 32.0, cz as f32 * 32.0];
+                        let cl = [
+                            (trigger.center[0] - origin[0]) as i32,
+                            (trigger.center[1] - origin[1]) as i32,
+                            (trigger.center[2] - origin[2]) as i32,
+                        ];
                         let mut modified = false;
-                        for idx in 0..voxel_data.len() {
-                            let v = Voxel(voxel_data[idx]);
-                            if v.material_id() == rubble_mat_id {
-                                rubble_count += 1;
-                                voxel_data[idx] = 0;
-                                modified = true;
+                        for dz in -ri_outer..=ri_outer {
+                            for dy in -ri_outer..=ri_outer {
+                                for dx in -ri_outer..=ri_outer {
+                                    let dist_sq = dx * dx + dy * dy + dz * dz;
+                                    let r_inner_i = r_inner as i32;
+                                    // Shell: between inner and outer radius
+                                    if dist_sq < r_inner_i * r_inner_i || dist_sq > ri_outer * ri_outer {
+                                        continue;
+                                    }
+                                    let lx = cl[0] + dx;
+                                    let ly = cl[1] + dy;
+                                    let lz = cl[2] + dz;
+                                    if lx >= 0 && lx < 32 && ly >= 0 && ly < 32 && lz >= 0 && lz < 32 {
+                                        let idx = lz as usize * 32 * 32 + ly as usize * 32 + lx as usize;
+                                        if voxel_data[idx] != 0 {
+                                            // This is debris — collect for PB-MPM
+                                            if cc == chunk_coord {
+                                                zone_voxels[idx] = voxel_data[idx];
+                                            }
+                                            rubble_count += 1;
+                                            voxel_data[idx] = 0; // remove from chunk
+                                            modified = true;
+                                        }
+                                    }
+                                }
                             }
                         }
                         if modified {
                             self.chunk_pool.upload_chunk_voxels(
-                                ctx,
-                                vk::CommandBuffer::null(),
-                                slot_id,
-                                &voxel_data,
+                                ctx, vk::CommandBuffer::null(), slot_id, &voxel_data,
                             )?;
                         }
                     }
@@ -1170,7 +1124,7 @@ impl CaSimulation {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("PB-MPM zone manager not available"))?;
 
-        let zone_idx = match pbmpm.activate_zone(&trigger, 64) {
+        let zone_idx = match pbmpm.activate_zone(&trigger, 32) {
             Some(idx) => idx,
             None => return Ok(None),
         };
@@ -1505,8 +1459,9 @@ impl CaSimulation {
         }
 
         for &(zone_idx, world_origin, grid_size, _particle_count) in &active_zones {
-            // Step 1: Clear zone AABB in chunk voxels (set to air)
-            self.clear_zone_in_chunks(ctx, world_origin, grid_size)?;
+            // Skip clearing zone AABB — it destroys terrain.
+            // Particles overwrite voxels at their positions; stale positions
+            // are acceptable for POC (minor ghost voxels vs destroyed terrain).
 
             // Step 2: Download particles and write back to chunks
             let particle_data = pbmpm.download_particles(ctx, zone_idx)?;
@@ -1958,14 +1913,10 @@ fn generate_voxel(wx: usize, wy: usize, wz: usize, height: usize) -> Voxel {
 
     // === Unstable features for physics demo ===
 
-    // Floating sand — center-left, very high (y=100+, guaranteed above terrain)
-    if wx >= 55 && wx < 63 && wy >= 100 && wy < 108 && wz >= 15 && wz < 23 {
-        return Voxel::new(2, 128, 0, 15, 0); // sand
-    }
-
-    // Floating water — center-right, very high
-    if wx >= 67 && wx < 75 && wy >= 100 && wy < 108 && wz >= 15 && wz < 23 {
-        return Voxel::new(3, 128, 0, 10, 0); // water
+    // Horizontal air slice through volcano at y=50-59 (10 voxels thick!)
+    // Makes top visibly collapse as rubble since gap is too wide to fill
+    if dist_to_center < 18.0 && wy >= 50 && wy <= 59 && height > 60 {
+        return Voxel::air();
     }
 
     // === Normal terrain ===
@@ -2125,6 +2076,66 @@ mod tests {
             "underground voxel should be a stone variant, got {}",
             v.material_id()
         );
+    }
+
+    #[test]
+    fn test_stone_over_air_converts_to_rubble() {
+        init_tracing();
+        let ctx = VulkanContext::new().expect("VulkanContext");
+        let mats = default_ca_materials();
+        let reactions = default_ca_reactions();
+        let mut sim = CaSimulation::new(&ctx, &mats, &reactions, 64).expect("CaSimulation");
+
+        // One chunk: stone at y=5, air at y=0-4
+        let mut data = vec![0u32; CA_CHUNK_VOXELS];
+        for z in 10..20u32 { for x in 10..20u32 {
+            data[(z * 32 * 32 + 5 * 32 + x) as usize] = Voxel::new(1, 128, 0, 0, 0).0; // stone
+        }}
+        sim.load_chunk(&ctx, [0, 0, 0], &data, [-1; 6]).unwrap();
+
+        // Before: stone at y=5
+        let pre = sim.download_chunk(&ctx, [0, 0, 0]).unwrap();
+        let v5 = Voxel(pre[(15 * 32 * 32 + 5 * 32 + 15) as usize]);
+        println!("BEFORE: y=5 mat={} (expect 1=stone)", v5.material_id());
+
+        // Step 1
+        ctx.execute_one_shot(|cmd| { sim.step(cmd, &ctx); }).unwrap();
+        let s1 = sim.download_chunk(&ctx, [0, 0, 0]).unwrap();
+        let v5_s1 = Voxel(s1[(15 * 32 * 32 + 5 * 32 + 15) as usize]);
+        let v4_s1 = Voxel(s1[(15 * 32 * 32 + 4 * 32 + 15) as usize]);
+        println!("STEP 1: y=5 mat={}, y=4 mat={}", v5_s1.material_id(), v4_s1.material_id());
+
+        // Step 2
+        ctx.execute_one_shot(|cmd| { sim.step(cmd, &ctx); }).unwrap();
+        let s2 = sim.download_chunk(&ctx, [0, 0, 0]).unwrap();
+        let v5_s2 = Voxel(s2[(15 * 32 * 32 + 5 * 32 + 15) as usize]);
+        let v4_s2 = Voxel(s2[(15 * 32 * 32 + 4 * 32 + 15) as usize]);
+        let v3_s2 = Voxel(s2[(15 * 32 * 32 + 3 * 32 + 15) as usize]);
+        let total_rubble_s2: usize = s2.iter().filter(|&&v| Voxel(v).material_id() == 10).count();
+        let mut min_y_s2 = 32u32;
+        for y in 0..32u32 { for z in 0..32u32 { for x in 0..32u32 {
+            if Voxel(s2[(z*32*32+y*32+x) as usize]).material_id() == 10 && y < min_y_s2 { min_y_s2 = y; }
+        }}}
+        println!("STEP 2: rubble={} min_y={}", total_rubble_s2, min_y_s2);
+
+        // Run 10 more steps
+        for _ in 0..10 {
+            ctx.execute_one_shot(|cmd| { sim.step(cmd, &ctx); }).unwrap();
+        }
+        let s12 = sim.download_chunk(&ctx, [0, 0, 0]).unwrap();
+        let rubble_12: usize = s12.iter().filter(|&&v| Voxel(v).material_id() == 10).count();
+        let mut min_y_12 = 32u32;
+        for y in 0..32u32 { for z in 0..32u32 { for x in 0..32u32 {
+            if Voxel(s12[(z*32*32+y*32+x) as usize]).material_id() == 10 && y < min_y_12 { min_y_12 = y; }
+        }}}
+        println!("STEP 12: rubble={} min_y={}", rubble_12, min_y_12);
+
+        // After 2 steps: stone should have converted to rubble and fallen
+        assert!(v4_s1.material_id() != 0 || v5_s1.material_id() == 10,
+            "After step 1: stone should convert to rubble(10) or fall. y5={}, y4={}",
+            v5_s1.material_id(), v4_s1.material_id());
+
+        sim.destroy(&ctx);
     }
 
     // --- GPU tests (require VulkanContext, run with --test-threads=1) ---

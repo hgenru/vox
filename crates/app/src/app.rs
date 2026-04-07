@@ -39,9 +39,9 @@ const SPAWN_DISTANCE: f32 = 15.0;
 /// Radius used when removing particles with right-click.
 const REMOVE_RADIUS: f32 = 2.0;
 /// Radius of the explosion effect triggered by middle-click.
-const EXPLOSION_RADIUS: f32 = 20.0;
+const EXPLOSION_RADIUS: f32 = 5.0;
 /// Impulse strength of the explosion effect.
-const EXPLOSION_STRENGTH: f32 = 800.0;
+const EXPLOSION_STRENGTH: f32 = 300.0;
 
 /// Top-level application state for the windowed mode.
 pub(crate) struct App {
@@ -436,14 +436,15 @@ impl App {
         let ly = wy.rem_euclid(cs) as usize;
         let lz = wz.rem_euclid(cs) as usize;
 
-        // Clear a 3x3x3 cube to air
-        for dz in 0..3i32 {
-            for dy in 0..3i32 {
-                for dx in 0..3i32 {
-                    let px = (lx as i32 + dx).clamp(0, 31) as usize;
-                    let py = (ly as i32 + dy).clamp(0, 31) as usize;
-                    let pz = (lz as i32 + dz).clamp(0, 31) as usize;
-                    let idx = pz * 32 * 32 + py * 32 + px;
+        // Clear a 7x7x7 cube to air (bigger for testing structural collapse)
+        for dz in -3..4i32 {
+            for dy in -3..4i32 {
+                for dx in -3..4i32 {
+                    let px = lx as i32 + dx;
+                    let py = ly as i32 + dy;
+                    let pz = lz as i32 + dz;
+                    if px < 0 || px >= 32 || py < 0 || py >= 32 || pz < 0 || pz >= 32 { continue; }
+                    let idx = pz as usize * 32 * 32 + py as usize * 32 + px as usize;
                     data[idx] = Voxel::air().0;
                 }
             }
@@ -452,7 +453,7 @@ impl App {
         if let Err(e) = ca_sim.upload_chunk_voxels(ctx, chunk_coord, &data) {
             tracing::warn!("Failed to upload CA voxels (remove): {}", e);
         } else {
-            tracing::debug!("Removed CA voxels at chunk {:?}", chunk_coord);
+            tracing::info!("Removed 7x7x7 cube at world ({},{},{}) chunk {:?}", wx, wy, wz, chunk_coord);
         }
     }
 
@@ -710,6 +711,47 @@ impl ApplicationHandler for App {
                                     ca_sim.finalize_render(cmd);
                                 }) {
                                     tracing::error!("CA simulation/render error: {}", e);
+                                }
+                                // Monitor volcano gap rubble
+                                static MON: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                                let m = MON.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if m < 5 || m % 30 == 0 {
+                                    // Volcano gap at world y=55-57, chunk cy=1 (local y=23-25)
+                                    // Center at x=64,z=64 → chunk cx=2,cz=2
+                                    if let Ok(ch) = ca_sim.download_chunk(ctx, [2, 1, 2]) {
+                                        let mut rubble = 0u32;
+                                        let mut stone_above_gap = 0u32;
+                                        let mut air_in_gap = 0u32;
+                                        for z in 0..32u32 { for x in 0..32u32 {
+                                            // gap at local y=23-25
+                                            for y in 23..=25 {
+                                                let idx = (z*32*32+y*32+x) as usize;
+                                                if ch[idx] == 0 { air_in_gap += 1; }
+                                            }
+                                            // stone/rubble above gap
+                                            for y in 26..32 {
+                                                let idx = (z*32*32+y*32+x) as usize;
+                                                let mat = shared::voxel::Voxel(ch[idx]).material_id();
+                                                if mat == 10 { rubble += 1; }
+                                                if mat >= 1 && mat <= 9 { stone_above_gap += 1; }
+                                            }
+                                        }}
+                                        // Also check y=22 (below gap) for fallen rubble
+                                        let mut rubble_below = 0u32;
+                                        for z in 0..32u32 { for x in 0..32u32 {
+                                            for y in 0..23u32 {
+                                                let idx = (z*32*32+y*32+x) as usize;
+                                                if shared::voxel::Voxel(ch[idx]).material_id() == 10 { rubble_below += 1; }
+                                            }
+                                        }}
+                                        // Count ALL rubble in chunk
+                                        let mut total_rubble = 0u32;
+                                        for idx in 0..ch.len() {
+                                            if shared::voxel::Voxel(ch[idx]).material_id() == 10 { total_rubble += 1; }
+                                        }
+                                        tracing::warn!("VOLCANO m={}: gap_air={} stone_above={} rubble_above={} rubble_in_gap_or_below={} total_rubble={}",
+                                            m, air_in_gap, stone_above_gap, rubble, total_rubble - rubble, total_rubble);
+                                    }
                                 }
                                 // Sync PB-MPM particles back to chunk voxels for rendering
                                 if let Err(e) = ca_sim.sync_pbmpm_to_chunks(ctx) {

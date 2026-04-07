@@ -73,11 +73,21 @@ fn sweep_column(
 
         // Copy to locals to check (trap #21)
         let here_mat = ca_types::voxel_material_id(here);
-        let fall = can_fall(materials, above);
+        let above_mat = ca_types::voxel_material_id(above);
 
-        if here_mat == 0 && fall {
+        // Split into two separate checks to avoid branch-dropping (trap #15)
+        let do_drop = here_mat == 0 && can_fall(materials, above);
+        let do_rubble = here_mat == 0 && above_mat != 0 && !can_fall(materials, above);
+
+        if do_drop {
             write_voxel(chunk_pool, slot_id, x, y, z, above);
-            write_voxel(chunk_pool, slot_id, x, y + 1, z, here);
+            write_voxel(chunk_pool, slot_id, x, y + 1, z, 0);
+            swapped = true;
+        }
+        if do_rubble {
+            let temp = ca_types::voxel_temperature(above);
+            let rubble = ca_types::voxel_pack(10, temp, 0, 0, 0);
+            write_voxel(chunk_pool, slot_id, x, y + 1, z, rubble);
             swapped = true;
         }
 
