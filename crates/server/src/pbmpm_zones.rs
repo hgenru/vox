@@ -76,6 +76,10 @@ pub struct PbmpmZone {
     pub state: ZoneState,
     /// Number of consecutive frames all particles have been below threshold.
     pub frames_quiet: u32,
+    /// Whether this zone is a rigid body (shape matching constraint).
+    pub rigid_body: bool,
+    /// Rigid body state tracker (only set when rigid_body == true).
+    pub rigid_body_state: Option<crate::rigid_body_tracker::RigidBodyState>,
 }
 
 impl PbmpmZone {
@@ -89,6 +93,8 @@ impl PbmpmZone {
             grid_offset: 0,
             state: ZoneState::Free,
             frames_quiet: 0,
+            rigid_body: false,
+            rigid_body_state: None,
         }
     }
 }
@@ -643,6 +649,343 @@ impl PbmpmZoneManager {
 
         buffer::destroy_buffer(ctx, staging);
         Ok(result)
+    }
+
+    /// Try to activate a new rigid body PB-MPM zone from an [`IslandResult`].
+    ///
+    /// Similar to [`activate_zone`] but marks the zone as a rigid body with shape
+    /// matching constraint. Returns zone index if successful.
+    pub fn activate_rigid_body_zone(
+        &mut self,
+        island: &crate::island_detector::IslandResult,
+    ) -> Option<usize> {
+        let grid_size = island.grid_size;
+
+        // Find a free zone slot
+        let zone_idx = self.zones.iter().position(|z| z.state == ZoneState::Free)?;
+
+        // Check capacity
+        let max_particles_for_zone = grid_size * grid_size * grid_size;
+        let grid_cells = grid_size * grid_size * grid_size;
+
+        if self.next_particle_offset + max_particles_for_zone > self.max_particles {
+            tracing::warn!(
+                "PB-MPM: insufficient particle capacity for rigid body zone (need {}, have {})",
+                max_particles_for_zone,
+                self.max_particles - self.next_particle_offset,
+            );
+            return None;
+        }
+        if self.next_grid_offset + grid_cells > self.max_grid_cells {
+            tracing::warn!(
+                "PB-MPM: insufficient grid capacity for rigid body zone (need {}, have {})",
+                grid_cells,
+                self.max_grid_cells - self.next_grid_offset,
+            );
+            return None;
+        }
+
+        // Zone origin: AABB min - 2 padding
+        let zone = &mut self.zones[zone_idx];
+        zone.world_origin = [
+            island.aabb_min[0] - 2,
+            island.aabb_min[1] - 2,
+            island.aabb_min[2] - 2,
+        ];
+        zone.grid_size = grid_size;
+        zone.particle_count = 0; // set during spawn
+        zone.particle_offset = self.next_particle_offset;
+        zone.grid_offset = self.next_grid_offset;
+        zone.state = ZoneState::Active;
+        zone.frames_quiet = 0;
+        zone.rigid_body = true;
+        zone.rigid_body_state = None; // set after spawning
+
+        self.next_particle_offset += max_particles_for_zone;
+        self.next_grid_offset += grid_cells;
+
+        tracing::info!(
+            "PB-MPM: activated rigid body zone {} at origin {:?}, grid_size={}, voxels={}",
+            zone_idx,
+            zone.world_origin,
+            grid_size,
+            island.voxels.len(),
+        );
+
+        Some(zone_idx)
+    }
+
+    /// Spawn rigid body particles from an [`IslandResult`].
+    ///
+    /// Unlike [`spawn_particles_from_voxels`], particles keep phase=0 (solid),
+    /// start with zero velocity, and rigid body state is initialized.
+    /// Returns the actual number of particles spawned.
+    pub fn spawn_rigid_body_particles(
+        &mut self,
+        ctx: &VulkanContext,
+        zone_idx: usize,
+        island: &crate::island_detector::IslandResult,
+    ) -> anyhow::Result<u32> {
+        let zone = &self.zones[zone_idx];
+        let world_origin = zone.world_origin;
+        let mut particles: Vec<f32> = Vec::new();
+        let mut positions_local: Vec<[f32; 3]> = Vec::new();
+        let mut count = 0u32;
+
+        for (i, &world_pos) in island.voxels.iter().enumerate() {
+            let raw = island.voxel_data[i];
+            let v = shared::voxel::Voxel(raw);
+            if v.is_air() {
+                continue;
+            }
+
+            // Position in zone-local grid coordinates
+            let px = (world_pos[0] - world_origin[0]) as f32 + 0.5;
+            let py = (world_pos[1] - world_origin[1]) as f32 + 0.5;
+            let pz = (world_pos[2] - world_origin[2]) as f32 + 0.5;
+
+            positions_local.push([px, py, pz]);
+
+            let mass = 1.0_f32;
+            let temp = v.temperature() as f32;
+
+            // Write particle: 24 f32s (96 bytes)
+            // pos_mass
+            particles.extend_from_slice(&[px, py, pz, mass]);
+            // vel_temp — zero velocity, gravity handles fall
+            particles.extend_from_slice(&[0.0, 0.0, 0.0, temp]);
+            // C_col0, C_col1, C_col2 — zero
+            particles.extend_from_slice(&[0.0; 12]);
+            // ids: material_id, phase=0 (solid), flags, padding
+            let mat_id = v.material_id() as u32;
+            let phase = 0u32; // solid — rigid body
+            particles.extend_from_slice(&[
+                f32::from_bits(mat_id),
+                f32::from_bits(phase),
+                f32::from_bits(0u32),
+                f32::from_bits(0u32),
+            ]);
+
+            count += 1;
+        }
+
+        if count == 0 {
+            return Ok(0);
+        }
+
+        // Upload particle data
+        let byte_offset = zone.particle_offset as u64 * PARTICLE_BYTES;
+        let byte_size = count as u64 * PARTICLE_BYTES;
+
+        let particle_bytes: &[u8] = bytemuck::cast_slice(&particles);
+        let mut staging =
+            buffer::create_upload_staging_buffer(ctx, byte_size, "pbmpm-rb-particle-staging")?;
+
+        {
+            let mapped = staging
+                .mapped_slice_mut()
+                .ok_or_else(|| anyhow::anyhow!("failed to map staging buffer"))?;
+            mapped[..particle_bytes.len()].copy_from_slice(particle_bytes);
+        }
+
+        ctx.execute_one_shot(|cmd| {
+            let region = vk::BufferCopy::default()
+                .src_offset(0)
+                .dst_offset(byte_offset)
+                .size(byte_size);
+            unsafe {
+                ctx.device.cmd_copy_buffer(
+                    cmd,
+                    staging.buffer,
+                    self.particle_buffer.buffer,
+                    &[region],
+                );
+            }
+        })?;
+
+        buffer::destroy_buffer(ctx, staging);
+        self.zones[zone_idx].particle_count = count;
+
+        // Compute zone-local center of mass
+        let mut com = [0.0f32; 3];
+        for p in &positions_local {
+            com[0] += p[0];
+            com[1] += p[1];
+            com[2] += p[2];
+        }
+        let n = positions_local.len() as f32;
+        com[0] /= n;
+        com[1] /= n;
+        com[2] /= n;
+
+        // Initialize rigid body state
+        let rb_state =
+            crate::rigid_body_tracker::RigidBodyState::new(&positions_local, com);
+        self.zones[zone_idx].rigid_body_state = Some(rb_state);
+
+        tracing::info!(
+            "PB-MPM: spawned {} rigid body particles for zone {} (com={:?})",
+            count,
+            zone_idx,
+            com,
+        );
+
+        Ok(count)
+    }
+
+    /// Upload modified particle data back to the GPU for a zone.
+    ///
+    /// Used after CPU-side shape matching to push updated positions/velocities.
+    pub fn upload_particles(
+        &self,
+        ctx: &VulkanContext,
+        zone_idx: usize,
+        particle_data: &[f32],
+    ) -> anyhow::Result<()> {
+        let zone = &self.zones[zone_idx];
+        let byte_offset = zone.particle_offset as u64 * PARTICLE_BYTES;
+        let byte_size = zone.particle_count as u64 * PARTICLE_BYTES;
+
+        if byte_size == 0 {
+            return Ok(());
+        }
+
+        let particle_bytes: &[u8] = bytemuck::cast_slice(particle_data);
+        let upload_size = (particle_bytes.len() as u64).min(byte_size);
+
+        let mut staging =
+            buffer::create_upload_staging_buffer(ctx, upload_size, "pbmpm-rb-upload-staging")?;
+
+        {
+            let mapped = staging
+                .mapped_slice_mut()
+                .ok_or_else(|| anyhow::anyhow!("failed to map staging buffer"))?;
+            mapped[..upload_size as usize].copy_from_slice(&particle_bytes[..upload_size as usize]);
+        }
+
+        ctx.execute_one_shot(|cmd| {
+            let region = vk::BufferCopy::default()
+                .src_offset(0)
+                .dst_offset(byte_offset)
+                .size(upload_size);
+            unsafe {
+                ctx.device.cmd_copy_buffer(
+                    cmd,
+                    staging.buffer,
+                    self.particle_buffer.buffer,
+                    &[region],
+                );
+            }
+        })?;
+
+        buffer::destroy_buffer(ctx, staging);
+        Ok(())
+    }
+
+    /// Step rigid body zones: integrate, shape match, check fracture/sleep.
+    ///
+    /// Called after [`step()`] each frame. Downloads particles for rigid body zones,
+    /// applies CPU-side shape matching, and uploads modified data back.
+    pub fn step_rigid_bodies(&mut self, ctx: &VulkanContext, dt: f32) {
+        let gravity = -196.0_f32; // scaled for voxel size (trap #17)
+
+        for zone_idx in 0..MAX_ZONES {
+            let zone = &self.zones[zone_idx];
+            if zone.state != ZoneState::Active || !zone.rigid_body {
+                continue;
+            }
+            if zone.particle_count == 0 || zone.rigid_body_state.is_none() {
+                continue;
+            }
+
+            // Download particles
+            let particle_data = match self.download_particles(ctx, zone_idx) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!("PB-MPM: failed to download particles for RB zone {}: {}", zone_idx, e);
+                    continue;
+                }
+            };
+
+            // Get mutable reference to rigid body state
+            let rb_state = self.zones[zone_idx].rigid_body_state.as_mut().expect("checked above");
+
+            // Integrate under gravity
+            crate::rigid_body_tracker::integrate(rb_state, dt, gravity);
+
+            // Check fracture
+            if crate::rigid_body_tracker::check_fracture(rb_state) {
+                tracing::info!("PB-MPM: rigid body zone {} fractured on impact", zone_idx);
+                let mut data = particle_data;
+                let pc = self.zones[zone_idx].particle_count;
+                crate::rigid_body_tracker::fracture_to_debris(&mut data, pc, 5.0);
+                if let Err(e) = self.upload_particles(ctx, zone_idx, &data) {
+                    tracing::warn!("PB-MPM: failed to upload fracture debris: {}", e);
+                }
+                self.zones[zone_idx].rigid_body = false;
+                self.zones[zone_idx].rigid_body_state = None;
+                continue;
+            }
+
+            // Apply shape matching
+            let mut data = particle_data;
+            let pc = self.zones[zone_idx].particle_count;
+            let rb_state = self.zones[zone_idx].rigid_body_state.as_ref().expect("checked above");
+            crate::rigid_body_tracker::apply_shape_matching(&mut data, pc, rb_state, 0.8);
+
+            // Upload modified particles
+            if let Err(e) = self.upload_particles(ctx, zone_idx, &data) {
+                tracing::warn!("PB-MPM: failed to upload shape-matched particles: {}", e);
+            }
+        }
+    }
+
+    /// Check zones for sleep using velocity readback.
+    ///
+    /// Every 10 frames, downloads particles and checks max velocity.
+    /// After 3 consecutive low-velocity checks, the zone is slept.
+    pub fn check_sleep_with_readback(&mut self, ctx: &VulkanContext) {
+        for zone_idx in 0..MAX_ZONES {
+            if self.zones[zone_idx].state != ZoneState::Active {
+                continue;
+            }
+            if self.zones[zone_idx].particle_count == 0 {
+                continue;
+            }
+
+            self.zones[zone_idx].frames_quiet += 1;
+
+            // Only check every 10 frames
+            if self.zones[zone_idx].frames_quiet % 10 != 0 {
+                continue;
+            }
+
+            let pc = self.zones[zone_idx].particle_count;
+            let particle_data = match self.download_particles(ctx, zone_idx) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            let max_vel_sq =
+                crate::rigid_body_tracker::compute_max_velocity_sq(&particle_data, pc);
+
+            if max_vel_sq < crate::rigid_body_tracker::SLEEP_VEL_THRESHOLD_SQ {
+                let consecutive = self.zones[zone_idx].frames_quiet / 10;
+                if consecutive >= 3 {
+                    tracing::info!(
+                        "PB-MPM: zone {} sleeping (max_vel_sq={:.3} below threshold)",
+                        zone_idx,
+                        max_vel_sq,
+                    );
+                    self.zones[zone_idx].state = ZoneState::Free;
+                    self.zones[zone_idx].rigid_body = false;
+                    self.zones[zone_idx].rigid_body_state = None;
+                    self.try_reclaim_buffers();
+                }
+            } else {
+                self.zones[zone_idx].frames_quiet = 0;
+            }
+        }
     }
 
     /// Number of active zones.
