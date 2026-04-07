@@ -10,10 +10,12 @@
 //! `spirv-builder` in `build.rs`.
 
 pub mod ca_simulation;
+pub mod island_detector;
 mod passes;
 pub mod pbmpm_zones;
 pub mod push_constants;
 mod readback;
+pub mod rigid_body_tracker;
 pub mod simulation;
 
 // ---------------------------------------------------------------------------

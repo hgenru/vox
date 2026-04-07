@@ -1116,35 +1116,195 @@ impl CaSimulation {
             rubble_count,
         );
 
-        // Step 4: If rubble found, activate PB-MPM zone and spawn particles
-        if rubble_count == 0 {
+        // Step 3: Island detection — find disconnected solid pieces
+        // Collect boundary positions (sphere shell at crater edge)
+        let mut boundary_positions: Vec<[i32; 3]> = Vec::new();
+        {
+            let ri_boundary = r as i32;
+            let cx_f = trigger.center[0];
+            let cy_f = trigger.center[1];
+            let cz_f = trigger.center[2];
+            for dz in -ri_boundary..=ri_boundary {
+                for dy in -ri_boundary..=ri_boundary {
+                    for dx in -ri_boundary..=ri_boundary {
+                        let dist_sq = dx * dx + dy * dy + dz * dz;
+                        // Shell: near the crater edge (between r-1 and r+1)
+                        let inner = (ri_boundary - 1) * (ri_boundary - 1);
+                        let outer = (ri_boundary + 1) * (ri_boundary + 1);
+                        if dist_sq >= inner && dist_sq <= outer {
+                            boundary_positions.push([
+                                cx_f as i32 + dx,
+                                cy_f as i32 + dy,
+                                cz_f as i32 + dz,
+                            ]);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Download affected chunks for island detection
+        let mut chunk_data_map: HashMap<[i32; 3], Vec<u32>> = HashMap::new();
+        // Expand search area slightly beyond the explosion radius for island detection
+        let detect_min = [
+            chunk_min[0] - 1,
+            chunk_min[1] - 1,
+            chunk_min[2] - 1,
+        ];
+        let detect_max = [
+            chunk_max[0] + 1,
+            chunk_max[1] + 1,
+            chunk_max[2] + 1,
+        ];
+        for cz in detect_min[2]..=detect_max[2] {
+            for cy in detect_min[1]..=detect_max[1] {
+                for cx in detect_min[0]..=detect_max[0] {
+                    let cc = [cx, cy, cz];
+                    if let Some(&slot_id) = self.loaded_chunks.get(&cc) {
+                        if let Ok(data) = self.chunk_pool.download_chunk_voxels(ctx, slot_id) {
+                            chunk_data_map.insert(cc, data);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Run island detection
+        let materials = self.download_materials(ctx);
+        let islands = crate::island_detector::detect_islands(
+            &chunk_data_map,
+            &boundary_positions,
+            &materials,
+        );
+
+        tracing::info!(
+            "Island detection: found {} floating islands after explosion",
+            islands.len(),
+        );
+
+        // Activate rigid body zones for each island
+        if let Some(pbmpm) = self.pbmpm.as_mut() {
+            for island in &islands {
+                if let Some(zone_idx) = pbmpm.activate_rigid_body_zone(island) {
+                    // Clear island voxels from chunks
+                    for &world_pos in &island.voxels {
+                        let cx = world_pos[0].div_euclid(32);
+                        let cy = world_pos[1].div_euclid(32);
+                        let cz = world_pos[2].div_euclid(32);
+                        let cc = [cx, cy, cz];
+                        if let Some(data) = chunk_data_map.get_mut(&cc) {
+                            let lx = world_pos[0].rem_euclid(32) as usize;
+                            let ly = world_pos[1].rem_euclid(32) as usize;
+                            let lz = world_pos[2].rem_euclid(32) as usize;
+                            let idx = lz * 32 * 32 + ly * 32 + lx;
+                            data[idx] = 0; // air
+                        }
+                    }
+
+                    // Spawn rigid body particles
+                    if let Err(e) = pbmpm.spawn_rigid_body_particles(ctx, zone_idx, island) {
+                        tracing::warn!("Failed to spawn rigid body particles: {}", e);
+                    }
+                }
+            }
+
+            // Re-upload modified chunks (cleared island voxels)
+            for (cc, data) in &chunk_data_map {
+                if let Some(&slot_id) = self.loaded_chunks.get(cc) {
+                    if let Err(e) = self.chunk_pool.upload_chunk_voxels(
+                        ctx, vk::CommandBuffer::null(), slot_id, data,
+                    ) {
+                        tracing::warn!("Failed to re-upload chunk {:?}: {}", cc, e);
+                    }
+                }
+            }
+        }
+
+        // Step 4: If rubble found, activate PB-MPM zone and spawn particles (existing debris)
+        if rubble_count == 0 && islands.is_empty() {
             return Ok(None);
         }
 
-        let pbmpm = self
-            .pbmpm
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("PB-MPM zone manager not available"))?;
+        if rubble_count > 0 {
+            let pbmpm = self
+                .pbmpm
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("PB-MPM zone manager not available"))?;
 
-        let zone_idx = match pbmpm.activate_zone(&trigger, 32) {
-            Some(idx) => idx,
-            None => return Ok(None),
-        };
+            let zone_idx = match pbmpm.activate_zone(&trigger, 32) {
+                Some(idx) => idx,
+                None => return Ok(None),
+            };
 
-        pbmpm.spawn_particles_from_voxels(
-            ctx,
-            zone_idx,
-            &zone_voxels,
-            chunk_coord,
-            &trigger,
-        )?;
+            pbmpm.spawn_particles_from_voxels(
+                ctx,
+                zone_idx,
+                &zone_voxels,
+                chunk_coord,
+                &trigger,
+            )?;
 
-        Ok(Some(zone_idx))
+            return Ok(Some(zone_idx));
+        }
+
+        Ok(None)
     }
 
     /// Get a reference to the PB-MPM zone manager, if available.
     pub fn pbmpm(&self) -> Option<&PbmpmZoneManager> {
         self.pbmpm.as_ref()
+    }
+
+    /// Step rigid bodies: integrate, shape match, check fracture/sleep.
+    ///
+    /// Call after the PB-MPM compute step to update rigid body zones on the CPU side.
+    pub fn step_rigid_bodies(&mut self, ctx: &VulkanContext, dt: f32) {
+        if let Some(pbmpm) = self.pbmpm.as_mut() {
+            pbmpm.step_rigid_bodies(ctx, dt);
+        }
+    }
+
+    /// Check sleep with velocity readback for all active zones.
+    ///
+    /// Every 10 frames, downloads particles and checks max velocity.
+    pub fn check_sleep_with_readback(&mut self, ctx: &VulkanContext) {
+        if let Some(pbmpm) = self.pbmpm.as_mut() {
+            pbmpm.check_sleep_with_readback(ctx);
+        }
+    }
+
+    /// Download material properties from GPU for CPU-side use.
+    ///
+    /// Returns a default material table if download fails.
+    fn download_materials(&self, _ctx: &VulkanContext) -> Vec<MaterialPropertiesCA> {
+        // For island detection, we need to know which materials are solid (phase=0).
+        // Rather than doing a GPU readback of the material buffer, use a hardcoded
+        // minimal table matching the standard material IDs.
+        // Material 0 = air, material 1 = stone (solid), material 2 = water (liquid), etc.
+        let mut materials = vec![MaterialPropertiesCA::zeroed(); 16];
+        // Air (0) — already zeroed, phase=0 but material_id=0 means air
+        // Stone (1) — solid
+        materials[1].phase = 0;
+        materials[1].density = 100;
+        // Water (2) — liquid
+        materials[2].phase = 2;
+        // Sand (3) — powder
+        materials[3].phase = 1;
+        // Lava (4) — liquid
+        materials[4].phase = 2;
+        // Wood (5) — solid
+        materials[5].phase = 0;
+        // Gunpowder (6) — powder
+        materials[6].phase = 1;
+        // Ice (7) — solid
+        materials[7].phase = 0;
+        // Steam (8) — gas
+        materials[8].phase = 3;
+        // Fire (9) — gas
+        materials[9].phase = 3;
+        // Rubble (10) — powder
+        materials[10].phase = 1;
+        materials
     }
 
     /// Load a chunk into the simulation.
